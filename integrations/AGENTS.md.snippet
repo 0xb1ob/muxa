@@ -1,0 +1,6 @@
+## muxa (tmux agent mail)
+
+CLIs in this tmux server can message each other with `muxa send <name> <text>`.
+Incoming mail arrives as a user turn tagged `[muxa]`. Do not poll. Do not ack.
+Reply only with a question, a result, or a blocker: `muxa send <name> "…"`.
+`muxa who` lists peers.

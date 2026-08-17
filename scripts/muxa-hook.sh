@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Project-scoped muxa hook entrypoint. Invoked by .claude/settings.json and
+# .cursor/hooks.json — never requires a global install.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PATH="$ROOT/bin:$PATH"
+if [ -n "${MUXA_HOOK_LOG:-}" ]; then
+  printf '%s pane=%s cwd=%s args=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "${TMUX_PANE:-}" \
+    "$PWD" \
+    "$*" >>"$MUXA_HOOK_LOG"
+fi
+exec "$ROOT/bin/muxa" hook "$@"

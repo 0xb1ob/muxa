@@ -1,0 +1,5 @@
+node_modules/
+.DS_Store
+*.log
+.lavish/
+.muxa-e2e-artifacts/

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      { "command": "muxa hook session-start --kind cursor" }
+    ],
+    "sessionEnd": [
+      { "command": "muxa hook session-end" }
+    ],
+    "preToolUse": [
+      { "command": "muxa hook busy" }
+    ],
+    "stop": [
+      { "command": "muxa hook stop --format cursor", "loop_limit": null }
+    ]
+  }
+}

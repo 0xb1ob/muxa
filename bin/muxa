@@ -1,0 +1,781 @@
+#!/usr/bin/env bash
+# muxa — tmux-native messaging for AI agent CLIs.
+# bash 3.2+ (macOS / Linux). Requires tmux. python3 used for JSON and spawn quoting.
+set -euo pipefail
+
+VERSION=0.2.0
+TMUX_BIN="${MUXA_TMUX_BIN:-tmux}"
+ENTER_DELAY="${MUXA_ENTER_DELAY:-0.15}"
+INJECT_MAX="${MUXA_INJECT_MAX:-8192}"
+
+usage() {
+  cat <<'EOF'
+muxa — message other AI CLIs in this tmux server
+
+  muxa register [--name NAME] [--id ID] [--parent NAME] [--kind claude|cursor|pi|generic] [--deliver hook|inject]
+  muxa spawn [--name NAME] [--kind KIND] [--split] -- COMMAND...
+  muxa who                          roster (tmux pane options)
+  muxa whoami                       this pane's alias
+  muxa id                           this pane's unique id
+  muxa parent                       this pane's parent alias (empty if root)
+  muxa children                     direct children of this pane
+  muxa send [--no-reply] NAME TEXT  queue + deliver (parent↔child, or root↔root)
+  muxa send --all TEXT              every reachable pane (not siblings)
+  muxa peek [NAME]                  unread mail
+  muxa deliver [NAME]               claim + inject now (escape hatch)
+  muxa state idle|busy|blocked      presence (hooks call this)
+  muxa hook EVENT [--format FMT] [--kind KIND]
+  muxa version
+
+Reachability: a parent may message its children; a child may message its
+parent; children cannot message each other. Roots (no parent) may message
+other roots. muxa send --all follows the same rule.
+
+Agents send with Bash. Incoming mail arrives as a user turn.
+Do not poll an inbox. Do not add MCP tools.
+EOF
+}
+
+die() { printf 'muxa: %s\n' "$*" >&2; exit 2; }
+forbid() { printf 'muxa: %s\n' "$*" >&2; exit 4; }
+
+need_tmux() {
+  [ -n "${TMUX:-}" ] || [ -n "${MUXA_TMUX_SOCKET:-}" ] || { printf 'muxa: not in tmux (hard requirement)\n' >&2; exit 3; }
+}
+
+tmux_do() {
+  if [ -n "${MUXA_TMUX_SOCKET:-}" ]; then
+    "$TMUX_BIN" -L "$MUXA_TMUX_SOCKET" "$@"
+  else
+    "$TMUX_BIN" "$@"
+  fi
+}
+
+consume_stdin() {
+  if [ ! -t 0 ]; then
+    cat >/dev/null
+  fi
+}
+
+runtime_root() {
+  local base pid
+  base="${XDG_RUNTIME_DIR:-/tmp/muxa-${UID:-$(id -u)}}"
+  pid="$(tmux_do list-sessions -F '#{pid}' 2>/dev/null | head -1)"
+  [ -n "$pid" ] || pid=0
+  printf '%s/muxa/%s' "$base" "$pid"
+}
+
+mail_box() {
+  printf '%s/mail/%s' "$(runtime_root)" "$1"
+}
+
+ensure_box() {
+  local box
+  box="$(mail_box "$1")"
+  mkdir -p "$box/tmp" "$box/new" "$box/cur"
+  printf '%s' "$box"
+}
+
+this_pane() {
+  if [ -n "${TMUX_PANE:-}" ]; then
+    printf '%s' "$TMUX_PANE"
+    return
+  fi
+  tmux_do display-message -p '#{pane_id}' 2>/dev/null || die "cannot detect pane; set TMUX_PANE"
+}
+
+pane_fmt() {
+  tmux_do display-message -t "$1" -p "$2" 2>/dev/null || true
+}
+
+set_pane_opt() {
+  tmux_do set-option -p -t "$1" "$2" "$3"
+}
+
+unset_pane_opt() {
+  tmux_do set-option -p -t "$1" -u "$2" 2>/dev/null || true
+}
+
+new_muxa_id() {
+  python3 -c 'import uuid; print(uuid.uuid4().hex[:12])'
+}
+
+# pane_id  name  id  parent  kind  state  deliver  where
+roster_lines() {
+  tmux_do list-panes -a -F $'#{pane_id}\t#{@muxa_name}\t#{@muxa_id}\t#{@muxa_parent}\t#{@muxa_kind}\t#{@muxa_state}\t#{@muxa_deliver}\t#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null \
+    | awk -F '\t' '$2 != "" { print }'
+}
+
+field() {
+  awk -F '\t' -v n="$1" '{ print $n }'
+}
+
+find_pane_by_name() {
+  local name="$1" line
+  while IFS= read -r line; do
+    [ "$(printf '%s\n' "$line" | field 2)" = "$name" ] || continue
+    printf '%s' "$(printf '%s\n' "$line" | field 1)"
+    return 0
+  done <<EOF
+$(roster_lines)
+EOF
+  return 1
+}
+
+name_parent() {
+  local pane
+  pane="$(find_pane_by_name "$1")" || { printf ''; return 0; }
+  pane_fmt "$pane" '#{@muxa_parent}'
+}
+
+name_taken_by_other() {
+  local name="$1" self="$2" line pane
+  while IFS= read -r line; do
+    [ "$(printf '%s\n' "$line" | field 2)" = "$name" ] || continue
+    pane="$(printf '%s\n' "$line" | field 1)"
+    if [ "$pane" != "$self" ]; then
+      return 0
+    fi
+  done <<EOF
+$(roster_lines)
+EOF
+  return 1
+}
+
+# Parent may talk to its children. Child may talk to its parent.
+# Children cannot talk to each other. Roots (no parent) may talk to other roots.
+can_send() {
+  local from="$1" to="$2"
+  local from_parent to_parent
+  [ -n "$from" ] && [ -n "$to" ] || return 1
+  [ "$from" != "$to" ] || return 1
+  from_parent="$(name_parent "$from")"
+  to_parent="$(name_parent "$to")"
+  if [ "$to_parent" = "$from" ]; then
+    return 0
+  fi
+  if [ "$from_parent" = "$to" ]; then
+    return 0
+  fi
+  if [ -z "$from_parent" ] && [ -z "$to_parent" ]; then
+    return 0
+  fi
+  return 1
+}
+
+detect_kind() {
+  local cmd
+  cmd="$(pane_fmt "$1" '#{pane_current_command}')"
+  case "$cmd" in
+    claude*) printf 'claude' ;;
+    agent|cursor-agent) printf 'cursor' ;;
+    omp|pi) printf 'pi' ;;
+    *) printf 'generic' ;;
+  esac
+}
+
+kind_from_command() {
+  case "$1" in
+    *claude*) printf 'claude' ;;
+    *cursor-agent*) printf 'cursor' ;;
+    */agent|*agent) printf 'cursor' ;;
+    *omp*) printf 'pi' ;;
+    *) printf 'generic' ;;
+  esac
+}
+
+default_deliver() {
+  case "$1" in
+    claude|cursor|pi) printf 'hook' ;;
+    *) printf 'inject' ;;
+  esac
+}
+
+sanitize_name() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-*//;s/-*$//'
+}
+
+default_name() {
+  local pane="$1" win
+  if [ -n "${MUXA_NAME:-}" ]; then
+    sanitize_name "$MUXA_NAME"
+    return
+  fi
+  win="$(pane_fmt "$pane" '#{window_name}')"
+  case "$win" in
+    ''|bash|zsh|sh|fish) sanitize_name "$(printf '%s' "$pane" | tr -d '%')" ;;
+    *) sanitize_name "$win" ;;
+  esac
+}
+
+parent_would_cycle() {
+  local child="$1" parent="$2" walk
+  [ -n "$parent" ] || return 1
+  [ "$child" != "$parent" ] || return 0
+  walk="$parent"
+  while [ -n "$walk" ]; do
+    [ "$walk" != "$child" ] || return 0
+    walk="$(name_parent "$walk")"
+  done
+  return 1
+}
+
+json_out() {
+  python3 -c '
+import json, sys
+text = sys.stdin.read()
+fmt = sys.argv[1]
+if fmt == "claude":
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "Stop",
+            "additionalContext": text,
+        }
+    }))
+elif fmt == "cursor":
+    print(json.dumps({"followup_message": text}))
+elif fmt == "pi":
+    print(json.dumps({"continue": True, "additionalContext": text}))
+else:
+    raise SystemExit(1)
+' "$1"
+}
+
+shlex_join() {
+  python3 -c 'import shlex, sys; print(shlex.join(sys.argv[1:]))' "$@"
+}
+
+format_one() {
+  local from="$1" flags="$2" body="$3"
+  printf '[muxa] from=%s\n' "$from"
+  printf '%s\n' "$body"
+  case " $flags " in
+    *" no-reply "*) printf 'Do not reply.\n' ;;
+    *) printf 'Reply: muxa send %s "…"  (skip acks unless asked)\n' "$from" ;;
+  esac
+}
+
+parse_header() {
+  awk -v k="$2" '
+    BEGIN { FS=": " }
+    /^$/ { exit }
+    $1==k { sub(/^[^:]+: /,""); print; exit }
+  ' "$1"
+}
+
+parse_body() {
+  awk 'found { print; next } /^$/ { found=1 }' "$1"
+}
+
+write_mail() {
+  local from="$1" to="$2" flags="$3" body="$4"
+  local box id tmp
+  box="$(ensure_box "$to")"
+  id="$(date +%s)-$$-$RANDOM"
+  tmp="$box/tmp/$id"
+  {
+    printf 'From: %s\n' "$from"
+    printf 'To: %s\n' "$to"
+    printf 'Id: %s\n' "$id"
+    printf 'Time: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'Flags: %s\n' "$flags"
+    printf '\n'
+    printf '%s' "$body"
+    printf '\n'
+  } >"$tmp"
+  mv "$tmp" "$box/new/$id"
+  printf '%s' "$id"
+}
+
+claim_new() {
+  local name="$1"
+  local box f base
+  box="$(ensure_box "$name")"
+  for f in "$box/new"/*; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    mv "$f" "$box/cur/$base" 2>/dev/null || continue
+    printf '%s\n' "$box/cur/$base"
+  done
+}
+
+payload_from_claimed() {
+  local list="$1"
+  local f from flags body n
+  n=0
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -f "$f" ] || continue
+    n=$((n + 1))
+  done <"$list"
+  [ "$n" -gt 0 ] || return 1
+  if [ "$n" -gt 1 ]; then
+    printf '[muxa] %s messages\n\n' "$n"
+  fi
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -f "$f" ] || continue
+    from="$(parse_header "$f" From)"
+    flags="$(parse_header "$f" Flags)"
+    body="$(parse_body "$f")"
+    if [ "$n" -gt 1 ]; then
+      printf -- '-- from=%s id=%s\n' "$from" "$(parse_header "$f" Id)"
+    fi
+    format_one "$from" "$flags" "$body"
+    printf '\n'
+  done <"$list"
+}
+
+inject_text() {
+  local pane="$1" text="$2"
+  local buf
+  buf="muxa-$$-$RANDOM"
+  printf '%s' "$text" | tmux_do load-buffer -b "$buf" -
+  tmux_do paste-buffer -p -d -b "$buf" -t "$pane"
+  sleep "$ENTER_DELAY"
+  tmux_do send-keys -t "$pane" Enter
+}
+
+deliver_list() {
+  local pane="$1" list="$2"
+  local text
+  text="$(payload_from_claimed "$list")" || return 1
+  if [ "${#text}" -gt "$INJECT_MAX" ]; then
+    printf 'muxa: body %s bytes exceeds inject limit (%s); claimed in cur/\n' "${#text}" "$INJECT_MAX" >&2
+    return 1
+  fi
+  inject_text "$pane" "$text"
+  set_pane_opt "$pane" @muxa_state busy
+}
+
+cmd_register() {
+  need_tmux
+  local pane name kind deliver parent id
+  pane="$(this_pane)"
+  name=""
+  kind=""
+  deliver=""
+  parent=""
+  id=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      --kind) kind="$2"; shift 2 ;;
+      --deliver) deliver="$2"; shift 2 ;;
+      --parent) parent="$2"; shift 2 ;;
+      --id) id="$2"; shift 2 ;;
+      *) die "register: unknown arg $1" ;;
+    esac
+  done
+  [ -n "$name" ] || name="$(default_name "$pane")"
+  [ -n "$name" ] || die "could not derive a name; pass --name"
+  [ -n "$kind" ] || kind="$(detect_kind "$pane")"
+  [ -n "$deliver" ] || deliver="$(default_deliver "$kind")"
+  [ -n "$parent" ] || parent="${MUXA_PARENT:-}"
+  [ -n "$parent" ] || parent="$(pane_fmt "$pane" '#{@muxa_parent}')"
+  [ -n "$id" ] || id="${MUXA_ID:-}"
+  [ -n "$id" ] || id="$(pane_fmt "$pane" '#{@muxa_id}')"
+  [ -n "$id" ] || id="$(new_muxa_id)"
+  case "$kind" in claude|cursor|pi|generic) ;; *) die "bad kind $kind" ;; esac
+  case "$deliver" in hook|inject) ;; *) die "bad deliver $deliver" ;; esac
+  if name_taken_by_other "$name" "$pane"; then
+    die "name '$name' already registered on another pane"
+  fi
+  if [ -n "$parent" ]; then
+    if [ "$parent" = "$name" ]; then
+      die "parent cannot be self"
+    fi
+    find_pane_by_name "$parent" >/dev/null || die "unknown parent '$parent'"
+    if parent_would_cycle "$name" "$parent"; then
+      die "parent '$parent' would create a cycle"
+    fi
+  fi
+  set_pane_opt "$pane" @muxa_name "$name"
+  set_pane_opt "$pane" @muxa_id "$id"
+  set_pane_opt "$pane" @muxa_kind "$kind"
+  set_pane_opt "$pane" @muxa_deliver "$deliver"
+  set_pane_opt "$pane" @muxa_state idle
+  if [ -n "$parent" ]; then
+    set_pane_opt "$pane" @muxa_parent "$parent"
+  else
+    unset_pane_opt "$pane" @muxa_parent
+  fi
+  ensure_box "$name" >/dev/null
+  if [ -n "$parent" ]; then
+    printf 'registered %s id=%s parent=%s kind=%s deliver=%s pane=%s\n' \
+      "$name" "$id" "$parent" "$kind" "$deliver" "$pane"
+  else
+    printf 'registered %s id=%s parent=- kind=%s deliver=%s pane=%s\n' \
+      "$name" "$id" "$kind" "$deliver" "$pane"
+  fi
+}
+
+cmd_who() {
+  need_tmux
+  printf '%-16s %-14s %-16s %-8s %-8s %-8s %-8s %s\n' NAME ID PARENT KIND STATE DELIVER PANE WHERE
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf '%-16s %-14s %-16s %-8s %-8s %-8s %-8s %s\n' \
+      "$(printf '%s\n' "$line" | field 2)" \
+      "$(printf '%s\n' "$line" | field 3)" \
+      "$(printf '%s\n' "$line" | field 4)" \
+      "$(printf '%s\n' "$line" | field 5)" \
+      "$(printf '%s\n' "$line" | field 6)" \
+      "$(printf '%s\n' "$line" | field 7)" \
+      "$(printf '%s\n' "$line" | field 1)" \
+      "$(printf '%s\n' "$line" | field 8)"
+  done <<EOF
+$(roster_lines)
+EOF
+}
+
+cmd_whoami() {
+  need_tmux
+  local n
+  n="$(pane_fmt "$(this_pane)" '#{@muxa_name}')"
+  [ -n "$n" ] || die "this pane is not registered (muxa register)"
+  printf '%s\n' "$n"
+}
+
+cmd_id() {
+  need_tmux
+  local n
+  n="$(pane_fmt "$(this_pane)" '#{@muxa_id}')"
+  [ -n "$n" ] || die "this pane is not registered (muxa register)"
+  printf '%s\n' "$n"
+}
+
+cmd_parent() {
+  need_tmux
+  printf '%s\n' "$(pane_fmt "$(this_pane)" '#{@muxa_parent}')"
+}
+
+cmd_children() {
+  need_tmux
+  local me line
+  me="$(pane_fmt "$(this_pane)" '#{@muxa_name}')"
+  [ -n "$me" ] || die "this pane is not registered (muxa register)"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if [ "$(printf '%s\n' "$line" | field 4)" = "$me" ]; then
+      printf '%s\n' "$(printf '%s\n' "$line" | field 2)"
+    fi
+  done <<EOF
+$(roster_lines)
+EOF
+}
+
+cmd_state() {
+  need_tmux
+  local st="${1:-}"
+  case "$st" in
+    idle|busy|blocked) ;;
+    *) die "state must be idle|busy|blocked" ;;
+  esac
+  set_pane_opt "$(this_pane)" @muxa_state "$st"
+}
+
+cmd_peek() {
+  need_tmux
+  local name="${1:-}" box f found from
+  from="$(pane_fmt "$(this_pane)" '#{@muxa_name}')"
+  [ -n "$name" ] || name="$from"
+  [ -n "$name" ] || die "pass a name or register this pane"
+  if [ "$name" != "$from" ]; then
+    can_send "$from" "$name" || forbid "cannot peek '$name' (not parent/child/root-peer)"
+  fi
+  box="$(ensure_box "$name")"
+  found=0
+  for f in "$box/new"/*; do
+    [ -f "$f" ] || continue
+    found=1
+    printf '%s\n' "--- $(basename "$f")"
+    cat "$f"
+    printf '\n'
+  done
+  [ "$found" -eq 1 ] || printf '(empty)\n'
+}
+
+kick_wait() {
+  local pane="$1" name="$2"
+  local i state list
+  i=0
+  list="$(runtime_root)/wait-$$-$RANDOM.list"
+  mkdir -p "$(runtime_root)"
+  while [ "$i" -lt 120 ]; do
+    state="$(pane_fmt "$pane" '#{@muxa_state}')"
+    if [ "$state" = "idle" ] || [ -z "$state" ]; then
+      claim_new "$name" >"$list" || true
+      if [ -s "$list" ]; then
+        deliver_list "$pane" "$list" || true
+      fi
+      rm -f "$list"
+      return 0
+    fi
+    sleep 0.5
+    i=$((i + 1))
+  done
+  rm -f "$list"
+}
+
+send_one() {
+  local from="$1" to="$2" flags="$3" body="$4"
+  local pane state deliver id list
+  if [ "$to" = "$from" ]; then
+    return 0
+  fi
+  pane="$(find_pane_by_name "$to")" || die "unknown agent '$to' — muxa who"
+  can_send "$from" "$to" || forbid "forbidden $from → $to (children cannot message siblings; only parent↔child or root↔root)"
+  id="$(write_mail "$from" "$to" "$flags" "$body")"
+  state="$(pane_fmt "$pane" '#{@muxa_state}')"
+  deliver="$(pane_fmt "$pane" '#{@muxa_deliver}')"
+  case "$state" in
+    busy|blocked)
+      if [ "$deliver" = "inject" ]; then
+        ( kick_wait "$pane" "$to" ) >/dev/null 2>&1 &
+        printf 'queued %s → %s id=%s (waiting for idle)\n' "$from" "$to" "$id"
+      else
+        printf 'queued %s → %s id=%s (hook will drain)\n' "$from" "$to" "$id"
+      fi
+      ;;
+    *)
+      list="$(runtime_root)/send-$$-$RANDOM.list"
+      mkdir -p "$(runtime_root)"
+      claim_new "$to" >"$list" || true
+      if [ -s "$list" ] && deliver_list "$pane" "$list"; then
+        printf 'delivered %s → %s id=%s\n' "$from" "$to" "$id"
+      else
+        printf 'queued %s → %s id=%s\n' "$from" "$to" "$id"
+      fi
+      rm -f "$list"
+      ;;
+  esac
+}
+
+cmd_send() {
+  need_tmux
+  local no_reply=0 all=0 to="" body="" from flags line dest n
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-reply) no_reply=1; shift ;;
+      --all) all=1; shift ;;
+      --) shift; break ;;
+      -*) die "send: unknown flag $1" ;;
+      *) break ;;
+    esac
+  done
+  if [ "$all" -eq 0 ]; then
+    [ $# -ge 1 ] || die "send: NAME required"
+    to="$1"
+    shift
+  fi
+  if [ $# -gt 0 ]; then
+    body="$*"
+  else
+    body="$(cat)"
+  fi
+  [ -n "$body" ] || die "send: empty body"
+  from="$(pane_fmt "$(this_pane)" '#{@muxa_name}')"
+  [ -n "$from" ] || from="${MUXA_NAME:-human}"
+  flags=""
+  [ "$no_reply" -eq 1 ] && flags="no-reply"
+
+  if [ "$all" -eq 1 ]; then
+    n=0
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      dest="$(printf '%s\n' "$line" | field 2)"
+      [ -n "$dest" ] || continue
+      can_send "$from" "$dest" || continue
+      send_one "$from" "$dest" "$flags" "$body"
+      n=$((n + 1))
+    done <<EOF
+$(roster_lines)
+EOF
+    if [ "$n" -eq 0 ]; then
+      printf 'no reachable peers\n'
+    fi
+    return 0
+  fi
+  send_one "$from" "$to" "$flags" "$body"
+}
+
+cmd_deliver() {
+  need_tmux
+  local name="${1:-}" pane list from
+  from="$(pane_fmt "$(this_pane)" '#{@muxa_name}')"
+  [ -n "$name" ] || name="$from"
+  [ -n "$name" ] || die "pass a name"
+  if [ -n "$from" ] && [ "$name" != "$from" ]; then
+    can_send "$from" "$name" || forbid "cannot deliver to '$name'"
+  fi
+  pane="$(find_pane_by_name "$name")" || die "unknown agent '$name'"
+  list="$(runtime_root)/deliver-$$.list"
+  mkdir -p "$(runtime_root)"
+  claim_new "$name" >"$list" || true
+  if [ ! -s "$list" ]; then
+    rm -f "$list"
+    printf 'no mail\n'
+    return 0
+  fi
+  deliver_list "$pane" "$list"
+  printf 'injected into %s\n' "$name"
+  rm -f "$list"
+}
+
+cmd_spawn() {
+  need_tmux
+  local pane name kind split=0 parent id cwd sess quoted child cmdpath
+  pane="$(this_pane)"
+  parent="$(pane_fmt "$pane" '#{@muxa_name}')"
+  [ -n "$parent" ] || die "spawn: register this pane first"
+  name=""
+  kind=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      --kind) kind="$2"; shift 2 ;;
+      --split) split=1; shift ;;
+      --) shift; break ;;
+      -*) die "spawn: unknown flag $1" ;;
+      *) break ;;
+    esac
+  done
+  [ $# -ge 1 ] || die "spawn: command required (muxa spawn --name worker -- cmd…)"
+  id="$(new_muxa_id)"
+  [ -n "$name" ] || name="child-$id"
+  name="$(sanitize_name "$name")"
+  [ -n "$kind" ] || kind="$(kind_from_command "$1")"
+  if name_taken_by_other "$name" ""; then
+    die "name '$name' already registered"
+  fi
+  cwd="$(pane_fmt "$pane" '#{pane_current_path}')"
+  sess="$(pane_fmt "$pane" '#{session_name}')"
+  quoted="$(shlex_join "$@")"
+  cmdpath="$(command -v muxa 2>/dev/null || true)"
+  [ -n "$cmdpath" ] || cmdpath="muxa"
+  local envcmd
+  envcmd="export PATH=$(shlex_join "$(dirname "$cmdpath"):${PATH}") MUXA_NAME=$(shlex_join "$name") MUXA_PARENT=$(shlex_join "$parent") MUXA_ID=$(shlex_join "$id")"
+  if [ -n "${MUXA_HOOK_LOG:-}" ]; then
+    envcmd="$envcmd MUXA_HOOK_LOG=$(shlex_join "$MUXA_HOOK_LOG")"
+  fi
+  if [ -n "${MUXA_BIN:-}" ]; then
+    envcmd="$envcmd MUXA_BIN=$(shlex_join "$MUXA_BIN")"
+  fi
+  envcmd="$envcmd; exec $quoted"
+  if [ "$split" -eq 1 ]; then
+    child="$(tmux_do split-window -t "$pane" -c "$cwd" -P -F '#{pane_id}' "$envcmd")"
+  else
+    child="$(tmux_do new-window -t "$sess" -n "$name" -c "$cwd" -P -F '#{pane_id}' "$envcmd")"
+  fi
+  [ -n "$child" ] || die "spawn: tmux did not return a pane id"
+  set_pane_opt "$child" @muxa_name "$name"
+  set_pane_opt "$child" @muxa_id "$id"
+  set_pane_opt "$child" @muxa_parent "$parent"
+  set_pane_opt "$child" @muxa_kind "$kind"
+  set_pane_opt "$child" @muxa_deliver "$(default_deliver "$kind")"
+  set_pane_opt "$child" @muxa_state idle
+  ensure_box "$name" >/dev/null
+  printf 'spawned %s id=%s parent=%s kind=%s pane=%s\n' "$name" "$id" "$parent" "$kind" "$child"
+}
+
+cmd_hook() {
+  need_tmux
+  local event="${1:-}"
+  shift || true
+  local format="claude" kind=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --format) format="$2"; shift 2 ;;
+      --kind) kind="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  consume_stdin
+  case "$event" in
+    session-start|SessionStart|sessionStart)
+      [ -n "$kind" ] || kind="$(detect_kind "$(this_pane)")"
+      if [ -n "${MUXA_NAME:-}" ] && [ -n "${MUXA_PARENT:-}" ]; then
+        cmd_register --name "$MUXA_NAME" --kind "$kind" --deliver hook --parent "$MUXA_PARENT" >/dev/null
+      elif [ -n "${MUXA_NAME:-}" ]; then
+        cmd_register --name "$MUXA_NAME" --kind "$kind" --deliver hook >/dev/null
+      elif [ -n "${MUXA_PARENT:-}" ]; then
+        cmd_register --kind "$kind" --deliver hook --parent "$MUXA_PARENT" >/dev/null
+      else
+        cmd_register --kind "$kind" --deliver hook >/dev/null
+      fi
+      cmd_state idle
+      ;;
+    session-end|SessionEnd|sessionEnd)
+      unset_pane_opt "$(this_pane)" @muxa_name
+      unset_pane_opt "$(this_pane)" @muxa_id
+      unset_pane_opt "$(this_pane)" @muxa_parent
+      unset_pane_opt "$(this_pane)" @muxa_kind
+      unset_pane_opt "$(this_pane)" @muxa_state
+      unset_pane_opt "$(this_pane)" @muxa_deliver
+      ;;
+    busy|PreToolUse|preToolUse)
+      cmd_state busy
+      ;;
+    blocked|PermissionRequest)
+      cmd_state blocked
+      ;;
+    idle)
+      cmd_state idle
+      ;;
+    stop|Stop|session_stop)
+      local name list payload
+      name="$(pane_fmt "$(this_pane)" '#{@muxa_name}')"
+      if [ -z "$name" ]; then
+        [ -n "$kind" ] || kind="$(detect_kind "$(this_pane)")"
+        cmd_register --kind "$kind" --deliver hook >/dev/null
+        name="$(pane_fmt "$(this_pane)" '#{@muxa_name}')"
+      fi
+      list="$(runtime_root)/hook-$$.list"
+      mkdir -p "$(runtime_root)"
+      claim_new "$name" >"$list" || true
+      if [ ! -s "$list" ]; then
+        rm -f "$list"
+        cmd_state idle
+        return 0
+      fi
+      cmd_state busy
+      payload="$(payload_from_claimed "$list")"
+      rm -f "$list"
+      printf '%s' "$payload" | json_out "$format"
+      ;;
+    *)
+      die "hook: unknown event $event"
+      ;;
+  esac
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+  case "$cmd" in
+    -h|--help|help) usage ;;
+    version|-v|--version) printf '%s\n' "$VERSION" ;;
+    register) cmd_register "$@" ;;
+    spawn) cmd_spawn "$@" ;;
+    who|ls|roster) cmd_who "$@" ;;
+    whoami) cmd_whoami "$@" ;;
+    id) cmd_id "$@" ;;
+    parent) cmd_parent "$@" ;;
+    children) cmd_children "$@" ;;
+    send) cmd_send "$@" ;;
+    peek) cmd_peek "$@" ;;
+    deliver) cmd_deliver "$@" ;;
+    state) cmd_state "$@" ;;
+    hook) cmd_hook "$@" ;;
+    kick-wait)
+      need_tmux
+      kick_wait "$1" "$2"
+      ;;
+    *)
+      usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "scripts/muxa-hook.sh session-start --kind cursor",
+        "timeout": 10
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "scripts/muxa-hook.sh session-end",
+        "timeout": 5
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": "scripts/muxa-hook.sh busy",
+        "timeout": 5
+      }
+    ],
+    "stop": [
+      {
+        "command": "scripts/muxa-hook.sh stop --format cursor",
+        "timeout": 10,
+        "loop_limit": null
+      }
+    ]
+  }
+}
