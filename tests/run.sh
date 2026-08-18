@@ -329,6 +329,36 @@ fi
 [ "$gen1_name" != "$gen2_name" ] && ok "nameless spawns get different names" \
   || bad "nameless spawns get different names" "both=$gen1_name"
 
+# --- spawn cwd: process PWD and --cwd, not parent pane path ---
+same_dir() {
+  python3 -c 'import os,sys; sys.exit(0 if os.path.realpath(sys.argv[1])==os.path.realpath(sys.argv[2]) else 1)' "$1" "$2"
+}
+spawn_wt="$tmpdir/spawn-wt"
+spawn_flag="$tmpdir/spawn-flag"
+mkdir -p "$spawn_wt" "$spawn_flag"
+# Parent pane stays at its original path; only the muxa process cds.
+from_pwd="$(cd "$spawn_wt" && muxa_as "$bob_pane" spawn --name frompwd -- sleep 3600)"
+assert_contains "$from_pwd" "cwd=$spawn_wt" "spawn stdout includes process PWD"
+frompwd_pane="$(printf '%s\n' "$from_pwd" | spawn_pane_id)"
+frompwd_cwd="$(tmux -L "$SOCK" display-message -t "$frompwd_pane" -p '#{pane_current_path}')"
+same_dir "$frompwd_cwd" "$spawn_wt" && ok "spawn from cd'd PWD starts child there" \
+  || bad "spawn from cd'd PWD starts child there" "want=$spawn_wt got=$frompwd_cwd"
+
+from_flag="$(muxa_as "$bob_pane" spawn --cwd "$spawn_flag" --name fromflag -- sleep 3600)"
+fromflag_abs="$(cd "$spawn_flag" && pwd)"
+assert_contains "$from_flag" "cwd=$fromflag_abs" "spawn --cwd in stdout"
+fromflag_pane="$(printf '%s\n' "$from_flag" | spawn_pane_id)"
+fromflag_cwd="$(tmux -L "$SOCK" display-message -t "$fromflag_pane" -p '#{pane_current_path}')"
+same_dir "$fromflag_cwd" "$spawn_flag" && ok "spawn --cwd starts child there" \
+  || bad "spawn --cwd starts child there" "want=$spawn_flag got=$fromflag_cwd"
+
+set +e
+muxa_as "$bob_pane" spawn --cwd "$tmpdir/no-such-cwd" --name badcwd -- sleep 3600 >/dev/null 2>&1
+cwd_code=$?
+set -e
+[ "$cwd_code" -eq 2 ] && ok "spawn --cwd missing dir exits 2" \
+  || bad "spawn --cwd missing dir exits 2" "exit=$cwd_code"
+
 # --- CLI session id mapping ---
 printf '%s' '{"session_id":"cli-sess-123"}' | muxa_as "$alice_pane" hook session-start --kind generic
 sid="$(tmux -L "$SOCK" display-message -p -t "$alice_pane" '#{@muxa_session}')"
