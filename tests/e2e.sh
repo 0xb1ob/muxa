@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # End-to-end: Claude Code (parent) spawns Cursor Agent + Oh My Pi (children).
-# Project-scoped hooks only. Usage: tests/e2e.sh
+# Project-scoped hooks only. Usage: tests/e2e.sh [--capture-fixtures]
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CAPTURE_FIXTURES=0
+if [ "${1:-}" = "--capture-fixtures" ]; then
+  CAPTURE_FIXTURES=1
+  shift
+fi
 CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude)}"
 AGENT_BIN="${AGENT_BIN:-$(command -v agent)}"
 OMP_BIN="${OMP_BIN:-$(command -v omp)}"
@@ -65,6 +70,16 @@ dump() {
   pane_text "$(pane_by_name cursor)" >"$ART/cursor.pane" 2>/dev/null || true
   pane_text "$(pane_by_name pi)" >"$ART/pi.pane" 2>/dev/null || true
   cp "$HOOK_LOG" "$ART/hooks.log.copy" 2>/dev/null || true
+  if [ "${CAPTURE_FIXTURES:-0}" = "1" ]; then
+    mkdir -p "$ROOT/tests/fixtures/composer"
+    local n p
+    for n in claude cursor pi; do
+      p="$(pane_by_name "$n")"
+      [ -n "$p" ] || continue
+      tmux_e capture-pane -e -p -t "$p" \
+        >"$ROOT/tests/fixtures/composer/${n}-harvest.ansi" 2>/dev/null || true
+    done
+  fi
 }
 
 dismiss_named() {
@@ -283,6 +298,32 @@ else
   ok "A-path unread skipped"
   ok "A-path no-paste skipped"
 fi
+
+# B-live: copy-mode must queue, must not ghost-flush, deliver after cancel.
+b_live="MUXA_B_LIVE_$TOKEN"
+tmux_e copy-mode -t "$cursor_pane" 2>/dev/null || true
+sent="$(muxa_as "$claude_pane" send --no-reply cursor "$b_live" 2>&1 || true)"
+if printf '%s\n' "$sent" | grep -q queued; then
+  ok "B-live: copy-mode send queues"
+else
+  bad "B-live: copy-mode send queues" "$sent"
+fi
+sleep 1
+if pane_text "$cursor_pane" | grep -Fq "$b_live"; then
+  bad "B-live: copy-mode does not show the body" "$(pane_text "$cursor_pane" | tail -n 20)"
+else
+  ok "B-live: copy-mode does not show the body"
+fi
+tmux_e send-keys -t "$cursor_pane" -X cancel 2>/dev/null || true
+sleep 1
+if pane_text "$cursor_pane" | grep -Fq "$b_live"; then
+  bad "B-live: no ghost flush after leaving copy-mode" "$(pane_text "$cursor_pane" | tail -n 20)"
+else
+  ok "B-live: no ghost flush after leaving copy-mode"
+fi
+muxa_as "$claude_pane" deliver --force cursor >/dev/null 2>&1 || muxa_as "$claude_pane" deliver cursor >/dev/null 2>&1 || true
+wait_pane_has "$cursor_pane" "$b_live" 15 && ok "B-live: deliver lands after copy-mode" \
+  || bad "B-live: deliver lands after copy-mode" "$(pane_text "$cursor_pane" | tail -n 20)"
 
 # --- LLM: type into the parent pane (roots cannot muxa-send to each other) ---
 wait_state claude idle 60 || true

@@ -167,10 +167,22 @@ send(name, body):
       mark unread; return queued        # any state, including idle
   if pane.state in (busy, blocked):
       spawn waiter (inject panes only); return queued
-  if not pane_ready(pane):              # dead | copy-mode | generic alt-screen
+  if not pane_ready(pane):              # dead | copy-mode | generic alt-screen | composer
       mark unread; return queued
   claim + inject; verify; on failure unclaim
 ```
+
+`pane_ready` for `claude`/`cursor`/`pi` also requires two composer
+captures ~250 ms apart that both verdict `empty`. Known strings
+(`ctrl+c to stop`, `esc to interrupt`, braille spinners) may only raise
+caution (`pending`); an unrecognised layout is `unknown`. `kind=generic`
+skips composer parsing and relies on the cheap tmux facts so plain-shell
+injection keeps working. A hook pane whose `@muxa_hook_ok` is not yet
+set also skips composer so splash/unknown cannot deadlock the first brief.
+
+`muxa deliver NAME` runs the same prechecks and exits 1 if the pane is
+not ready. `muxa deliver --force NAME` skips them (human override) and
+prints a warning.
 
 The first message to a freshly spawned hook pane is still injected.
 That is intentional: `cmd_spawn` marks `deliver=hook` and `state=idle`
@@ -240,6 +252,7 @@ muxa session
 muxa parent
 muxa children
 muxa spawn [--name worker] [--cwd DIR] [--window] -- command…
+muxa deliver [--force] [name]
 ```
 
 Exit 0 on queued or delivered. Exit 2 if the name is unknown (including

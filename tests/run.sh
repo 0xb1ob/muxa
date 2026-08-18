@@ -446,6 +446,30 @@ muxa_as "$alice_pane" register --name alice --kind generic --deliver inject --pa
 muxa_as "$alice_pane" state idle
 find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
 
+# --- deliver prechecks vs --force (Q3) ---
+: >"$alice_out"
+tmux -L "$SOCK" copy-mode -t "$alice_pane"
+muxa_as "$bob_pane" send alice 'FORCE_BODY' >/dev/null
+set +e
+del_plain="$(muxa_as "$bob_pane" deliver alice 2>&1)"
+del_rc=$?
+set -e
+[ "$del_rc" -ne 0 ] && ok "deliver in copy-mode exits non-zero" \
+  || bad "deliver in copy-mode exits non-zero" "exit=$del_rc out=$del_plain"
+assert_contains "$del_plain" "not ready to receive" "deliver in copy-mode prints a reason"
+got="$(cat "$alice_out" 2>/dev/null || true)"
+case "$got" in
+  *FORCE_BODY*) bad "plain deliver does not paste in copy-mode" "got: $got" ;;
+  *) ok "plain deliver does not paste in copy-mode" ;;
+esac
+del_force="$(muxa_as "$bob_pane" deliver --force alice 2>&1)"
+assert_contains "$del_force" "skipping readiness prechecks" "deliver --force warns"
+assert_contains "$del_force" "injected into alice" "deliver --force injects"
+sleep 0.2
+got="$(cat "$alice_out" 2>/dev/null || true)"
+assert_contains "$got" "FORCE_BODY" "deliver --force lands the body"
+tmux -L "$SOCK" send-keys -t "$alice_pane" -X cancel 2>/dev/null || true
+
 # --- unknown target ---
 err="$(muxa_as "$bob_pane" send nobody hi 2>&1 || true)"
 assert_contains "$err" "unknown agent" "unknown name errors"

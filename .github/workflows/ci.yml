@@ -15,4 +15,4 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux python3 zsh
       - name: Run tests
-        run: tests/run.sh && tests/tmux-facts.sh
+        run: tests/run.sh && tests/tmux-facts.sh && tests/composer.sh

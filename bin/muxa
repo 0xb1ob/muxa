@@ -11,6 +11,7 @@ CLAIM_TTL="${MUXA_CLAIM_TTL:-120}"
 REDELIVER_MAX="${MUXA_REDELIVER_MAX:-3}"
 BATCH_MAX="${MUXA_BATCH_MAX:-8}"
 KICK_WAIT_MAX="${MUXA_KICK_WAIT_MAX:-120}"
+COMPOSER_SETTLE="${MUXA_COMPOSER_SETTLE:-0.25}"
 
 usage() {
   cat <<'EOF'
@@ -31,7 +32,7 @@ muxa — message other AI CLIs in this tmux server
   muxa send [--no-reply] NAME TEXT  queue + deliver (parent↔child only)
   muxa send --all TEXT              every parent/child pane (not siblings or other roots)
   muxa peek [NAME]                  unread mail (new/) and claimed-but-unconfirmed (cur/)
-  muxa deliver [NAME]               claim + inject now (escape hatch)
+  muxa deliver [--force] [NAME]     claim + inject now (escape hatch; --force skips prechecks)
   muxa state idle|busy|blocked      presence (hooks call this)
   muxa hook EVENT [--format FMT] [--kind KIND]
   muxa version
@@ -707,10 +708,143 @@ payload_from_claimed() {
 }
 
 # empty | pending | unknown — fail closed: anything unrecognised is unknown.
-# PR1: cheap tmux facts only (dead / copy-mode / generic alt-screen).
-# Composer parsing is a later layer and must not be required here.
-pane_inject_verdict() {
+# kind=generic skips composer parsing (Q2) and relies on the cheap tmux facts.
+composer_verdict_from_stdin() {
+  MUXA_KIND="${1:-generic}" python3 -c '
+import os, re, sys
+
+SGR = re.compile(r"\x1b\[([0-9;]*)m")
+
+def default_state():
+    return {"dim": False, "rev": False, "bg": False, "fg": False}
+
+def apply_sgr(state, raw):
+    nums = []
+    for p in (raw.split(";") if raw else ["0"]):
+        try:
+            nums.append(int(p) if p else 0)
+        except ValueError:
+            nums.append(0)
+    if not nums:
+        nums = [0]
+    i = 0
+    while i < len(nums):
+        n = nums[i]
+        if n == 0:
+            state = default_state()
+        elif n == 2:
+            state["dim"] = True
+        elif n == 7:
+            state["rev"] = True
+        elif n == 22:
+            state["dim"] = False
+        elif n == 27:
+            state["rev"] = False
+        elif n in (38, 48):
+            if n == 48:
+                state["bg"] = True
+            else:
+                state["fg"] = True
+            if i + 1 < len(nums) and nums[i + 1] == 5:
+                i += 2
+            elif i + 1 < len(nums) and nums[i + 1] == 2:
+                i += 4
+        elif n == 49:
+            state["bg"] = False
+        elif n == 39:
+            state["fg"] = False
+        i += 1
+    return state
+
+def runs(line):
+    out = []
+    pos = 0
+    state = default_state()
+    for m in SGR.finditer(line):
+        if m.start() > pos:
+            out.append((dict(state), line[pos:m.start()]))
+        state = apply_sgr(state, m.group(1))
+        pos = m.end()
+    if pos < len(line):
+        out.append((dict(state), line[pos:]))
+    return out
+
+def has_bg(st):
+    return bool(st.get("bg"))
+
+def has_fg(st):
+    return bool(st.get("fg"))
+
+def printable_len(s):
+    return sum(1 for ch in s if ch.isprintable() and not ch.isspace())
+
+try:
+    rows = sys.stdin.read().split("\n")
+    tail = "\n".join(rows[-8:])
+    if "ctrl+c to stop" in tail or "esc to interrupt" in tail:
+        print("pending")
+        raise SystemExit
+    if any(0x2800 <= ord(ch) <= 0x28FF for ch in tail):
+        print("pending")
+        raise SystemExit
+
+    candidates = []
+    for i in range(len(rows) - 1, -1, -1):
+        segs = runs(rows[i])
+        if not any(has_bg(st) for st, _ in segs):
+            continue
+        above_ok = i > 0 and any(has_fg(st) for st, _ in runs(rows[i - 1]))
+        below_ok = i + 1 < len(rows) and any(has_fg(st) for st, _ in runs(rows[i + 1]))
+        candidates.append((i, above_ok and below_ok))
+    composer = None
+    for i, bordered in candidates:
+        if bordered:
+            composer = i
+            break
+    if composer is None and candidates:
+        composer = candidates[0][0]
+    if composer is None:
+        print("unknown")
+        raise SystemExit
+
+    typed = []
+    for st, text in runs(rows[composer]):
+        if st.get("dim") or st.get("rev"):
+            continue
+        typed.append(text)
+    body = "".join(typed)
+    body = body.strip().lstrip("\u2192>❯$ ").strip()
+    if printable_len(body) < 2:
+        print("empty")
+    else:
+        print("pending")
+except SystemExit:
+    raise
+except Exception:
+    print("unknown")
+'
+}
+
+pane_composer_state() {
   local pane="$1" kind="$2"
+  tmux_do capture-pane -e -p -t "$pane" 2>/dev/null \
+    | composer_verdict_from_stdin "$kind"
+}
+
+cmd_composer_verdict() {
+  local kind="generic"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --kind) kind="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  composer_verdict_from_stdin "$kind"
+}
+
+# empty | pending | unknown — fail closed: anything unrecognised is unknown.
+pane_inject_verdict() {
+  local pane="$1" kind="$2" v
   [ "$(pane_fmt "$pane" '#{pane_dead}')" = "1" ] && { printf 'unknown'; return; }
   # A pane in copy-mode accepts paste-buffer with exit 0, never delivers it to
   # the app, and flushes it (minus the Enter) when the mode exits. Verified.
@@ -718,13 +852,46 @@ pane_inject_verdict() {
   if [ "$kind" = "generic" ] && [ "$(pane_fmt "$pane" '#{alternate_on}')" = "1" ]; then
     printf 'unknown'; return
   fi
+  # Q2: generic panes skip composer parsing and rely on the cheap prechecks.
+  case "$kind" in
+    claude|cursor|pi)
+      if [ "${MUXA_COMPOSER_CHECK:-1}" != "0" ]; then
+        # Bootstrap inject (hook pane, drain path not yet proven) must not
+        # wait for a recognised composer — splash/unknown would deadlock E4.
+        if [ "$(pane_fmt "$pane" '#{@muxa_deliver}')" = "hook" ] && \
+           [ "$(pane_fmt "$pane" '#{@muxa_hook_ok}')" != "1" ]; then
+          printf 'empty'
+          return
+        fi
+        v="$(pane_composer_state "$pane" "$kind")" || v=unknown
+        [ -n "$v" ] || v=unknown
+        printf '%s' "$v"
+        return
+      fi
+      ;;
+  esac
   printf 'empty'
 }
 
+# Two agreeing reads, COMPOSER_SETTLE apart, both empty — only when composer
+# parsing is in play. Generic panes skip the settle delay (Q2).
 pane_inject_ready() {
-  local pane="$1" kind="$2" a
+  local pane="$1" kind="$2" a b deliver hook_ok
   a="$(pane_inject_verdict "$pane" "$kind")"
   [ "$a" = "empty" ] || { printf '%s' "$a"; return 1; }
+  case "$kind" in
+    claude|cursor|pi)
+      if [ "${MUXA_COMPOSER_CHECK:-1}" != "0" ]; then
+        deliver="$(pane_fmt "$pane" '#{@muxa_deliver}')"
+        hook_ok="$(pane_fmt "$pane" '#{@muxa_hook_ok}')"
+        if [ "$deliver" != "hook" ] || [ "$hook_ok" = "1" ]; then
+          sleep "$COMPOSER_SETTLE"
+          b="$(pane_inject_verdict "$pane" "$kind")"
+          [ "$b" = "empty" ] || { printf '%s' "$b"; return 1; }
+        fi
+      fi
+      ;;
+  esac
   printf 'empty'
 }
 
@@ -1202,7 +1369,16 @@ EOF
 
 cmd_deliver() {
   need_tmux
-  local name="${1:-}" pane list from lock
+  local name="" pane list from lock force=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force) force=1; shift ;;
+      --) shift; break ;;
+      -*) die "deliver: unknown flag $1" ;;
+      *) break ;;
+    esac
+  done
+  name="${1:-}"
   from="$(pane_fmt "$(this_pane)" '#{@muxa_name}')"
   [ -n "$name" ] || name="$from"
   [ -n "$name" ] || die "pass a name"
@@ -1210,6 +1386,10 @@ cmd_deliver() {
     can_send "$from" "$name" || forbid "cannot deliver to '$name'"
   fi
   pane="$(find_pane_by_name "$name")" || die "unknown agent '$name'"
+  if [ "$force" -eq 1 ]; then
+    MUXA_FORCE_INJECT=1
+    printf 'muxa: deliver --force: skipping readiness prechecks\n' >&2
+  fi
   list="$(runtime_root)/deliver-$$.list"
   lock="$(kick_wait_lock "$pane")"
   mkdir -p "$(runtime_root)"
@@ -1768,6 +1948,9 @@ main() {
     kick-wait)
       need_tmux
       kick_wait "$1" "$2"
+      ;;
+    __composer-verdict)
+      cmd_composer_verdict "$@"
       ;;
     *)
       usage >&2
