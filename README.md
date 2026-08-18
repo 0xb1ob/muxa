@@ -54,19 +54,31 @@ Spec: [SPEC.md](SPEC.md).
 
 ## Install
 
-Project-scoped (preferred): this repo already ships
+Copy-paste on a fresh machine (needs `git` + `curl`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/0xb1ob/muxa/main/install.sh | bash
+```
+
+That clones this repo into `~/.muxa`, symlinks `muxa` onto `~/.local/bin`,
+merges user-level hooks, and copies the **muxa-parent** / **muxa-worker**
+skills to `~/.cursor/skills`, `~/.claude/skills`, and `~/.agents/skills`.
+Re-run the same curl to `git pull` `~/.muxa` and refresh skills/hooks.
+
+From a git checkout (development):
+
+```bash
+./install.sh          # install from this tree; does not clone
+tests/run.sh          # maildir / inject unit tests
+tests/e2e.sh          # real Claude Code + Cursor Agent + Oh My Pi in tmux
+```
+
+This repo also ships project-scoped hooks for working on muxa itself:
 
 - `.claude/settings.json` → `scripts/muxa-hook.sh`
 - `.cursor/hooks.json` → `scripts/muxa-hook.sh`
 
-No global `~/.claude` / `~/.cursor` install. Put `bin/` on `PATH` inside the
-tmux panes (or use `examples/agents.sh`).
-
-```bash
-./install.sh          # optional: user-level hooks + ~/.local/bin
-tests/run.sh          # maildir / inject unit tests
-tests/e2e.sh          # real Claude Code + Cursor Agent + Oh My Pi in tmux
-```
+Put `bin/` on `PATH` inside the tmux panes (or use `examples/agents.sh`).
 
 ```bash
 tmux new -s agents
@@ -83,10 +95,17 @@ Hooks register the pane on session start. Confirm:
 muxa who
 ```
 
-## Agent rules (also in the skill)
+## Agent skills
 
-Silence is default. Reply only with a question, a result, or a blocker.
-Never ack. `--no-reply` for status dumps.
+| Skill | Who loads it |
+| --- | --- |
+| [muxa-parent](skills/muxa-parent/SKILL.md) | Orchestrator pane: spawn, brief, wait |
+| [muxa-worker](skills/muxa-worker/SKILL.md) | Spawned pane: do the job, reply to parent |
+
+The parent's first `muxa send` names `muxa-worker` and inlines the generic
+rules so a worker in a repo with no project skills still behaves. Silence
+is default. Reply only with a question, a result, or a blocker. Never ack.
+`--no-reply` for status dumps.
 
 ## Commands
 

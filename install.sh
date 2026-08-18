@@ -1,21 +1,93 @@
 #!/usr/bin/env bash
 # Install muxa onto PATH and wire Claude Code / Cursor / Oh My Pi user hooks.
+#
+# Fresh machine (copy-paste):
+#   curl -fsSL https://raw.githubusercontent.com/0xb1ob/muxa/main/install.sh | bash
+#
+# That clones this repo into ~/.muxa, then continues. From a checkout:
+#   ./install.sh
+#
+# Env: MUXA_HOME (default ~/.muxa) MUXA_REPO MUXA_REF MUXA_BIN_DIR
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
-BIN="${MUXA_BIN_DIR:-$HOME/.local/bin}"
+MUXA_REPO="${MUXA_REPO:-https://github.com/0xb1ob/muxa.git}"
+MUXA_REF="${MUXA_REF:-main}"
 MUXA_HOME="${MUXA_HOME:-$HOME/.muxa}"
+BIN="${MUXA_BIN_DIR:-$HOME/.local/bin}"
 
 die() { printf 'muxa-install: %s\n' "$*" >&2; exit 1; }
 
-mkdir -p "$BIN" "$MUXA_HOME"
+is_muxa_tree() {
+  [ -n "${1:-}" ] && [ -f "$1/bin/muxa" ] && [ -f "$1/install.sh" ] && [ -d "$1/skills/muxa-parent" ]
+}
+
+# True if dir is empty or only files the previous installer left behind.
+is_stale_muxa_home() {
+  local f
+  [ -d "$1" ] || return 1
+  [ ! -d "$1/.git" ] || return 1
+  for f in "$1"/* "$1"/.[!.]*; do
+    [ -e "$f" ] || continue
+    case "$(basename "$f")" in
+      AGENTS.md.snippet|.DS_Store) ;;
+      *) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+# Directory containing this script, if it is a real file (not `curl | bash`).
+script_dir() {
+  local src="${BASH_SOURCE[0]:-}"
+  [ -n "$src" ] && [ -f "$src" ] || return 1
+  ( cd "$(dirname "$src")" && pwd )
+}
+
+ensure_muxa_home() {
+  command -v git >/dev/null 2>&1 || die "git is required to install muxa"
+  export GIT_TERMINAL_PROMPT=0
+
+  if is_muxa_tree "$MUXA_HOME" && [ -d "$MUXA_HOME/.git" ]; then
+    printf 'muxa-install: updating %s (%s)\n' "$MUXA_HOME" "$MUXA_REF"
+    git -C "$MUXA_HOME" fetch --depth 1 origin "$MUXA_REF"
+    git -C "$MUXA_HOME" checkout -q "$MUXA_REF"
+    git -C "$MUXA_HOME" merge --ff-only "origin/$MUXA_REF"
+    return 0
+  fi
+
+  if [ -e "$MUXA_HOME" ]; then
+    if is_stale_muxa_home "$MUXA_HOME"; then
+      rm -rf "$MUXA_HOME"
+    else
+      die "$MUXA_HOME exists and is not a muxa checkout; move it aside"
+    fi
+  fi
+
+  printf 'muxa-install: cloning %s (%s) -> %s\n' "$MUXA_REPO" "$MUXA_REF" "$MUXA_HOME"
+  git clone --depth 1 --branch "$MUXA_REF" "$MUXA_REPO" "$MUXA_HOME"
+}
+
+HERE="$(script_dir || true)"
+if is_muxa_tree "$HERE"; then
+  ROOT="$HERE"
+else
+  ensure_muxa_home
+  exec "$MUXA_HOME/install.sh"
+fi
+
+mkdir -p "$BIN"
 ln -sfn "$ROOT/bin/muxa" "$BIN/muxa"
 chmod +x "$ROOT/bin/muxa" "$ROOT/install.sh" "$ROOT/tests/run.sh"
 
 # Skills: on-demand, not MCP. Progressive disclosure = fewer tokens.
-mkdir -p "$HOME/.cursor/skills/muxa" "$HOME/.claude/skills/muxa"
-cp "$ROOT/skills/muxa/SKILL.md" "$HOME/.cursor/skills/muxa/SKILL.md"
-cp "$ROOT/skills/muxa/SKILL.md" "$HOME/.claude/skills/muxa/SKILL.md"
+# Global so any project can load muxa-parent / muxa-worker.
+rm -rf "$HOME/.cursor/skills/muxa" "$HOME/.claude/skills/muxa" "$HOME/.agents/skills/muxa"
+for skill in muxa-parent muxa-worker; do
+  for dest in "$HOME/.cursor/skills/$skill" "$HOME/.claude/skills/$skill" "$HOME/.agents/skills/$skill"; do
+    mkdir -p "$dest"
+    cp "$ROOT/skills/$skill/SKILL.md" "$dest/SKILL.md"
+  done
+done
 
 mkdir -p "$HOME/.claude/commands"
 cp "$ROOT/integrations/claude/muxa.md" "$HOME/.claude/commands/muxa.md"
@@ -112,10 +184,8 @@ for dest in "$HOME/.omp/agent/extensions" "$HOME/.pi/agent/extensions"; do
   echo "installed pi extension -> $dest/muxa.ts"
 done
 
-# Optional one-line reminder for AGENTS.md / CLAUDE.md — do not auto-append to repos.
-cp "$ROOT/integrations/AGENTS.md.snippet" "$MUXA_HOME/AGENTS.md.snippet"
-
 echo
-echo "muxa $("$BIN/muxa" version) -> $BIN/muxa"
+echo "muxa $("$BIN/muxa" version) -> $BIN/muxa  (repo $ROOT)"
+echo "Skills muxa-parent / muxa-worker -> ~/.cursor/skills, ~/.claude/skills, ~/.agents/skills"
 echo "Put $BIN on PATH if needed. Start each CLI inside tmux, then: muxa who"
-echo "Optional: paste $MUXA_HOME/AGENTS.md.snippet into a project AGENTS.md"
+echo "Optional: paste $ROOT/integrations/AGENTS.md.snippet into a project AGENTS.md"

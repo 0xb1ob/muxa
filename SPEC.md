@@ -168,6 +168,8 @@ Silence is the default. Reply only with a question, a result, or a
 blocker. Never ack. Stop after two back-and-forths unless the thread is
 still producing decisions. Use `--no-reply` for status dumps.
 
+Role instructions live in the **muxa-parent** and **muxa-worker** skills.
+
 ## Trust
 
 Every pane on the tmux server is fully trusted. Injecting into a pane is

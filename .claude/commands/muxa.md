@@ -1,5 +1,7 @@
 Send a message to another AI CLI in this tmux server.
 
+Orchestration: skill **muxa-parent**. Spawned workers: skill **muxa-worker**.
+
 Usage: `/muxa <name> <text>` or `/muxa who`
 
 Run **one** Bash command:
