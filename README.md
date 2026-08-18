@@ -106,7 +106,8 @@ muxa who
 
 The parent's first `muxa send` names `muxa-worker` and inlines the generic
 rules so a worker in a repo with no project skills still behaves. For a
-coding job, **muxa-orchestrator** adds the worktree / PR / lease contract.
+coding job, **muxa-orchestrator**'s first brief wins (lease/PR contract) —
+do not send muxa-parent's slim bootstrap.
 Silence is default. Reply only with a question, a result, or a blocker.
 Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 

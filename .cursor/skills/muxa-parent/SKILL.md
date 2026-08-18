@@ -51,15 +51,17 @@ One Bash call. Incoming mail is already a user turn — do not poll `muxa peek`.
 
 muxa starts the child in the **process `$PWD`**, not the tmux pane path, so this works when your shell is a subprocess (Cursor). `muxa spawn --cwd DIR -- agent` if you cannot cd.
 
-Muxa assigns a unique `adjective-noun` alias (`swift-oak`). Omit `--name` unless you need a stable alias. Read alias and `cwd=` from spawn stdout (`spawned swift-oak … cwd=/path`). Spawn puts the parent's `muxa` on the child's PATH.
+Muxa assigns a unique `adjective-noun` alias (`swift-oak`). Omit `--name` unless you need a stable alias. Read alias and `cwd=` from spawn stdout (`spawned swift-oak … cwd=/path`). Spawn puts the parent's `muxa` on the child's PATH. Point a worker at the worktree's `bin/muxa` only when the job is to change muxa itself.
 
 Spawn only the CLI and optional `--model`. Do not pass trust, yolo, skip-permissions, approval-mode, hook paths, `--workspace`.
 
-The worker's cwd is already set — do not tell the worker to `cd` unless spawn `cwd=` was wrong.
+Brief immediately with `muxa send`. Do not leave a new pane unbriefed. The worker's cwd is already set — do not tell the worker to `cd` unless spawn `cwd=` was wrong.
 
 `muxa who` STATUS `ghost` means the CLI is gone or the pane cwd is missing (a `generic` shell is still `live`). Do not brief ghosts. `muxa unregister NAME|ID` clears muxa identity and leaves the pane.
 
 ## First brief
+
+This template is spawn+mail only. On a coding job, **muxa-orchestrator** is in use: send that skill's job contract instead. Do not send this bootstrap (it omits lease/PR).
 
 The first send to a new worker **must** name `muxa-worker` and include the generic rules (the worker may not have skills installed yet), then the job:
 
@@ -80,8 +82,6 @@ Job:
 EOF
 )"
 ```
-
-Append job-lifecycle steps (worktree return, PR, and so on) yourself — they live in **muxa-orchestrator** when that playbook is in use.
 
 Wait for `[muxa]` mail. Do not ack results.
 

@@ -24,11 +24,13 @@ Only continue if `muxa parent` is empty (this pane is a root).
 
 ## Worktrees
 
-1. One worktree per worker: `treehouse get --lease` if available, else `git worktree add`. Spawn from that directory (`cd` then spawn, or `muxa spawn --cwd DIR`). Confirm spawn stdout `cwd=` is the worktree before briefing.
+1. One worktree per worker: `treehouse get --lease` if available, else `git worktree add`. Spawn from that directory (`cd` then spawn, or `muxa spawn --cwd DIR`). Confirm spawn stdout `cwd=` is the worktree before briefing. Brief immediately with the job contract below. Do not leave a new pane unbriefed.
 2. Stay on `main` (or another branch the worker must not attach). Do not leave this checkout on a `feat/…` branch the worker needs.
 3. After the lease is returned, you may kill the pane.
 
 ## First brief
+
+On a coding job this contract **wins**. Do not send muxa-parent's slim first-brief template.
 
 The first send **must** name `muxa-worker` and include this job contract (the worker may not have skills installed yet), then the job:
 
@@ -52,9 +54,9 @@ EOF
 
 Wait for `[muxa]` mail. Do not ack results. After the lease is returned, you may kill the pane.
 
-## Spawn hygiene
+## Spawn
 
-The model is the caller's choice. Spawn the CLI and its own args via **muxa-parent**; do not pass trust, yolo, skip-permissions, approval-mode, hook paths, `--workspace`.
+The model is the caller's choice. Spawn via **muxa-parent**.
 
 ## Job bound
 
