@@ -37,7 +37,9 @@ Each participating pane sets tmux user options:
 | `@muxa_state`   | `idle` \| `busy` \| `blocked`                |
 | `@muxa_deliver` | `hook` \| `inject`                           |
 
-Roster is `tmux list-panes -a`. There is no registry file.
+Roster is `tmux list-panes -a`. There is no registry file. `muxa who`
+prints that roster plus each pane's current working directory so agents
+on the same tmux server, in different projects, can tell which is which.
 
 Names are unique per tmux server. Duplicate register fails. Ids are unique
 even when two panes run the same CLI on the same project.

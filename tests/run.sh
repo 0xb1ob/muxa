@@ -315,6 +315,16 @@ sid="$(tmux -L "$SOCK" display-message -p -t "$alice_pane" '#{@muxa_session}')"
 who="$(muxa_as "$bob_pane" who)"
 assert_contains "$who" "cli-sess-123" "who shows session id"
 
+projdir="$tmpdir/acme-widgets"
+mkdir -p "$projdir"
+tmux -L "$SOCK" new-window -d -t muxa -n proj -c "$projdir" "exec sleep 3600"
+sleep 0.2
+proj_pane="$(tmux -L "$SOCK" list-panes -t muxa:proj -F '#{pane_id}' | head -1)"
+muxa_as "$proj_pane" register --name projagent --kind generic --deliver inject >/dev/null
+who="$(muxa_as "$bob_pane" who)"
+assert_contains "$who" "$projdir" "who shows pane cwd"
+assert_contains "$who" "CWD" "who header has CWD"
+
 got_sess="$(muxa_as "$alice_pane" session)"
 assert_contains "$got_sess" "cli-sess-123" "muxa session prints CLI session id"
 

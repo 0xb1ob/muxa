@@ -16,7 +16,7 @@ muxa — message other AI CLIs in this tmux server
   muxa spawn [--name NAME] [--kind KIND] [--split] [--window] -- COMMAND...
                                 omit --name to get a unique adjective-noun alias (swift-oak)
                                 default: split into a tiled grid in this window (--window for a new window)
-  muxa who                          roster (tmux pane options, including CLI session id)
+  muxa who                          roster (tmux pane options, CLI session id, cwd)
   muxa whoami                       this pane's alias
   muxa id                           this pane's unique muxa id
   muxa session                      this pane's CLI session/conversation id (empty until reported)
@@ -139,9 +139,9 @@ new_muxa_id() {
   python3 -c 'import uuid; print(uuid.uuid4().hex[:12])'
 }
 
-# pane_id  name  id  parent  kind  state  deliver  where  session
+# pane_id  name  id  parent  kind  state  deliver  where  session  cwd
 roster_lines() {
-  tmux_do list-panes -a -F $'#{pane_id}\t#{@muxa_name}\t#{@muxa_id}\t#{@muxa_parent}\t#{@muxa_kind}\t#{@muxa_state}\t#{@muxa_deliver}\t#{session_name}:#{window_index}.#{pane_index}\t#{@muxa_session}' 2>/dev/null \
+  tmux_do list-panes -a -F $'#{pane_id}\t#{@muxa_name}\t#{@muxa_id}\t#{@muxa_parent}\t#{@muxa_kind}\t#{@muxa_state}\t#{@muxa_deliver}\t#{session_name}:#{window_index}.#{pane_index}\t#{@muxa_session}\t#{pane_current_path}' 2>/dev/null \
     | awk -F '\t' '$2 != "" { print }'
 }
 
@@ -547,11 +547,11 @@ cmd_register() {
 
 cmd_who() {
   need_tmux
-  printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %s\n' NAME ID SESSION PARENT KIND STATE DELIVER PANE WHERE
+  printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-16s %s\n' NAME ID SESSION PARENT KIND STATE DELIVER PANE WHERE CWD
   local line
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %s\n' \
+    printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-16s %s\n' \
       "$(printf '%s\n' "$line" | field 2)" \
       "$(printf '%s\n' "$line" | field 3)" \
       "$(printf '%s\n' "$line" | field 9)" \
@@ -560,7 +560,8 @@ cmd_who() {
       "$(printf '%s\n' "$line" | field 6)" \
       "$(printf '%s\n' "$line" | field 7)" \
       "$(printf '%s\n' "$line" | field 1)" \
-      "$(printf '%s\n' "$line" | field 8)"
+      "$(printf '%s\n' "$line" | field 8)" \
+      "$(printf '%s\n' "$line" | field 10)"
   done <<EOF
 $(roster_lines)
 EOF
