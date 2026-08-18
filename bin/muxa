@@ -644,11 +644,16 @@ cmd_send() {
 
   if [ "$all" -eq 1 ]; then
     n=0
+    seen=$'\n'
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       dest="$(printf '%s\n' "$line" | field 2)"
       [ -n "$dest" ] || continue
+      case "$seen" in
+        *$'\n'"$dest"$'\n'*) continue ;;
+      esac
       can_send "$from" "$dest" || continue
+      seen="${seen}${dest}"$'\n'
       send_one "$from" "$dest" "$flags" "$body"
       n=$((n + 1))
     done <<EOF

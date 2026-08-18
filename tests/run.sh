@@ -7,7 +7,7 @@ PATH="$ROOT/bin:$PATH"
 SOCK="muxatest-$$"
 export MUXA_TMUX_SOCKET="$SOCK"
 export MUXA_ENTER_DELAY=0.05
-unset TMUX MUXA_PARENT MUXA_NAME MUXA_ID || true
+unset TMUX MUXA_NAME MUXA_PARENT MUXA_ID MUXA_BIN || true
 
 pass=0
 fail=0
@@ -189,6 +189,17 @@ assert_contains "$sib" "forbidden" "sibling send refused"
 
 sib2="$(muxa_as "$alice_pane" send carol 'nope' 2>&1 || true)"
 assert_contains "$sib2" "forbidden" "sibling alice → carol refused"
+
+# --- send --all dedupes duplicate roster names ---
+saved_dave_name="$(tmux -L "$SOCK" display-message -p -t "$dave_pane" '#{@muxa_name}')"
+tmux -L "$SOCK" set-option -p -t "$dave_pane" @muxa_name carol
+marker="send-all-dedupe-$$"
+muxa_as "$bob_pane" send --no-reply --all "$marker" >/dev/null
+peek_carol="$(muxa_as "$bob_pane" peek carol)"
+count="$(printf '%s\n' "$peek_carol" | grep -cF "$marker" || true)"
+tmux -L "$SOCK" set-option -p -t "$dave_pane" @muxa_name "$saved_dave_name"
+[ "$count" -eq 1 ] && ok "send --all dedupes duplicate roster names" \
+  || bad "send --all dedupes duplicate roster names" "expected 1 message, count=$count peek=$peek_carol"
 
 tmux -L "$SOCK" new-window -t muxa -n eve "exec sleep 3600"
 sleep 0.2
