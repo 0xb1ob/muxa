@@ -17,9 +17,18 @@ A parent pane is the orchestrator. Spawn workers, wait for `[muxa]` results,
 do not do their jobs.
 
 - Isolate parallel work with `treehouse get --lease` (one worktree per
-  worker). Point the CLI at that path (`--workspace` / `cd`).
-- `muxa spawn --name NAME -- cmd…` makes them your children. Brief with
-  `muxa send`. Do not poll `peek`.
+  worker) and spawn from that directory. Muxa inherits the pane cwd.
+- Spawn with a CLI and optionally a model. Muxa assigns a unique
+  `adjective-noun` alias (`swift-oak`, `proud-hawk`). Read it from spawn
+  stdout or `muxa children` / `muxa who`. Do not pass `--name`.
+  `muxa spawn -- agent --model composer-2.5-fast`
+  `muxa spawn -- claude --model haiku`
+  `muxa spawn -- omp`
+  Brief with `muxa send`. Do not poll `peek`.
+- Do not `--help` child CLIs. Do not pass trust, yolo, skip-permissions,
+  approval-mode, hook paths, `--workspace`, or other per-CLI launch
+  flags. Muxa owns those internals for each kind (`claude`, `cursor` /
+  `agent`, `pi` / `omp`).
 - Spawn leaves the parent's `muxa` on PATH so `muxa send <parent>` still
   works. Workers use `$WORKTREE/bin/muxa` only when testing their own
   changes.
