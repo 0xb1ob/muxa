@@ -48,7 +48,19 @@ muxa preflight [--base BRANCH] WORKTREE...
 
 3. Spawn from that directory (`cd` then spawn, or `muxa spawn --cwd DIR`). Confirm spawn stdout `cwd=` is the worktree before briefing. Brief immediately with the job contract below. Do not leave a new pane unbriefed.
 4. Optional: start workers from a fresh default-branch tip.
-5. After the lease is returned, you may kill the pane.
+5. Teardown is yours, not the worker's. See below.
+
+## Teardown
+
+Fail-closed, and **you** are the actor. `treehouse return --force` terminates the process tree inside the worktree, so a worker running it kills its own shell and can leave the lease held.
+
+The worker only verifies `git status --porcelain` is empty and the branch is pushed, then reports and stops. On that result, run the return yourself **from outside the worktree**, then you may kill the pane:
+
+```bash
+treehouse return --force <worktree>
+```
+
+Plain `treehouse return` prompts interactively; `--force` resets without asking — which is why the worker's clean-and-pushed gate comes first. A worker that reports dirty or unpushed keeps the lease: do not return it, fix the blocker at the path it gave you.
 
 ## First brief
 
@@ -66,7 +78,7 @@ You are a muxa worker. Parent: ${parent}. Reply only to that parent with muxa se
 You may: do this job in this cwd; message your parent; open a PR if you change code.
 You may not: cd or prefix commands with cd <path> (spawn already set cwd); message siblings or other roots; spawn extra workers; poll muxa peek; ack or narrate; pass CLI trust/yolo/workspace flags.
 
-When done: open a PR if there are code changes (skip if research-only). If this worktree was leased, return it fail-closed: only when git status --porcelain is empty AND the branch is pushed, run treehouse return --force <path> (plain treehouse return prompts interactively; --force resets without asking, which is why the clean-and-pushed gate comes first). Dirty or unpushed: keep the lease and report a blocker with the path instead of returning. Then muxa send ${parent} a result or blocker (include the PR URL). Never ack. Then stop.
+When done: open a PR if there are code changes (skip if research-only). Never run treehouse return — teardown is mine, from outside the worktree. Verify fail-closed that git status --porcelain is empty AND the branch is pushed, then muxa send ${parent} the result (include the PR URL) and stop. Dirty or unpushed: keep the lease and report a blocker with the path. Never ack. Then stop.
 
 Job:
 <task>
