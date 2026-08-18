@@ -347,8 +347,6 @@ muxa_as "$proj_pane" register --name projagent --kind generic --deliver inject >
 who="$(muxa_as "$bob_pane" who)"
 assert_contains "$who" "$projdir" "who shows pane cwd"
 assert_contains "$who" "CWD" "who header has CWD"
-
-assert_contains "$who" "CWD" "who header has CWD"
 assert_contains "$who" "STATUS" "who header has STATUS"
 
 # --- who STATUS: ghost vs live ---
