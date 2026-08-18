@@ -213,6 +213,9 @@ printf '%s\n' "$sib2" | grep -q forbidden && ok "sibling pi → cursor refused" 
 unrel="$(muxa_as "$ctl_pane" send --no-reply cursor 'ROOT_NOPE' 2>&1 || true)"
 printf '%s\n' "$unrel" | grep -q forbidden && ok "human root → claude child refused" || bad "human root → claude child refused" "$unrel"
 
+r2r="$(muxa_as "$ctl_pane" send --no-reply claude 'ROOT_NOPE' 2>&1 || true)"
+printf '%s\n' "$r2r" | grep -q forbidden && ok "human root → claude root refused" || bad "human root → claude root refused" "$r2r"
+
 # --- inject parent → children ---
 sleep 3
 dismiss_dialogs "$SESSION:claude"
@@ -229,13 +232,16 @@ printf '%s\n' "$sent" | grep -Eq 'delivered|queued' && ok "parent → pi send ($
 wait_pane_has "$SESSION:cursor" "$inject_u" 20 && ok "cursor TUI shows parent inject" || bad "cursor TUI shows parent inject" "$(pane_text "$SESSION:cursor" | tail -n 40)"
 wait_pane_has "$SESSION:pi" "$inject_p" 20 && ok "pi TUI shows parent inject" || bad "pi TUI shows parent inject" "$(pane_text "$SESSION:pi" | tail -n 40)"
 
-# --- LLM: parent broadcasts to children only ---
+# --- LLM: type into the parent pane (roots cannot muxa-send to each other) ---
 wait_state claude idle 60 || true
 sleep 2
 hop="MUXA_HOP_$TOKEN"
 hop_prompt="You have two child panes (cursor and pi). Ping both with one command, then stop: muxa send --no-reply --all ${hop}"
-sent="$(muxa_as "$ctl_pane" send --no-reply claude "$hop_prompt" 2>&1 || true)"
-printf 'hop send: %s\n' "$sent"
+printf '%s' "$hop_prompt" | tmux_e load-buffer -b muxae2e-hop -
+tmux_e paste-buffer -p -d -b muxae2e-hop -t "$SESSION:claude"
+sleep "${MUXA_ENTER_DELAY}"
+tmux_e send-keys -t "$SESSION:claude" Enter
+printf 'hop typed into claude pane\n'
 
 if wait_pane_has "$SESSION:cursor" "$hop" "$HOP_S"; then
   ok "cursor child received parent hop"
