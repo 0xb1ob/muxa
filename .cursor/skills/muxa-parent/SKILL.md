@@ -35,12 +35,14 @@ Only continue if `muxa parent` is empty (this pane is a root).
 muxa who
 muxa whoami
 muxa children
+muxa unregister <name|id>
 muxa send <name> <text>
 muxa send --no-reply <name> <text>
 muxa send --all <text>
 muxa spawn -- agent --model composer-2.5-fast
 muxa spawn -- claude --model haiku
 muxa spawn -- omp
+muxa spawn --cwd DIR -- agent --model composer-2.5-fast
 ```
 
 One Bash call. Incoming mail is already a user turn — do not poll `muxa peek`.
@@ -48,10 +50,12 @@ One Bash call. Incoming mail is already a user turn — do not poll `muxa peek`.
 ## Spawn
 
 1. Isolate parallel code work with **one worktree per worker** (`treehouse get --lease` if available, else `git worktree add`). `cd` into that directory, then spawn. muxa starts the child in the **process `$PWD`**, not the tmux pane path, so this works when your shell is a subprocess (Cursor). `muxa spawn --cwd DIR -- agent` if you cannot cd.
-2. Spawn **only** the CLI and optional `--model`. Muxa assigns a unique `adjective-noun` alias (`swift-oak`). Read it from spawn stdout (`spawned swift-oak …`) or `muxa children` / `muxa who`. Do not pass `--name`.
+2. Spawn **only** the CLI and optional `--model`. Muxa assigns a unique `adjective-noun` alias (`swift-oak`). Read alias and `cwd=` from spawn stdout (`spawned swift-oak … cwd=/path`). Confirm `cwd=` is the worktree before briefing. Do not pass `--name`.
 3. Do not `--help` child CLIs. Do not pass trust, yolo, skip-permissions, approval-mode, hook paths, `--workspace`, or other per-CLI launch flags.
-4. Spawn puts the parent's `muxa` on the child's PATH. Point a worker at `$WORKTREE/bin/muxa` only when the job is to change muxa itself.
-5. Brief immediately with `muxa send` using the template below.
+4. Spawn puts the parent's `muxa` on the child's PATH. Point a worker at the worktree's `bin/muxa` only when the job is to change muxa itself.
+5. Brief immediately with `muxa send` using the template below. The worker's cwd is already the worktree — do not tell it to `cd` there unless `cwd=` was wrong.
+
+`muxa who` STATUS `ghost` means the CLI is gone or the pane cwd is missing (a `generic` shell is still `live`). Do not brief ghosts. `muxa unregister NAME|ID` clears muxa identity and leaves the pane. After the lease is returned you may also kill the pane.
 
 ## First brief
 
