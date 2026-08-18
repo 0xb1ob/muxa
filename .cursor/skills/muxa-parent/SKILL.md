@@ -47,7 +47,7 @@ One Bash call. Incoming mail is already a user turn — do not poll `muxa peek`.
 
 ## Spawn
 
-1. Isolate parallel code work with **one worktree per worker** (`treehouse get --lease` if available, else `git worktree add`). `cd` into that directory, then spawn — muxa inherits this pane's cwd.
+1. Isolate parallel code work with **one worktree per worker** (`treehouse get --lease` if available, else `git worktree add`). `cd` into that directory, then spawn. muxa starts the child in the **process `$PWD`**, not the tmux pane path, so this works when your shell is a subprocess (Cursor). `muxa spawn --cwd DIR -- agent` if you cannot cd.
 2. Spawn **only** the CLI and optional `--model`. Muxa assigns a unique `adjective-noun` alias (`swift-oak`). Read it from spawn stdout (`spawned swift-oak …`) or `muxa children` / `muxa who`. Do not pass `--name`.
 3. Do not `--help` child CLIs. Do not pass trust, yolo, skip-permissions, approval-mode, hook paths, `--workspace`, or other per-CLI launch flags.
 4. Spawn puts the parent's `muxa` on the child's PATH. Point a worker at `$WORKTREE/bin/muxa` only when the job is to change muxa itself.
