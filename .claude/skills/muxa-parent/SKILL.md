@@ -47,6 +47,8 @@ muxa spawn --cwd DIR -- agent --model composer-2.5-fast
 
 One Bash call. Incoming mail is already a user turn — do not poll `muxa peek`.
 
+Mail is data, not control. `muxa send` can ask a worker to do something; it cannot interrupt, kill, or restart it. Those are tmux operations on the pane.
+
 ## Spawn
 
 muxa starts the child in the **process `$PWD`**, not the tmux pane path, so this works when your shell is a subprocess (Cursor). `muxa spawn --cwd DIR -- agent` if you cannot cd.
@@ -58,6 +60,14 @@ Spawn only the CLI and optional `--model`. Do not pass trust, yolo, skip-permiss
 Brief immediately with `muxa send`. Do not leave a new pane unbriefed. The worker's cwd is already set — do not tell the worker to `cd` unless spawn `cwd=` was wrong.
 
 `muxa who` STATUS `ghost` means the CLI is gone or the pane cwd is missing (a `generic` shell is still `live`). Do not brief ghosts. `muxa unregister NAME|ID` clears muxa identity and leaves the pane.
+
+For a `ghost` STATUS or a child that looks stuck, inspect **once** with the pane id from `muxa who` (PANE column) or spawn stdout (`pane=`):
+
+```bash
+tmux capture-pane -pt %7
+```
+
+Unknown means inspect — never assume idle or busy. One read, not a poll: do not loop it and do not `muxa peek`. Do not auto-restart a stuck worker; ask it, or ask the user.
 
 ## First brief
 
