@@ -70,12 +70,10 @@ tests/e2e.sh          # real Claude Code + Cursor Agent + Oh My Pi in tmux
 
 ```bash
 tmux new -s agents
-# pane 0
 claude
-# pane 1
-agent
-# pane 2
-omp
+# from that pane (or muxa spawn as that pane):
+muxa spawn --name cursor -- agent
+muxa spawn --name pi -- omp
 ```
 
 Hooks register the pane on session start. Confirm:
@@ -97,8 +95,8 @@ Never ack. `--no-reply` for status dumps.
 | `muxa spawn --name NAME -- CMD` | Open a child pane; parent can message it |
 | `muxa who` | Roster (name, id, parent, …) |
 | `muxa children` | Direct children of this pane |
-| `muxa send NAME TEXT` | Queue + deliver if reachable |
-| `muxa send --all TEXT` | Every reachable pane (not siblings) |
+| `muxa send NAME TEXT` | Queue + deliver if parent↔child |
+| `muxa send --all TEXT` | Every parent/child pane (not siblings or other roots) |
 | `muxa peek [NAME]` | Unread (humans/scripts, not the model loop) |
 | `muxa deliver [NAME]` | Force inject (escape hatch) |
 | `muxa hook stop --format claude\|cursor\|pi` | Native continue payload |
