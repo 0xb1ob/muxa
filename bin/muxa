@@ -3,7 +3,7 @@
 # bash 3.2+ (macOS / Linux). Requires tmux. python3 used for JSON and spawn quoting.
 set -euo pipefail
 
-VERSION=0.2.1
+VERSION=0.2.2
 TMUX_BIN="${MUXA_TMUX_BIN:-tmux}"
 ENTER_DELAY="${MUXA_ENTER_DELAY:-0.15}"
 INJECT_MAX="${MUXA_INJECT_MAX:-8192}"
@@ -13,9 +13,10 @@ usage() {
 muxa — message other AI CLIs in this tmux server
 
   muxa register [--name NAME] [--id ID] [--parent NAME] [--kind claude|cursor|pi|generic] [--deliver hook|inject]
-  muxa spawn [--name NAME] [--kind KIND] [--split] [--window] -- COMMAND...
+  muxa spawn [--name NAME] [--kind KIND] [--cwd DIR] [--split] [--window] -- COMMAND...
                                 omit --name to get a unique adjective-noun alias (swift-oak)
                                 default: split into a tiled grid in this window (--window for a new window)
+                                child cwd: --cwd, else process PWD, else this pane's path
   muxa who                          roster (tmux pane options, CLI session id, cwd)
   muxa whoami                       this pane's alias
   muxa id                           this pane's unique muxa id
@@ -823,9 +824,27 @@ cmd_deliver() {
   rm -f "$list"
 }
 
+# Child start directory: --cwd, else the muxa process $PWD, else the
+# parent pane path. $PWD is what Cursor (subprocess shell) and "cd && muxa
+# spawn" actually control; #{pane_current_path} is the tmux pane, which
+# often stays at the parent's project.
+resolve_spawn_cwd() {
+  local explicit="${1:-}" pane="$2"
+  if [ -n "$explicit" ]; then
+    [ -d "$explicit" ] || die "spawn: --cwd is not a directory: $explicit"
+    (cd "$explicit" && pwd)
+    return
+  fi
+  if [ -n "${PWD:-}" ] && [ -d "$PWD" ]; then
+    printf '%s' "$PWD"
+    return
+  fi
+  pane_fmt "$pane" '#{pane_current_path}'
+}
+
 cmd_spawn() {
   need_tmux
-  local pane name kind new_window=0 parent id cwd sess quoted child cmdpath
+  local pane name kind new_window=0 parent id cwd cwd_flag="" sess quoted child cmdpath
   pane="$(this_pane)"
   parent="$(pane_fmt "$pane" '#{@muxa_name}')"
   [ -n "$parent" ] || die "spawn: register this pane first"
@@ -835,6 +854,7 @@ cmd_spawn() {
     case "$1" in
       --name) name="$2"; shift 2 ;;
       --kind) kind="$2"; shift 2 ;;
+      --cwd) cwd_flag="$2"; shift 2 ;;
       --split) shift ;; # compat: split into the parent window is the default
       --window) new_window=1; shift ;;
       --) shift; break ;;
@@ -853,7 +873,8 @@ cmd_spawn() {
   if name_taken_by_other "$name" ""; then
     die "name '$name' already registered"
   fi
-  cwd="$(pane_fmt "$pane" '#{pane_current_path}')"
+  cwd="$(resolve_spawn_cwd "$cwd_flag" "$pane")"
+  [ -n "$cwd" ] || die "spawn: could not resolve a start directory"
   sess="$(pane_fmt "$pane" '#{session_name}')"
   quoted="$(shlex_join "$@")"
   cmdpath="$(command -v muxa 2>/dev/null || true)"
@@ -894,7 +915,7 @@ cmd_spawn() {
   set_pane_opt "$child" @muxa_state idle
   ensure_box "$name" >/dev/null
   set_pane_title "$child" "$name"
-  printf 'spawned %s id=%s parent=%s kind=%s pane=%s\n' "$name" "$id" "$parent" "$kind" "$child"
+  printf 'spawned %s id=%s parent=%s kind=%s pane=%s cwd=%s\n' "$name" "$id" "$parent" "$kind" "$child" "$cwd"
 }
 
 cmd_hook() {

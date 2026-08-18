@@ -45,7 +45,12 @@ Names are unique per tmux server. Duplicate register fails. Ids are unique
 even when two panes run the same CLI on the same project.
 
 A parent creates children with `muxa spawn --name NAME -- command…`, which
-splits a pane in the parent's window. Split direction follows pane count
+splits a pane in the parent's window. The child's start directory is
+`--cwd DIR` if given, otherwise the `muxa` process working directory
+(`$PWD`), otherwise the parent pane's `#{pane_current_path}`. `$PWD` is
+what `cd worktree && muxa spawn` sets when the agent's shell is a
+subprocess (Cursor) and does not change the tmux pane path. Split
+direction follows pane count
 (`cols = ceil(sqrt(n+1))`: a complete rectangle starts a new row with
 `split-window -v`, otherwise a column with `-h`) so successive children fill
 a 2D grid rather than a single row. Then `select-layout tiled` on the window.
@@ -155,7 +160,7 @@ muxa id
 muxa session
 muxa parent
 muxa children
-muxa spawn [--name worker] [--window] -- command…
+muxa spawn [--name worker] [--cwd DIR] [--window] -- command…
 ```
 
 Exit 0 on queued or delivered. Exit 2 if the name is unknown. Exit 3 if
