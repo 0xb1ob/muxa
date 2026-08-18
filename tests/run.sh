@@ -452,5 +452,146 @@ sid2="$(tmux -L "$SOCK" display-message -p -t "$alice_pane" '#{@muxa_session}')"
 [ -z "$sid2" ] && ok "session-end clears @muxa_session" \
   || bad "session-end clears @muxa_session" "got: $sid2"
 
+# --- preflight (git only, no tmux) ---
+git_init_repo() {
+  local dir="$1"
+  mkdir -p "$dir"
+  git init -q "$dir" >/dev/null 2>&1
+  git -C "$dir" symbolic-ref HEAD refs/heads/main
+  git -C "$dir" -c user.email=muxa@example.com -c user.name=muxa -c commit.gpgsign=false \
+    commit -q --allow-empty -m init
+}
+
+pf_repo="$tmpdir/pf-repo"
+pf_wt="$tmpdir/pf-wt"
+pf_other="$tmpdir/pf-other"
+git_init_repo "$pf_repo"
+git_init_repo "$pf_other"
+git -C "$pf_repo" worktree add -q -b feat/pf "$pf_wt" >/dev/null 2>&1
+
+pf() {
+  local dir="$1"
+  shift
+  set +e
+  pf_out="$(cd "$dir" && "$ROOT/bin/muxa" preflight "$@" 2>&1)"
+  pf_code=$?
+  set -e
+}
+
+pf "$pf_repo" "$pf_wt"
+[ "$pf_code" -eq 0 ] && ok "preflight on default branch exits 0" \
+  || bad "preflight on default branch exits 0" "exit=$pf_code out=$pf_out"
+assert_contains "$pf_out" "ok   base branch main" "preflight defaults base to main"
+assert_contains "$pf_out" "on main" "preflight reports primary on main"
+assert_contains "$pf_out" "linked on feat/pf" "preflight accepts a linked worktree"
+case "$pf_out" in
+  *fail*) bad "preflight clean run prints no fail line" "out=$pf_out" ;;
+  *) ok "preflight clean run prints no fail line" ;;
+esac
+
+pf "$pf_wt" "$pf_wt"
+[ "$pf_code" -eq 0 ] && ok "preflight works from inside a linked worktree" \
+  || bad "preflight works from inside a linked worktree" "exit=$pf_code out=$pf_out"
+
+git -C "$pf_repo" checkout -q -b feat/onprimary
+pf "$pf_repo" "$pf_wt"
+[ "$pf_code" -eq 1 ] && ok "preflight on a feature branch exits 1" \
+  || bad "preflight on a feature branch exits 1" "exit=$pf_code out=$pf_out"
+assert_contains "$pf_out" "fail primary" "preflight names the tangled primary checkout"
+assert_contains "$pf_out" "(want main)" "preflight says which branch it wanted"
+
+pf "$pf_repo" --base feat/onprimary "$pf_wt"
+[ "$pf_code" -eq 0 ] && ok "preflight --base overrides the default branch" \
+  || bad "preflight --base overrides the default branch" "exit=$pf_code out=$pf_out"
+git -C "$pf_repo" checkout -q main
+
+pf "$pf_repo" "$pf_repo"
+[ "$pf_code" -eq 1 ] && ok "preflight rejects the primary as a worktree arg" \
+  || bad "preflight rejects the primary as a worktree arg" "exit=$pf_code out=$pf_out"
+assert_contains "$pf_out" "is the primary checkout" "preflight explains the primary-as-worktree failure"
+
+pf "$pf_repo" "$pf_other"
+[ "$pf_code" -eq 1 ] && ok "preflight rejects a worktree from another repo" \
+  || bad "preflight rejects a worktree from another repo" "exit=$pf_code out=$pf_out"
+assert_contains "$pf_out" "belongs to another repo" "preflight explains the foreign worktree"
+
+pf "$pf_repo" "$tmpdir/no-such-worktree"
+[ "$pf_code" -eq 1 ] && ok "preflight rejects a missing worktree" \
+  || bad "preflight rejects a missing worktree" "exit=$pf_code out=$pf_out"
+assert_contains "$pf_out" "does not exist" "preflight explains the missing worktree"
+
+set +e
+(cd "$pf_repo" && "$ROOT/bin/muxa" preflight --nope >/dev/null 2>&1)
+pf_code=$?
+set -e
+[ "$pf_code" -eq 2 ] && ok "preflight unknown flag exits 2" \
+  || bad "preflight unknown flag exits 2" "exit=$pf_code"
+
+# --- jobs backlog (no tmux, survives restarts) ---
+jobs_state="$tmpdir/state"
+jobs_cli() {
+  (cd "$pf_repo" && XDG_STATE_HOME="$jobs_state" "$ROOT/bin/muxa" jobs "$@")
+}
+jobs_code() {
+  set +e
+  jobs_cli "$@" >/dev/null 2>&1
+  jobs_status=$?
+  set -e
+}
+
+jobs_out="$(jobs_cli list)"
+assert_contains "$jobs_out" "(no jobs)" "empty backlog lists nothing"
+assert_contains "$jobs_out" "UPDATED" "jobs list header has UPDATED"
+
+jobs_out="$(jobs_cli add api kind=ship delivery=pr worker=bob branch=feat/api note='wire the endpoint')"
+assert_contains "$jobs_out" "added api" "jobs add confirms"
+jobs_cli add notes kind=research delivery=local >/dev/null
+
+jobs_out="$(jobs_cli list)"
+assert_contains "$jobs_out" "api" "jobs list shows added job"
+assert_contains "$jobs_out" "open" "jobs add starts at open"
+assert_contains "$jobs_out" "wire the endpoint" "jobs list shows the note"
+assert_contains "$jobs_out" "notes" "jobs list shows the second job"
+if printf '%s\n' "$jobs_out" | grep -Eq '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'; then
+  ok "jobs list shows an updated timestamp"
+else
+  bad "jobs list shows an updated timestamp" "out=$jobs_out"
+fi
+
+jobs_cli set api status=running worktree="$pf_wt" >/dev/null
+jobs_out="$(jobs_cli list)"
+assert_contains "$jobs_out" "running" "jobs set updates status"
+assert_contains "$jobs_out" "$pf_wt" "jobs set stores the worktree"
+
+jobs_out="$(jobs_cli done api pr=https://example.test/pr/1)"
+assert_contains "$jobs_out" "done api" "jobs done confirms"
+jobs_out="$(jobs_cli list)"
+assert_contains "$jobs_out" "done" "jobs done sets status=done"
+assert_contains "$jobs_out" "https://example.test/pr/1" "jobs done stores the PR url"
+assert_contains "$jobs_out" "notes" "unrelated job survives the update"
+
+tsv="$(find "$jobs_state/muxa/jobs" -name '*.tsv' | head -1)"
+[ -n "$tsv" ] && ok "jobs backlog persists to XDG state dir" \
+  || bad "jobs backlog persists to XDG state dir" "no tsv under $jobs_state/muxa/jobs"
+
+jobs_code set nope status=open
+[ "$jobs_status" -eq 2 ] && ok "jobs set unknown job exits 2" \
+  || bad "jobs set unknown job exits 2" "exit=$jobs_status"
+jobs_code done nope
+[ "$jobs_status" -eq 2 ] && ok "jobs done unknown job exits 2" \
+  || bad "jobs done unknown job exits 2" "exit=$jobs_status"
+jobs_code add api kind=ship delivery=pr
+[ "$jobs_status" -eq 2 ] && ok "duplicate jobs add exits 2" \
+  || bad "duplicate jobs add exits 2" "exit=$jobs_status"
+jobs_code add other kind=nope delivery=pr
+[ "$jobs_status" -eq 2 ] && ok "jobs add bad kind exits 2" \
+  || bad "jobs add bad kind exits 2" "exit=$jobs_status"
+jobs_code add other kind=ship
+[ "$jobs_status" -eq 2 ] && ok "jobs add without delivery exits 2" \
+  || bad "jobs add without delivery exits 2" "exit=$jobs_status"
+jobs_code set api bogus=1
+[ "$jobs_status" -eq 2 ] && ok "jobs set unknown key exits 2" \
+  || bad "jobs set unknown key exits 2" "exit=$jobs_status"
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

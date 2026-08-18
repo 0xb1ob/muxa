@@ -32,6 +32,24 @@ muxa — message other AI CLIs in this tmux server
   muxa hook EVENT [--format FMT] [--kind KIND]
   muxa version
 
+Orchestrator helpers (git only, no tmux):
+
+  muxa preflight [--base BRANCH] [WORKTREE...]
+                                repo checks before handing out jobs: the primary
+                                checkout sits on BRANCH (default: origin/HEAD,
+                                else main) and each WORKTREE is a linked worktree
+                                of this repo. exit 0 all ok, 1 any failure
+  muxa jobs add JOB kind=ship|research delivery=pr|local|pipeline [worker=..]
+                [worktree=..] [branch=..] [note=..]
+  muxa jobs set JOB key=value...    keys: kind delivery worker worktree branch
+                                    status pr note
+  muxa jobs done JOB [pr=URL]       mark done
+  muxa jobs list                    backlog table (status: open running blocked
+                                    done dropped)
+                                one TSV per project under
+                                $XDG_STATE_HOME/muxa/jobs, so an orchestrator
+                                restart is a reconcile, not a memory test
+
 Reachability: a parent may message its children; a child may message its
 parent. Children cannot message each other. Roots (no parent) cannot
 message other roots. muxa send --all follows the same rule.
@@ -1068,6 +1086,332 @@ cmd_hook() {
   esac
 }
 
+# --- preflight: git-only repo checks (no tmux) ------------------------------
+
+abs_dir() {
+  (cd "$1" 2>/dev/null && pwd -P) || return 1
+}
+
+# Absolute .git dir shared by every worktree of a repo. Two paths belong to the
+# same repo when this matches.
+git_common_dir() {
+  local dir="$1" g
+  g="$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  [ -n "$g" ] || return 1
+  case "$g" in
+    /*) abs_dir "$g" ;;
+    *) abs_dir "$dir/$g" ;;
+  esac
+}
+
+# git lists the main worktree first.
+primary_worktree() {
+  git -C "$1" worktree list --porcelain 2>/dev/null \
+    | awk '/^worktree /{ sub(/^worktree /, ""); print; exit }'
+}
+
+default_base_branch() {
+  local ref
+  ref="$(git -C "$1" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  case "$ref" in
+    origin/*) printf '%s' "${ref#origin/}" ;;
+    *) printf 'main' ;;
+  esac
+}
+
+PREFLIGHT_FAIL=0
+pf_ok() { printf 'ok   %s\n' "$*"; }
+pf_fail() { printf 'fail %s\n' "$*"; PREFLIGHT_FAIL=1; }
+
+cmd_preflight() {
+  local base="" repo common primary branch arg wt wt_common
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --base) [ $# -ge 2 ] || die "preflight: --base needs a branch"; base="$2"; shift 2 ;;
+      --) shift; break ;;
+      -*) die "preflight: unknown flag $1" ;;
+      *) break ;;
+    esac
+  done
+  PREFLIGHT_FAIL=0
+  repo="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -z "$repo" ]; then
+    pf_fail "repo $PWD is not a git repository"
+    return 1
+  fi
+  repo="$(abs_dir "$repo")"
+  common="$(git_common_dir "$repo" || true)"
+  [ -n "$common" ] || { pf_fail "repo $repo has no resolvable git dir"; return 1; }
+  pf_ok "repo $repo"
+
+  [ -n "$base" ] || base="$(default_base_branch "$repo")"
+  pf_ok "base branch $base"
+
+  # The orchestrator must not sit on a branch a worker needs to build on.
+  primary="$(primary_worktree "$repo")"
+  if [ -z "$primary" ]; then
+    pf_fail "primary checkout: git worktree list returned nothing"
+    primary=""
+  elif [ ! -d "$primary" ]; then
+    pf_fail "primary $primary does not exist"
+  else
+    primary="$(abs_dir "$primary")"
+    branch="$(git -C "$primary" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+    if [ -z "$branch" ]; then
+      pf_fail "primary $primary is detached (want $base)"
+    elif [ "$branch" = "$base" ]; then
+      pf_ok "primary $primary on $base"
+    else
+      pf_fail "primary $primary on $branch (want $base)"
+    fi
+  fi
+
+  for arg in "$@"; do
+    if [ ! -d "$arg" ]; then
+      pf_fail "worktree $arg does not exist"
+      continue
+    fi
+    wt="$(abs_dir "$arg")"
+    wt_common="$(git_common_dir "$wt" || true)"
+    if [ -z "$wt_common" ]; then
+      pf_fail "worktree $wt is not a git worktree"
+    elif [ "$wt_common" != "$common" ]; then
+      pf_fail "worktree $wt belongs to another repo ($wt_common)"
+    elif [ -n "$primary" ] && [ "$wt" = "$primary" ]; then
+      pf_fail "worktree $wt is the primary checkout, not a linked worktree"
+    else
+      branch="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || printf 'detached')"
+      pf_ok "worktree $wt linked on $branch"
+    fi
+  done
+
+  [ "$PREFLIGHT_FAIL" -eq 0 ] || return 1
+}
+
+# --- jobs: on-disk backlog per project (no tmux) ----------------------------
+# job kind delivery worker worktree branch status pr note updated
+JOBS_HEADER=$'#job\tkind\tdelivery\tworker\tworktree\tbranch\tstatus\tpr\tnote\tupdated'
+
+jobs_project_key() {
+  local top
+  top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$top" ] || top="$PWD"
+  abs_dir "$top" || printf '%s' "$top"
+}
+
+# One TSV per project, keyed by git toplevel realpath: survives tmux restarts,
+# agent restarts and worktree churn.
+jobs_file() {
+  local key slug hash
+  key="$(jobs_project_key)"
+  slug="$(sanitize_name "$(basename "$key")" | sed 's/^\.*//')"
+  [ -n "$slug" ] || slug="repo"
+  hash="$(printf '%s' "$key" | python3 -c 'import hashlib, sys; print(hashlib.sha1(sys.stdin.buffer.read()).hexdigest()[:8])')"
+  printf '%s/muxa/jobs/%s-%s.tsv' "${XDG_STATE_HOME:-$HOME/.local/state}" "$slug" "$hash"
+}
+
+jobs_ensure_file() {
+  mkdir -p "$(dirname "$1")"
+  [ -f "$1" ] || printf '%s\n' "$JOBS_HEADER" >"$1"
+}
+
+# One TSV cell: no tabs, no newlines, empty renders as -
+jobs_clean() {
+  local v
+  v="$(printf '%s' "$1" | tr '\t\n' '  ')"
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  [ -n "$v" ] || v='-'
+  printf '%s' "$v"
+}
+
+jobs_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+jobs_check_name() {
+  case "$1" in
+    "" | '#'*) die "jobs: bad job name '$1'" ;;
+    *[[:space:]]*) die "jobs: job name must not contain whitespace: '$1'" ;;
+  esac
+}
+
+jobs_check_kind() {
+  case "$1" in ship|research) ;; *) die "jobs: bad kind '$1' (ship|research)" ;; esac
+}
+
+jobs_check_delivery() {
+  case "$1" in pr|local|pipeline) ;; *) die "jobs: bad delivery '$1' (pr|local|pipeline)" ;; esac
+}
+
+jobs_check_status() {
+  case "$1" in
+    open|running|blocked|done|dropped) ;;
+    *) die "jobs: bad status '$1' (open|running|blocked|done|dropped)" ;;
+  esac
+}
+
+jobs_row() {
+  MUXA_JOB_KEY="$2" awk -F '\t' '$1 == ENVIRON["MUXA_JOB_KEY"] { print; exit }' "$1"
+}
+
+jobs_replace_row() {
+  local file="$1" tmp
+  tmp="$file.tmp.$$"
+  MUXA_JOB_KEY="$2" MUXA_JOB_ROW="$3" \
+    awk -F '\t' '$1 == ENVIRON["MUXA_JOB_KEY"] { print ENVIRON["MUXA_JOB_ROW"]; next } { print }' \
+    "$file" >"$tmp"
+  mv "$tmp" "$file"
+}
+
+jobs_lock() {
+  lock_acquire "$1.lock" 50 || die "jobs: could not lock $1"
+}
+
+# jobs_apply FILE JOB key=value... — validate, then rewrite the row in place.
+jobs_apply() {
+  local file="$1" job="$2"
+  shift 2
+  local pair key val row lock
+  local f_job f_kind f_delivery f_worker f_worktree f_branch f_status f_pr f_note f_updated
+  [ $# -ge 1 ] || die "jobs: key=value required"
+  for pair in "$@"; do
+    case "$pair" in *=*) ;; *) die "jobs: expected key=value, got '$pair'" ;; esac
+    key="${pair%%=*}"
+    val="${pair#*=}"
+    case "$key" in
+      kind) jobs_check_kind "$val" ;;
+      delivery) jobs_check_delivery "$val" ;;
+      status) jobs_check_status "$val" ;;
+      worker|worktree|branch|pr|note) ;;
+      *) die "jobs: unknown key '$key'" ;;
+    esac
+  done
+  lock="$file"
+  jobs_lock "$lock"
+  row="$(jobs_row "$file" "$job")"
+  if [ -z "$row" ]; then
+    lock_release "$lock.lock"
+    die "jobs: unknown job '$job' — muxa jobs list"
+  fi
+  IFS=$'\t' read -r f_job f_kind f_delivery f_worker f_worktree f_branch f_status f_pr f_note f_updated <<EOF
+$row
+EOF
+  for pair in "$@"; do
+    key="${pair%%=*}"
+    val="$(jobs_clean "${pair#*=}")"
+    case "$key" in
+      kind) f_kind="$val" ;;
+      delivery) f_delivery="$val" ;;
+      worker) f_worker="$val" ;;
+      worktree) f_worktree="$val" ;;
+      branch) f_branch="$val" ;;
+      status) f_status="$val" ;;
+      pr) f_pr="$val" ;;
+      note) f_note="$val" ;;
+    esac
+  done
+  f_updated="$(jobs_now)"
+  jobs_replace_row "$file" "$f_job" \
+    "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+      "$f_job" "$f_kind" "$f_delivery" "$f_worker" "$f_worktree" \
+      "$f_branch" "$f_status" "$f_pr" "$f_note" "$f_updated")"
+  lock_release "$lock.lock"
+}
+
+cmd_jobs_add() {
+  local file="$1" job="$2"
+  shift 2
+  local pair key val lock
+  local kind="" delivery="" worker="" worktree="" branch="" note=""
+  for pair in "$@"; do
+    case "$pair" in *=*) ;; *) die "jobs add: expected key=value, got '$pair'" ;; esac
+    key="${pair%%=*}"
+    val="${pair#*=}"
+    case "$key" in
+      kind) kind="$val" ;;
+      delivery) delivery="$val" ;;
+      worker) worker="$val" ;;
+      worktree) worktree="$val" ;;
+      branch) branch="$val" ;;
+      note) note="$val" ;;
+      status|pr) die "jobs add: '$key' is set later (muxa jobs set|done)" ;;
+      *) die "jobs add: unknown key '$key'" ;;
+    esac
+  done
+  [ -n "$kind" ] || die "jobs add: kind=ship|research required"
+  [ -n "$delivery" ] || die "jobs add: delivery=pr|local|pipeline required"
+  jobs_check_kind "$kind"
+  jobs_check_delivery "$delivery"
+  lock="$file"
+  jobs_lock "$lock"
+  if [ -n "$(jobs_row "$file" "$job")" ]; then
+    lock_release "$lock.lock"
+    die "jobs add: job '$job' already exists"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$job" "$kind" "$delivery" "$(jobs_clean "$worker")" "$(jobs_clean "$worktree")" \
+    "$(jobs_clean "$branch")" open '-' "$(jobs_clean "$note")" "$(jobs_now)" >>"$file"
+  lock_release "$lock.lock"
+  printf 'added %s kind=%s delivery=%s status=open\n' "$job" "$kind" "$delivery"
+}
+
+cmd_jobs_list() {
+  local file="$1" n=0
+  local c1 c2 c3 c4 c5 c6 c7 c8 c9 c10
+  printf '%-16s %-8s %-9s %-9s %-14s %-22s %-28s %-21s %-32s %s\n' \
+    JOB STATUS KIND DELIVERY WORKER BRANCH WORKTREE UPDATED PR NOTE
+  while IFS=$'\t' read -r c1 c2 c3 c4 c5 c6 c7 c8 c9 c10; do
+    case "$c1" in "" | '#'*) continue ;; esac
+    n=$((n + 1))
+    printf '%-16s %-8s %-9s %-9s %-14s %-22s %-28s %-21s %-32s %s\n' \
+      "$c1" "$c7" "$c2" "$c3" "$c4" "$c6" "$c5" "$c10" "$c8" "$c9"
+  done <"$file"
+  [ "$n" -gt 0 ] || printf '(no jobs)\n'
+}
+
+cmd_jobs() {
+  local sub="${1:-}" file job arg
+  shift || true
+  case "$sub" in
+    add|set|done|list) ;;
+    "") die "jobs: add|set|done|list required" ;;
+    *) die "jobs: unknown subcommand '$sub'" ;;
+  esac
+  file="$(jobs_file)"
+  jobs_ensure_file "$file"
+  case "$sub" in
+    list)
+      [ $# -eq 0 ] || die "jobs list: unexpected argument '$1'"
+      cmd_jobs_list "$file"
+      ;;
+    add)
+      [ $# -ge 1 ] || die "jobs add: JOB required"
+      job="$1"
+      shift
+      jobs_check_name "$job"
+      cmd_jobs_add "$file" "$job" "$@"
+      ;;
+    set)
+      [ $# -ge 2 ] || die "jobs set: JOB key=value... required"
+      job="$1"
+      shift
+      jobs_check_name "$job"
+      jobs_apply "$file" "$job" "$@"
+      printf 'updated %s %s\n' "$job" "$*"
+      ;;
+    done)
+      [ $# -ge 1 ] || die "jobs done: JOB [pr=URL] required"
+      job="$1"
+      shift
+      jobs_check_name "$job"
+      for arg in "$@"; do
+        case "$arg" in pr=*) ;; *) die "jobs done: only pr=URL is accepted, got '$arg'" ;; esac
+      done
+      jobs_apply "$file" "$job" "$@" status=done
+      printf 'done %s\n' "$job"
+      ;;
+  esac
+}
+
 main() {
   local cmd="${1:-help}"
   shift || true
@@ -1088,6 +1432,8 @@ main() {
     deliver) cmd_deliver "$@" ;;
     state) cmd_state "$@" ;;
     hook) cmd_hook "$@" ;;
+    preflight) cmd_preflight "$@" ;;
+    jobs) cmd_jobs "$@" ;;
     kick-wait)
       need_tmux
       kick_wait "$1" "$2"
