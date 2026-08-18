@@ -136,6 +136,21 @@ muxa_as "$alice_pane" state busy
 empty="$(muxa_as "$alice_pane" hook stop --format claude)"
 [ -z "$empty" ] && ok "empty stop prints nothing" || bad "empty stop prints nothing" "got: $empty"
 
+# --- concurrent kick_wait while busy (inject) ---
+muxa_as "$alice_pane" register --name alice --kind generic --deliver inject >/dev/null
+muxa_as "$alice_pane" state busy
+: >"$alice_out"
+muxa_as "$bob_pane" send --no-reply alice 'wait-msg-alpha' &
+muxa_as "$bob_pane" send --no-reply alice 'wait-msg-beta' &
+wait
+sleep 0.2
+muxa_as "$alice_pane" state idle
+sleep 1.0
+got="$(cat "$alice_out" 2>/dev/null || true)"
+assert_contains "$got" "wait-msg-alpha" "concurrent wait delivers alpha"
+assert_contains "$got" "wait-msg-beta" "concurrent wait delivers beta"
+assert_contains "$got" "[muxa] 2 messages" "concurrent wait batches into one inject"
+
 # --- unknown target ---
 err="$(muxa_as "$bob_pane" send nobody hi 2>&1 || true)"
 assert_contains "$err" "unknown agent" "unknown name errors"
