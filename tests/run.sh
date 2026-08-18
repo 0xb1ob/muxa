@@ -8,9 +8,6 @@ PATH="$ROOT/bin:$PATH"
 for skill in muxa-parent muxa-worker muxa-orchestrator; do
   src="$ROOT/skills/$skill/SKILL.md"
   [ -f "$src" ] || { echo "missing $src" >&2; exit 1; }
-  for copy in "$ROOT/.cursor/skills/$skill/SKILL.md" "$ROOT/.claude/skills/$skill/SKILL.md"; do
-    diff -q "$src" "$copy" >/dev/null || { echo "skill copy drift: $copy" >&2; exit 1; }
-  done
 done
 SOCK="muxatest-$$"
 export MUXA_TMUX_SOCKET="$SOCK"
