@@ -52,7 +52,7 @@ muxa does not know about orchestrators. It only enforces a tree:
 - parent → its children: allowed
 - child → its parent: allowed
 - child → sibling or unrelated: forbidden (exit 4)
-- roots (no parent) → other roots: allowed
+- roots (no parent) → other roots: forbidden (exit 4)
 
 `muxa send --all` sends only to reachable panes.
 
