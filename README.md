@@ -46,7 +46,7 @@ idle at the composer      →  paste-buffer into that pane (they are waiting for
 ```
 
 tmux user options are the roster (`@muxa_name`, `@muxa_kind`, `@muxa_state`,
-`@muxa_deliver`). `tmux list-panes` is service discovery. Maildir (`tmp/new/cur`
+`@muxa_deliver`, `@muxa_session`). `tmux list-panes` is service discovery. Maildir (`tmp/new/cur`
 + atomic `mv`) is the queue — the same trick mail servers used before anyone
 invented SQLite-as-a-bus.
 
@@ -72,8 +72,9 @@ tests/e2e.sh          # real Claude Code + Cursor Agent + Oh My Pi in tmux
 tmux new -s agents
 claude
 # from that pane (or muxa spawn as that pane):
-muxa spawn --name cursor -- agent
+muxa spawn --name cursor -- agent   # split into this window; tiled grid
 muxa spawn --name pi -- omp
+muxa spawn --window --name solo -- agent   # dedicated window (old default)
 ```
 
 Hooks register the pane on session start. Confirm:
@@ -92,8 +93,9 @@ Never ack. `--no-reply` for status dumps.
 | Command | What |
 | --- | --- |
 | `muxa register [--name --id --parent --kind --deliver]` | Set pane identity (hooks do this) |
-| `muxa spawn --name NAME -- CMD` | Open a child pane; parent can message it |
-| `muxa who` | Roster (name, id, parent, …) |
+| `muxa spawn [--name NAME] [--split] [--window] -- CMD` | Split a child pane into a tiled grid in the parent's window. Omit `--name` for a unique `adjective-noun` alias. `--window` for a dedicated window; `--split` is compat |
+| `muxa who` | Roster (name, id, session, parent, …) |
+| `muxa session` | This pane's CLI session/conversation id |
 | `muxa children` | Direct children of this pane |
 | `muxa send NAME TEXT` | Queue + deliver if parent↔child |
 | `muxa send --all TEXT` | Every parent/child pane (not siblings or other roots) |

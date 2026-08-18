@@ -29,8 +29,9 @@ Each participating pane sets tmux user options:
 
 | Option          | Meaning                                      |
 | --------------- | -------------------------------------------- |
-| `@muxa_name`    | unique alias (`coder`, `worker-a`, …)        |
+| `@muxa_name`    | unique alias (`coder`, `swift-oak`, …)       |
 | `@muxa_id`      | stable 12-hex id for this pane's registration |
+| `@muxa_session` | CLI session/conversation id; empty until the agent hook reports it |
 | `@muxa_parent`  | parent alias, empty if this pane is a root   |
 | `@muxa_kind`    | `claude` \| `cursor` \| `pi` \| `generic`    |
 | `@muxa_state`   | `idle` \| `busy` \| `blocked`                |
@@ -42,8 +43,18 @@ Names are unique per tmux server. Duplicate register fails. Ids are unique
 even when two panes run the same CLI on the same project.
 
 A parent creates children with `muxa spawn --name NAME -- command…`, which
-opens a tmux window (or `--split` pane), sets `MUXA_PARENT`, and records
-`@muxa_parent` before the child CLI boots.
+splits a pane in the parent's window. Split direction follows pane count
+(`cols = ceil(sqrt(n+1))`: a complete rectangle starts a new row with
+`split-window -v`, otherwise a column with `-h`) so successive children fill
+a 2D grid rather than a single row. Then `select-layout tiled` on the window.
+`--window` opens a dedicated tmux window instead. `--split` is accepted for
+compatibility (split is the default). Sets `MUXA_PARENT`, and records
+`@muxa_parent` before the child CLI boots. Omit `--name` to get a generated
+`adjective-noun` alias (`swift-oak`, `quiet-lark`, …), unique on the tmux
+roster. Explicit `--name` and `MUXA_NAME` still win. `@muxa_id` is muxa's
+registration id, not the CLI session id — that lives in `@muxa_session`
+once a `session-start` hook reports `session_id` / `sessionId` /
+`conversation_id`.
 
 ## Reachability
 
@@ -139,9 +150,10 @@ muxa send --no-reply <name> <text…>
 muxa who
 muxa whoami
 muxa id
+muxa session
 muxa parent
 muxa children
-muxa spawn --name worker -- command…
+muxa spawn [--name worker] [--window] -- command…
 ```
 
 Exit 0 on queued or delivered. Exit 2 if the name is unknown. Exit 3 if

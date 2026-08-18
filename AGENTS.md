@@ -23,5 +23,9 @@ do not do their jobs.
 - Spawn leaves the parent's `muxa` on PATH so `muxa send <parent>` still
   works. Workers use `$WORKTREE/bin/muxa` only when testing their own
   changes.
-- When a worker reports a result, do not ack. Clean up: no-reply exit,
-  kill the pane, `treehouse return --force <path>`.
+- When the worktree is finished — nothing pending, no open decisions —
+  the worker opens a PR for that job if there are code changes; skip
+  the PR when the job was research-only with nothing to merge. Then
+  `treehouse return --force <path>` to free the lease. Include the PR
+  URL in the `[muxa]` result when there is one. The parent does not ack.
+  After the lease is returned, the parent may kill the pane.

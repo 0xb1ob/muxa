@@ -13,10 +13,13 @@ usage() {
 muxa — message other AI CLIs in this tmux server
 
   muxa register [--name NAME] [--id ID] [--parent NAME] [--kind claude|cursor|pi|generic] [--deliver hook|inject]
-  muxa spawn [--name NAME] [--kind KIND] [--split] -- COMMAND...
-  muxa who                          roster (tmux pane options)
+  muxa spawn [--name NAME] [--kind KIND] [--split] [--window] -- COMMAND...
+                                omit --name to get a unique adjective-noun alias (swift-oak)
+                                default: split into a tiled grid in this window (--window for a new window)
+  muxa who                          roster (tmux pane options, including CLI session id)
   muxa whoami                       this pane's alias
-  muxa id                           this pane's unique id
+  muxa id                           this pane's unique muxa id
+  muxa session                      this pane's CLI session/conversation id (empty until reported)
   muxa parent                       this pane's parent alias (empty if root)
   muxa children                     direct children of this pane
   muxa send [--no-reply] NAME TEXT  queue + deliver (parent↔child only)
@@ -88,6 +91,42 @@ pane_fmt() {
   tmux_do display-message -t "$1" -p "$2" 2>/dev/null || true
 }
 
+# ceil(sqrt(n)) for a positive integer. Used to size the next grid.
+ceil_sqrt() {
+  local n="$1" i=1
+  [ "$n" -gt 0 ] || { printf '1'; return; }
+  while [ $((i * i)) -lt "$n" ]; do
+    i=$((i + 1))
+  done
+  printf '%s' "$i"
+}
+
+# Largest pane (by area, then rightmost) in the last row of the window
+# containing $1. Last row = maximum #{pane_top}.
+grid_split_target() {
+  local win="$1" id top left w h area
+  local max_top=-1 best_id="" best_area=-1 best_left=-1
+  while read -r id top left w h; do
+    [ -n "$id" ] && [ -n "$top" ] && [ -n "$left" ] && [ -n "$w" ] && [ -n "$h" ] || continue
+    area=$((w * h))
+    if [ "$top" -gt "$max_top" ]; then
+      max_top=$top
+      best_id=$id
+      best_area=$area
+      best_left=$left
+    elif [ "$top" -eq "$max_top" ]; then
+      if [ "$area" -gt "$best_area" ] || { [ "$area" -eq "$best_area" ] && [ "$left" -gt "$best_left" ]; }; then
+        best_id=$id
+        best_area=$area
+        best_left=$left
+      fi
+    fi
+  done <<EOF
+$(tmux_do list-panes -t "$win" -F '#{pane_id} #{pane_top} #{pane_left} #{pane_width} #{pane_height}')
+EOF
+  printf '%s' "$best_id"
+}
+
 set_pane_opt() {
   tmux_do set-option -p -t "$1" "$2" "$3"
 }
@@ -100,9 +139,9 @@ new_muxa_id() {
   python3 -c 'import uuid; print(uuid.uuid4().hex[:12])'
 }
 
-# pane_id  name  id  parent  kind  state  deliver  where
+# pane_id  name  id  parent  kind  state  deliver  where  session
 roster_lines() {
-  tmux_do list-panes -a -F $'#{pane_id}\t#{@muxa_name}\t#{@muxa_id}\t#{@muxa_parent}\t#{@muxa_kind}\t#{@muxa_state}\t#{@muxa_deliver}\t#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null \
+  tmux_do list-panes -a -F $'#{pane_id}\t#{@muxa_name}\t#{@muxa_id}\t#{@muxa_parent}\t#{@muxa_kind}\t#{@muxa_state}\t#{@muxa_deliver}\t#{session_name}:#{window_index}.#{pane_index}\t#{@muxa_session}' 2>/dev/null \
     | awk -F '\t' '$2 != "" { print }'
 }
 
@@ -192,17 +231,103 @@ sanitize_name() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-*//;s/-*$//'
 }
 
+# Two-syllable-ish words; pairs pass sanitize_name and are easy to say/type.
+MUXA_NAME_ADJECTIVES='amber azure bold brave bright calm crisp eager fair gentle golden keen lively lucid lunar merry noble proud quiet rustic silent silver solar sturdy swift vivid'
+MUXA_NAME_NOUNS='badger brook canyon cedar comet ember falcon fern fox glacier grove harbor hawk heron lark maple meadow oak otter pebble pine raven ridge river sparrow stone willow wolf'
+
+word_from_list() {
+  local list="$1" n i idx=0 w
+  # shellcheck disable=SC2086
+  set -- $list
+  n=$#
+  [ "$n" -gt 0 ] || return 1
+  i=$((RANDOM % n))
+  for w in "$@"; do
+    if [ "$idx" -eq "$i" ]; then
+      printf '%s' "$w"
+      return 0
+    fi
+    idx=$((idx + 1))
+  done
+}
+
+# Unique adjective-noun for this tmux roster. $1 = pane to ignore (self), if any.
+generate_unique_name() {
+  local self="${1:-}" tries=0 adj noun candidate suffix
+  while [ "$tries" -lt 64 ]; do
+    adj="$(word_from_list "$MUXA_NAME_ADJECTIVES")"
+    noun="$(word_from_list "$MUXA_NAME_NOUNS")"
+    candidate="$(sanitize_name "$adj-$noun")"
+    if [ -n "$candidate" ] && ! name_taken_by_other "$candidate" "$self"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+    tries=$((tries + 1))
+  done
+  adj="$(word_from_list "$MUXA_NAME_ADJECTIVES")"
+  noun="$(word_from_list "$MUXA_NAME_NOUNS")"
+  suffix=2
+  candidate="$(sanitize_name "$adj-$noun-$suffix")"
+  while name_taken_by_other "$candidate" "$self"; do
+    suffix=$((suffix + 1))
+    candidate="$(sanitize_name "$adj-$noun-$suffix")"
+  done
+  printf '%s' "$candidate"
+}
+
+set_pane_title() {
+  tmux_do select-pane -t "$1" -T "$2" 2>/dev/null || true
+}
+
+apply_cli_session() {
+  local pane="$1" sid="$2" name short
+  [ -n "$sid" ] || return 0
+  set_pane_opt "$pane" @muxa_session "$sid"
+  name="$(pane_fmt "$pane" '#{@muxa_name}')"
+  short="$(printf '%s' "$sid" | cut -c1-8)"
+  if [ -n "$name" ]; then
+    set_pane_title "$pane" "$name · $short"
+  fi
+}
+
+read_session_id_from_stdin() {
+  if [ -t 0 ]; then
+    return 0
+  fi
+  python3 -c '
+import json, sys
+raw = sys.stdin.read()
+if not raw.strip():
+    sys.exit(0)
+try:
+    data = json.loads(raw)
+except Exception:
+    sys.exit(0)
+if not isinstance(data, dict):
+    sys.exit(0)
+for key in ("session_id", "sessionId", "conversation_id"):
+    val = data.get(key)
+    if val is None:
+        continue
+    text = str(val).strip()
+    if text:
+        print(text)
+        break
+' 2>/dev/null || true
+}
+
 default_name() {
-  local pane="$1" win
+  local pane="$1" existing
   if [ -n "${MUXA_NAME:-}" ]; then
     sanitize_name "$MUXA_NAME"
     return
   fi
-  win="$(pane_fmt "$pane" '#{window_name}')"
-  case "$win" in
-    ''|bash|zsh|sh|fish) sanitize_name "$(printf '%s' "$pane" | tr -d '%')" ;;
-    *) sanitize_name "$win" ;;
-  esac
+  existing="$(pane_fmt "$pane" '#{@muxa_name}')"
+  if [ -n "$existing" ]; then
+    printf '%s' "$existing"
+    return
+  fi
+  generate_unique_name "$pane"
 }
 
 parent_would_cycle() {
@@ -410,6 +535,7 @@ cmd_register() {
     unset_pane_opt "$pane" @muxa_parent
   fi
   ensure_box "$name" >/dev/null
+  set_pane_title "$pane" "$name"
   if [ -n "$parent" ]; then
     printf 'registered %s id=%s parent=%s kind=%s deliver=%s pane=%s\n' \
       "$name" "$id" "$parent" "$kind" "$deliver" "$pane"
@@ -421,13 +547,14 @@ cmd_register() {
 
 cmd_who() {
   need_tmux
-  printf '%-16s %-14s %-16s %-8s %-8s %-8s %-8s %s\n' NAME ID PARENT KIND STATE DELIVER PANE WHERE
+  printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %s\n' NAME ID SESSION PARENT KIND STATE DELIVER PANE WHERE
   local line
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    printf '%-16s %-14s %-16s %-8s %-8s %-8s %-8s %s\n' \
+    printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %s\n' \
       "$(printf '%s\n' "$line" | field 2)" \
       "$(printf '%s\n' "$line" | field 3)" \
+      "$(printf '%s\n' "$line" | field 9)" \
       "$(printf '%s\n' "$line" | field 4)" \
       "$(printf '%s\n' "$line" | field 5)" \
       "$(printf '%s\n' "$line" | field 6)" \
@@ -453,6 +580,11 @@ cmd_id() {
   n="$(pane_fmt "$(this_pane)" '#{@muxa_id}')"
   [ -n "$n" ] || die "this pane is not registered (muxa register)"
   printf '%s\n' "$n"
+}
+
+cmd_session() {
+  need_tmux
+  printf '%s\n' "$(pane_fmt "$(this_pane)" '#{@muxa_session}')"
 }
 
 cmd_parent() {
@@ -692,7 +824,7 @@ cmd_deliver() {
 
 cmd_spawn() {
   need_tmux
-  local pane name kind split=0 parent id cwd sess quoted child cmdpath
+  local pane name kind new_window=0 parent id cwd sess quoted child cmdpath
   pane="$(this_pane)"
   parent="$(pane_fmt "$pane" '#{@muxa_name}')"
   [ -n "$parent" ] || die "spawn: register this pane first"
@@ -702,7 +834,8 @@ cmd_spawn() {
     case "$1" in
       --name) name="$2"; shift 2 ;;
       --kind) kind="$2"; shift 2 ;;
-      --split) split=1; shift ;;
+      --split) shift ;; # compat: split into the parent window is the default
+      --window) new_window=1; shift ;;
       --) shift; break ;;
       -*) die "spawn: unknown flag $1" ;;
       *) break ;;
@@ -710,8 +843,11 @@ cmd_spawn() {
   done
   [ $# -ge 1 ] || die "spawn: command required (muxa spawn --name worker -- cmd…)"
   id="$(new_muxa_id)"
-  [ -n "$name" ] || name="child-$id"
-  name="$(sanitize_name "$name")"
+  if [ -n "$name" ]; then
+    name="$(sanitize_name "$name")"
+  else
+    name="$(generate_unique_name "")"
+  fi
   [ -n "$kind" ] || kind="$(kind_from_command "$1")"
   if name_taken_by_other "$name" ""; then
     die "name '$name' already registered"
@@ -730,10 +866,23 @@ cmd_spawn() {
     envcmd="$envcmd MUXA_BIN=$(shlex_join "$MUXA_BIN")"
   fi
   envcmd="$envcmd; exec $quoted"
-  if [ "$split" -eq 1 ]; then
-    child="$(tmux_do split-window -t "$pane" -c "$cwd" -P -F '#{pane_id}' "$envcmd")"
-  else
+  if [ "$new_window" -eq 1 ]; then
     child="$(tmux_do new-window -t "$sess" -n "$name" -c "$cwd" -P -F '#{pane_id}' "$envcmd")"
+  else
+    local n cols target winid
+    n="$(tmux_do list-panes -t "$pane" -F '#{pane_id}' | awk 'END { print NR }')"
+    [ -n "$n" ] || n=1
+    cols="$(ceil_sqrt $((n + 1)))"
+    target="$(grid_split_target "$pane")"
+    [ -n "$target" ] || target="$pane"
+    # Complete rectangle (n divisible by next-grid cols) → new row; else add a column.
+    if [ $((n % cols)) -eq 0 ]; then
+      child="$(tmux_do split-window -v -t "$target" -c "$cwd" -P -F '#{pane_id}' "$envcmd")"
+    else
+      child="$(tmux_do split-window -h -t "$target" -c "$cwd" -P -F '#{pane_id}' "$envcmd")"
+    fi
+    winid="$(pane_fmt "$pane" '#{window_id}')"
+    tmux_do select-layout -t "$winid" tiled
   fi
   [ -n "$child" ] || die "spawn: tmux did not return a pane id"
   set_pane_opt "$child" @muxa_name "$name"
@@ -743,6 +892,7 @@ cmd_spawn() {
   set_pane_opt "$child" @muxa_deliver "$(default_deliver "$kind")"
   set_pane_opt "$child" @muxa_state idle
   ensure_box "$name" >/dev/null
+  set_pane_title "$child" "$name"
   printf 'spawned %s id=%s parent=%s kind=%s pane=%s\n' "$name" "$id" "$parent" "$kind" "$child"
 }
 
@@ -750,7 +900,7 @@ cmd_hook() {
   need_tmux
   local event="${1:-}"
   shift || true
-  local format="claude" kind=""
+  local format="claude" kind="" session_id=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --format) format="$2"; shift 2 ;;
@@ -758,9 +908,9 @@ cmd_hook() {
       *) shift ;;
     esac
   done
-  consume_stdin
   case "$event" in
     session-start|SessionStart|sessionStart)
+      session_id="$(read_session_id_from_stdin)"
       [ -n "$kind" ] || kind="$(detect_kind "$(this_pane)")"
       if [ -n "${MUXA_NAME:-}" ] && [ -n "${MUXA_PARENT:-}" ]; then
         cmd_register --name "$MUXA_NAME" --kind "$kind" --deliver hook --parent "$MUXA_PARENT" >/dev/null
@@ -771,26 +921,35 @@ cmd_hook() {
       else
         cmd_register --kind "$kind" --deliver hook >/dev/null
       fi
+      if [ -n "$session_id" ]; then
+        apply_cli_session "$(this_pane)" "$session_id"
+      fi
       cmd_state idle
       ;;
     session-end|SessionEnd|sessionEnd)
+      consume_stdin
       unset_pane_opt "$(this_pane)" @muxa_name
       unset_pane_opt "$(this_pane)" @muxa_id
       unset_pane_opt "$(this_pane)" @muxa_parent
       unset_pane_opt "$(this_pane)" @muxa_kind
       unset_pane_opt "$(this_pane)" @muxa_state
       unset_pane_opt "$(this_pane)" @muxa_deliver
+      unset_pane_opt "$(this_pane)" @muxa_session
       ;;
     busy|PreToolUse|preToolUse)
+      consume_stdin
       cmd_state busy
       ;;
     blocked|PermissionRequest)
+      consume_stdin
       cmd_state blocked
       ;;
     idle)
+      consume_stdin
       cmd_state idle
       ;;
     stop|Stop|session_stop)
+      consume_stdin
       local name list payload
       name="$(pane_fmt "$(this_pane)" '#{@muxa_name}')"
       if [ -z "$name" ]; then
@@ -812,6 +971,7 @@ cmd_hook() {
       printf '%s' "$payload" | json_out "$format"
       ;;
     *)
+      consume_stdin
       die "hook: unknown event $event"
       ;;
   esac
@@ -828,6 +988,7 @@ main() {
     who|ls|roster) cmd_who "$@" ;;
     whoami) cmd_whoami "$@" ;;
     id) cmd_id "$@" ;;
+    session) cmd_session "$@" ;;
     parent) cmd_parent "$@" ;;
     children) cmd_children "$@" ;;
     send) cmd_send "$@" ;;

@@ -218,12 +218,110 @@ assert_contains "$root_to_child" "forbidden" "unrelated root → child refused"
 none="$(muxa_as "$eve_pane" send --all 'nope')"
 assert_contains "$none" "no reachable peers" "root --all has no peers"
 
-# --- spawn ---
-spawned="$(muxa_as "$bob_pane" spawn --name spawned -- sleep 3600)"
-assert_contains "$spawned" "spawned spawned" "spawn creates child pane"
+# --- spawn (default: split into parent window, tiled grid) ---
+bob_win="$(tmux -L "$SOCK" display-message -t "$bob_pane" -p '#{session_name}:#{window_index}')"
+n0="$(tmux -L "$SOCK" list-panes -t "$bob_win" -F '#{pane_id}' | awk 'END { print NR }')"
+
+spawn_pane_id() {
+  awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^pane=/) { sub(/^pane=/, "", $i); print $i; exit } }'
+}
+
+spawned="$(muxa_as "$bob_pane" spawn --name grid1 -- sleep 3600)"
+assert_contains "$spawned" "spawned grid1" "default spawn creates child pane"
 assert_contains "$spawned" "parent=bob" "spawn records parent"
-sp_par="$(muxa_as "$(tmux -L "$SOCK" list-panes -t muxa:spawned -F '#{pane_id}')" parent)"
+grid1_pane="$(printf '%s\n' "$spawned" | spawn_pane_id)"
+grid1_win="$(tmux -L "$SOCK" display-message -t "$grid1_pane" -p '#{session_name}:#{window_index}')"
+[ "$grid1_win" = "$bob_win" ] && ok "default spawn stays in parent window" \
+  || bad "default spawn stays in parent window" "parent=$bob_win child=$grid1_win"
+n1="$(tmux -L "$SOCK" list-panes -t "$bob_win" -F '#{pane_id}' | awk 'END { print NR }')"
+[ "$n1" -gt "$n0" ] && ok "default spawn adds a pane" \
+  || bad "default spawn adds a pane" "before=$n0 after=$n1"
+sp_par="$(muxa_as "$grid1_pane" parent)"
 assert_contains "$sp_par" "bob" "spawned pane parent option"
+
+muxa_as "$bob_pane" spawn --name grid2 -- sleep 3600 >/dev/null
+muxa_as "$bob_pane" spawn --name grid3 -- sleep 3600 >/dev/null
+n3="$(tmux -L "$SOCK" list-panes -t "$bob_win" -F '#{pane_id}' | awk 'END { print NR }')"
+expect=$((n0 + 3))
+[ "$n3" -eq "$expect" ] && ok "three default spawns stay in parent window" \
+  || bad "three default spawns stay in parent window" "expected $expect panes, got $n3"
+
+win_sp="$(muxa_as "$bob_pane" spawn --name spawned --window -- sleep 3600)"
+assert_contains "$win_sp" "spawned spawned" "spawn --window creates named window"
+win_list="$(tmux -L "$SOCK" list-windows -F '#{window_name}')"
+assert_contains "$win_list" "spawned" "spawn --window names the window"
+sp_par="$(muxa_as "$(tmux -L "$SOCK" list-panes -t muxa:spawned -F '#{pane_id}')" parent)"
+assert_contains "$sp_par" "bob" "spawn --window pane parent option"
+
+split_sp="$(muxa_as "$bob_pane" spawn --name splitkid --split -- sleep 3600)"
+assert_contains "$split_sp" "spawned splitkid" "spawn --split still works"
+split_pane="$(printf '%s\n' "$split_sp" | spawn_pane_id)"
+split_win="$(tmux -L "$SOCK" display-message -t "$split_pane" -p '#{session_name}:#{window_index}')"
+[ "$split_win" = "$bob_win" ] && ok "spawn --split stays in parent window" \
+  || bad "spawn --split stays in parent window" "parent=$bob_win child=$split_win"
+n_split="$(tmux -L "$SOCK" list-panes -t "$bob_win" -F '#{pane_id}' | awk 'END { print NR }')"
+[ "$n_split" -eq $((expect + 1)) ] && ok "spawn --split adds a pane in the grid" \
+  || bad "spawn --split adds a pane in the grid" "expected $((expect + 1)) panes, got $n_split"
+
+# Dedicated wide window: 4 default spawns must be 2D (not a single row/column).
+tmux -L "$SOCK" new-window -t muxa -n gridhost "exec sleep 3600"
+sleep 0.2
+grid_pane="$(tmux -L "$SOCK" list-panes -t muxa:gridhost -F '#{pane_id}')"
+tmux -L "$SOCK" resize-window -t muxa:gridhost -x 200 -y 40 2>/dev/null || true
+muxa_as "$grid_pane" register --name gridhost --kind generic --deliver inject >/dev/null
+grid_win="$(tmux -L "$SOCK" display-message -t "$grid_pane" -p '#{session_name}:#{window_index}')"
+
+muxa_as "$grid_pane" spawn --name g1 -- sleep 3600 >/dev/null
+muxa_as "$grid_pane" spawn --name g2 -- sleep 3600 >/dev/null
+n2="$(tmux -L "$SOCK" list-panes -t "$grid_win" -F '#{pane_id}' | awk 'END { print NR }')"
+[ "$n2" -eq 3 ] && ok "two default spawns stay in grid window" \
+  || bad "two default spawns stay in grid window" "expected 3 panes, got $n2"
+
+muxa_as "$grid_pane" spawn --name g3 -- sleep 3600 >/dev/null
+muxa_as "$grid_pane" spawn --name g4 -- sleep 3600 >/dev/null
+n4="$(tmux -L "$SOCK" list-panes -t "$grid_win" -F '#{pane_id}' | awk 'END { print NR }')"
+[ "$n4" -eq 5 ] && ok "four default spawns stay in grid window" \
+  || bad "four default spawns stay in grid window" "expected 5 panes, got $n4"
+nleft="$(tmux -L "$SOCK" list-panes -t "$grid_win" -F '#{pane_left}' | sort -u | awk 'END { print NR }')"
+ntop="$(tmux -L "$SOCK" list-panes -t "$grid_win" -F '#{pane_top}' | sort -u | awk 'END { print NR }')"
+[ "$nleft" -ge 2 ] && [ "$ntop" -ge 2 ] && ok "four default spawns form a 2D grid" \
+  || bad "four default spawns form a 2D grid" "distinct pane_left=$nleft pane_top=$ntop (need >=2 each)"
+
+# --- generated names ---
+gen1="$(muxa_as "$bob_pane" spawn -- sleep 3600)"
+gen1_name="$(printf '%s\n' "$gen1" | awk '{print $2}')"
+if printf '%s' "$gen1_name" | grep -Eq '^[a-z]+-[a-z]+(-[0-9]+)?$'; then
+  ok "nameless spawn is adjective-noun"
+else
+  bad "nameless spawn is adjective-noun" "got: $gen1_name from $gen1"
+fi
+
+gen2="$(muxa_as "$bob_pane" spawn -- sleep 3600)"
+gen2_name="$(printf '%s\n' "$gen2" | awk '{print $2}')"
+if printf '%s' "$gen2_name" | grep -Eq '^[a-z]+-[a-z]+(-[0-9]+)?$'; then
+  ok "second nameless spawn is adjective-noun"
+else
+  bad "second nameless spawn is adjective-noun" "got: $gen2_name from $gen2"
+fi
+[ "$gen1_name" != "$gen2_name" ] && ok "nameless spawns get different names" \
+  || bad "nameless spawns get different names" "both=$gen1_name"
+
+# --- CLI session id mapping ---
+printf '%s' '{"session_id":"cli-sess-123"}' | muxa_as "$alice_pane" hook session-start --kind generic
+sid="$(tmux -L "$SOCK" display-message -p -t "$alice_pane" '#{@muxa_session}')"
+[ "$sid" = "cli-sess-123" ] && ok "session-start stores @muxa_session" \
+  || bad "session-start stores @muxa_session" "got: $sid"
+
+who="$(muxa_as "$bob_pane" who)"
+assert_contains "$who" "cli-sess-123" "who shows session id"
+
+got_sess="$(muxa_as "$alice_pane" session)"
+assert_contains "$got_sess" "cli-sess-123" "muxa session prints CLI session id"
+
+muxa_as "$alice_pane" hook session-end
+sid2="$(tmux -L "$SOCK" display-message -p -t "$alice_pane" '#{@muxa_session}')"
+[ -z "$sid2" ] && ok "session-end clears @muxa_session" \
+  || bad "session-end clears @muxa_session" "got: $sid2"
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

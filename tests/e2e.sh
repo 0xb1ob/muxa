@@ -44,6 +44,13 @@ bad() {
 
 tmux_e() { tmux -L "$SOCK" "$@"; }
 
+# Resolve a registered pane by @muxa_name (not window name). Spawned children
+# share the parent window, so $SESSION:cursor / $SESSION:pi do not exist.
+pane_by_name() {
+  tmux_e list-panes -a -F '#{pane_id} #{@muxa_name}' 2>/dev/null \
+    | awk -v n="$1" '$2==n { print $1; exit }'
+}
+
 pane_text() {
   tmux_e capture-pane -p -t "$1" -S - 2>/dev/null \
     | sed $'s/\x1b\\[[0-9;]*[a-zA-Z]//g' \
@@ -54,14 +61,22 @@ dump() {
   tmux_e list-panes -a -F '#{window_name} id=#{pane_id} cmd=#{pane_current_command} name=#{@muxa_name} parent=#{@muxa_parent} muxid=#{@muxa_id} state=#{@muxa_state}' \
     >"$ART/panes.txt" 2>/dev/null || true
   muxa who >"$ART/who.txt" 2>/dev/null || true
-  pane_text "$SESSION:claude" >"$ART/claude.pane" 2>/dev/null || true
-  pane_text "$SESSION:cursor" >"$ART/cursor.pane" 2>/dev/null || true
-  pane_text "$SESSION:pi" >"$ART/pi.pane" 2>/dev/null || true
+  pane_text "$(pane_by_name claude)" >"$ART/claude.pane" 2>/dev/null || true
+  pane_text "$(pane_by_name cursor)" >"$ART/cursor.pane" 2>/dev/null || true
+  pane_text "$(pane_by_name pi)" >"$ART/pi.pane" 2>/dev/null || true
   cp "$HOOK_LOG" "$ART/hooks.log.copy" 2>/dev/null || true
+}
+
+dismiss_named() {
+  local pane
+  pane="$(pane_by_name "$1")"
+  [ -n "$pane" ] || return 0
+  dismiss_dialogs "$pane"
 }
 
 dismiss_dialogs() {
   local target="$1" text
+  [ -n "$target" ] || return 0
   tmux_e has-session -t "$SESSION" 2>/dev/null || return 0
   text="$(pane_text "$target" | tail -n 30)"
   case "$text" in
@@ -79,17 +94,20 @@ dismiss_dialogs() {
 }
 
 wait_registered() {
-  local name="$1" seconds="$2" i=0 dead
+  local name="$1" seconds="$2" i=0 dead pane
   while [ "$i" -lt "$seconds" ]; do
-    dead="$(tmux_e display-message -t "$SESSION:$name" -p '#{pane_dead}' 2>/dev/null || echo 1)"
-    if [ "$dead" = "1" ]; then
-      printf 'pane %s is dead\n' "$name" >&2
-      pane_text "$SESSION:$name" | tail -n 40 >&2
-      return 1
+    pane="$(pane_by_name "$name")"
+    if [ -n "$pane" ]; then
+      dead="$(tmux_e display-message -t "$pane" -p '#{pane_dead}' 2>/dev/null || echo 1)"
+      if [ "$dead" = "1" ]; then
+        printf 'pane %s is dead\n' "$name" >&2
+        pane_text "$pane" | tail -n 40 >&2
+        return 1
+      fi
     fi
-    dismiss_dialogs "$SESSION:claude"
-    dismiss_dialogs "$SESSION:cursor"
-    dismiss_dialogs "$SESSION:pi"
+    dismiss_named claude
+    dismiss_named cursor
+    dismiss_named pi
     if muxa who 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$name"; then
       return 0
     fi
@@ -181,18 +199,18 @@ fi
 if wait_registered cursor "$BOOT_S"; then
   ok "cursor registered as child"
 else
-  bad "cursor registered as child" "$(pane_text "$SESSION:cursor" | tail -n 40)"
+  bad "cursor registered as child" "$(pane_text "$(pane_by_name cursor)" | tail -n 40)"
 fi
 if wait_registered pi "$BOOT_S"; then
   ok "pi registered as child"
 else
-  bad "pi registered as child" "$(pane_text "$SESSION:pi" | tail -n 40)"
+  bad "pi registered as child" "$(pane_text "$(pane_by_name pi)" | tail -n 40)"
 fi
 
 who="$(muxa who 2>/dev/null || true)"
 printf '%s\n' "$who"
-cursor_pane="$(tmux_e list-panes -t "$SESSION:cursor" -F '#{pane_id}' 2>/dev/null || true)"
-pi_pane="$(tmux_e list-panes -t "$SESSION:pi" -F '#{pane_id}' 2>/dev/null || true)"
+cursor_pane="$(pane_by_name cursor)"
+pi_pane="$(pane_by_name pi)"
 
 cpar="$(muxa_as "$cursor_pane" parent 2>/dev/null || true)"
 ppar="$(muxa_as "$pi_pane" parent 2>/dev/null || true)"
@@ -218,9 +236,9 @@ printf '%s\n' "$r2r" | grep -q forbidden && ok "human root → claude root refus
 
 # --- inject parent → children ---
 sleep 3
-dismiss_dialogs "$SESSION:claude"
-dismiss_dialogs "$SESSION:cursor"
-dismiss_dialogs "$SESSION:pi"
+dismiss_named claude
+dismiss_named cursor
+dismiss_named pi
 
 inject_u="MUXA_INJECT_CURSOR_$TOKEN"
 inject_p="MUXA_INJECT_PI_$TOKEN"
@@ -229,8 +247,8 @@ printf '%s\n' "$sent" | grep -Eq 'delivered|queued' && ok "parent → cursor sen
 sent="$(muxa_as "$claude_pane" send --no-reply pi "$inject_p" 2>&1 || true)"
 printf '%s\n' "$sent" | grep -Eq 'delivered|queued' && ok "parent → pi send ($sent)" || bad "parent → pi send" "$sent"
 
-wait_pane_has "$SESSION:cursor" "$inject_u" 20 && ok "cursor TUI shows parent inject" || bad "cursor TUI shows parent inject" "$(pane_text "$SESSION:cursor" | tail -n 40)"
-wait_pane_has "$SESSION:pi" "$inject_p" 20 && ok "pi TUI shows parent inject" || bad "pi TUI shows parent inject" "$(pane_text "$SESSION:pi" | tail -n 40)"
+wait_pane_has "$cursor_pane" "$inject_u" 20 && ok "cursor TUI shows parent inject" || bad "cursor TUI shows parent inject" "$(pane_text "$cursor_pane" | tail -n 40)"
+wait_pane_has "$pi_pane" "$inject_p" 20 && ok "pi TUI shows parent inject" || bad "pi TUI shows parent inject" "$(pane_text "$pi_pane" | tail -n 40)"
 
 # --- LLM: type into the parent pane (roots cannot muxa-send to each other) ---
 wait_state claude idle 60 || true
@@ -238,20 +256,20 @@ sleep 2
 hop="MUXA_HOP_$TOKEN"
 hop_prompt="You have two child panes (cursor and pi). Ping both with one command, then stop: muxa send --no-reply --all ${hop}"
 printf '%s' "$hop_prompt" | tmux_e load-buffer -b muxae2e-hop -
-tmux_e paste-buffer -p -d -b muxae2e-hop -t "$SESSION:claude"
+tmux_e paste-buffer -p -d -b muxae2e-hop -t "$claude_pane"
 sleep "${MUXA_ENTER_DELAY}"
-tmux_e send-keys -t "$SESSION:claude" Enter
+tmux_e send-keys -t "$claude_pane" Enter
 printf 'hop typed into claude pane\n'
 
-if wait_pane_has "$SESSION:cursor" "$hop" "$HOP_S"; then
+if wait_pane_has "$cursor_pane" "$hop" "$HOP_S"; then
   ok "cursor child received parent hop"
 else
-  bad "cursor child received parent hop" "claude:"$'\n'"$(pane_text "$SESSION:claude" | tail -n 40)"$'\n'"cursor:"$'\n'"$(pane_text "$SESSION:cursor" | tail -n 40)"
+  bad "cursor child received parent hop" "claude:"$'\n'"$(pane_text "$claude_pane" | tail -n 40)"$'\n'"cursor:"$'\n'"$(pane_text "$cursor_pane" | tail -n 40)"
 fi
-if wait_pane_has "$SESSION:pi" "$hop" 30; then
+if wait_pane_has "$pi_pane" "$hop" 30; then
   ok "pi child received parent hop"
 else
-  bad "pi child received parent hop" "$(pane_text "$SESSION:pi" | tail -n 40)"
+  bad "pi child received parent hop" "$(pane_text "$pi_pane" | tail -n 40)"
 fi
 
 dump
