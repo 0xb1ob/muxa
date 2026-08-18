@@ -29,7 +29,7 @@ is_stale_muxa_home() {
   for f in "$1"/* "$1"/.[!.]*; do
     [ -e "$f" ] || continue
     case "$(basename "$f")" in
-      AGENTS.md.snippet|.DS_Store) ;;
+      .DS_Store) ;;
       *) return 1 ;;
     esac
   done
@@ -88,9 +88,6 @@ for skill in muxa-parent muxa-worker muxa-orchestrator; do
     cp "$ROOT/skills/$skill/SKILL.md" "$dest/SKILL.md"
   done
 done
-
-mkdir -p "$HOME/.claude/commands"
-cp "$ROOT/integrations/claude/muxa.md" "$HOME/.claude/commands/muxa.md"
 
 # Claude Code user hooks — merge without clobbering unrelated settings.
 python3 - "$HOME/.claude/settings.json" "$BIN/muxa" <<'PY'
@@ -188,4 +185,3 @@ echo
 echo "muxa $("$BIN/muxa" version) -> $BIN/muxa  (repo $ROOT)"
 echo "Skills muxa-parent / muxa-worker / muxa-orchestrator -> ~/.cursor/skills, ~/.claude/skills, ~/.agents/skills"
 echo "Put $BIN on PATH if needed. Start each CLI inside tmux, then: muxa who"
-echo "Optional: paste $ROOT/integrations/AGENTS.md.snippet into a project AGENTS.md"

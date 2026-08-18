@@ -1,7 +1,0 @@
-## muxa (tmux agent mail)
-
-Use skill **muxa-parent** only if `muxa parent` is empty; **muxa-worker** only if this pane was spawned (`muxa parent` prints a name). Halt if the other skill is used in the wrong pane.
-CLIs in this tmux server can message a parent or child with `muxa send <name> <text>`.
-Incoming mail arrives as a user turn tagged `[muxa]`. Do not poll. Do not ack.
-Reply only with a question, a result, or a blocker.
-`muxa who` lists panes. Do not message siblings or other roots.
