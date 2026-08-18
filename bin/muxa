@@ -160,9 +160,12 @@ new_muxa_id() {
 }
 
 # pane_id  name  id  parent  kind  state  deliver  where  session  cwd  command
+# tmux <=3.4 rewrites literal tab bytes in -F output to "_", which breaks
+# tab-delimited parsing on some platforms (e.g. Ubuntu CI runners). "||"
+# survives unmodified and won't appear in any of these fields in practice.
 roster_lines() {
-  tmux_do list-panes -a -F $'#{pane_id}\t#{@muxa_name}\t#{@muxa_id}\t#{@muxa_parent}\t#{@muxa_kind}\t#{@muxa_state}\t#{@muxa_deliver}\t#{session_name}:#{window_index}.#{pane_index}\t#{@muxa_session}\t#{pane_current_path}\t#{pane_current_command}' 2>/dev/null \
-    | awk -F '\t' '$2 != "" { print }'
+  tmux_do list-panes -a -F '#{pane_id}||#{@muxa_name}||#{@muxa_id}||#{@muxa_parent}||#{@muxa_kind}||#{@muxa_state}||#{@muxa_deliver}||#{session_name}:#{window_index}.#{pane_index}||#{@muxa_session}||#{pane_current_path}||#{pane_current_command}' 2>/dev/null \
+    | awk -F '\\|\\|' '$2 != "" { print }'
 }
 
 is_shell_command() {
@@ -223,7 +226,7 @@ EOF
 }
 
 field() {
-  awk -F '\t' -v n="$1" '{ print $n }'
+  awk -F '\\|\\|' -v n="$1" '{ print $n }'
 }
 
 find_pane_by_name() {
