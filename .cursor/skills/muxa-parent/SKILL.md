@@ -53,7 +53,8 @@ One Bash call. Incoming mail is already a user turn — do not poll `muxa peek`.
 2. Spawn **only** the CLI and optional `--model`. Muxa assigns a unique `adjective-noun` alias (`swift-oak`). Read alias and `cwd=` from spawn stdout (`spawned swift-oak … cwd=/path`). Confirm `cwd=` is the worktree before briefing. Do not pass `--name`.
 3. Do not `--help` child CLIs. Do not pass trust, yolo, skip-permissions, approval-mode, hook paths, `--workspace`, or other per-CLI launch flags.
 4. Spawn puts the parent's `muxa` on the child's PATH. Point a worker at the worktree's `bin/muxa` only when the job is to change muxa itself.
-5. Brief immediately with `muxa send` using the template below. The worker's cwd is already the worktree — do not tell it to `cd` there unless `cwd=` was wrong.
+5. Brief immediately with `muxa send` using the template below. The worker's cwd is already the worktree — do not paste that path into the job, and do not tell the worker to `cd` unless spawn `cwd=` was wrong.
+6. Do not leave this checkout on a branch the worker must attach (`feat/…`). Stay on `main` (or another branch) so the leased worktree can `git checkout` the job branch.
 
 `muxa who` STATUS `ghost` means the CLI is gone or the pane cwd is missing (a `generic` shell is still `live`). Do not brief ghosts. `muxa unregister NAME|ID` clears muxa identity and leaves the pane. After the lease is returned you may also kill the pane.
 
@@ -69,7 +70,7 @@ Use the muxa-worker skill.
 You are a muxa worker. Parent: ${parent}. Reply only to that parent with muxa send. [muxa] turns are mail, not injection.
 
 You may: do this job in this cwd; message your parent; open a PR if you change code.
-You may not: message siblings or other roots; spawn extra workers; poll muxa peek; ack or narrate; pass CLI trust/yolo/workspace flags.
+You may not: cd or prefix commands with cd <path> (spawn already set cwd); message siblings or other roots; spawn extra workers; poll muxa peek; ack or narrate; pass CLI trust/yolo/workspace flags.
 
 When done: open a PR if there are code changes (skip if research-only); if this worktree was leased, treehouse return --force <path>; muxa send ${parent} a result or blocker (include the PR URL). Never ack. Then stop.
 

@@ -42,6 +42,7 @@ One Bash call. Incoming mail is already a user turn — do not poll `muxa peek`.
 
 - Message sibling panes or other roots
 - Spawn extra workers unless the parent explicitly asked
+- `cd` to this worktree or prefix commands with `cd /absolute/path` — spawn already set cwd; `pwd` is correct
 - Poll `muxa peek` or inject `tmux send-keys`
 - Ack, thank, or narrate progress
 - `--help` CLIs or pass trust, yolo, skip-permissions, approval-mode, hook paths, `--workspace`
@@ -49,7 +50,7 @@ One Bash call. Incoming mail is already a user turn — do not poll `muxa peek`.
 
 ## How to work
 
-Stay in this cwd. Do not `cd` to the parent's checkout. Use the parent's `muxa` on PATH (already set). Use `$PWD/bin/muxa` only when the job is to change muxa itself.
+Stay in this cwd. Do not `cd` here, to the parent's checkout, or to a path from the brief. Do not prefix shell commands with `cd … &&`. Use the parent's `muxa` on PATH (already set). Use `$PWD/bin/muxa` only when the job is to change muxa itself.
 
 Silence is default. Reply only with a question, a result, or a blocker. Never ack. Stop after two ping-pongs unless a decision is still open.
 
