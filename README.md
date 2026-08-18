@@ -113,7 +113,8 @@ is default. Reply only with a question, a result, or a blocker. Never ack.
 | --- | --- |
 | `muxa register [--name --id --parent --kind --deliver]` | Set pane identity (hooks do this) |
 | `muxa spawn [--name NAME] [--split] [--window] -- CMD` | Split a child pane into a tiled grid in the parent's window. Omit `--name` for a unique `adjective-noun` alias. `--window` for a dedicated window; `--split` is compat |
-| `muxa who` | Roster (name, id, session, parent, cwd, …) |
+| `muxa who` | Roster (name, id, session, parent, cwd, STATUS, …) |
+| `muxa unregister NAME\|ID` | Clear muxa registration; leave pane running |
 | `muxa session` | This pane's CLI session/conversation id |
 | `muxa children` | Direct children of this pane |
 | `muxa send NAME TEXT` | Queue + deliver if parent↔child |

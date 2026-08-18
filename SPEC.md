@@ -38,8 +38,27 @@ Each participating pane sets tmux user options:
 | `@muxa_deliver` | `hook` \| `inject`                           |
 
 Roster is `tmux list-panes -a`. There is no registry file. `muxa who`
-prints that roster plus each pane's current working directory so agents
-on the same tmux server, in different projects, can tell which is which.
+prints that roster plus each pane's current working directory and a
+**STATUS** column so agents on the same tmux server, in different
+projects, can tell which is which.
+
+**STATUS** is informational only; ghosts are not filtered from the roster
+and remain reachable via `muxa send`:
+
+| STATUS | Meaning |
+| ------ | ------- |
+| `live` | Pane cwd exists and (for `claude`/`cursor`/`pi`) the foreground process is not a shell |
+| `ghost` | Pane cwd is missing, or a `claude`/`cursor`/`pi` pane is sitting at a shell prompt (`zsh`, `bash`, `fish`, `sh`, `dash`, `ksh`) |
+
+`generic` panes at a shell are still `live`. A CLI version string in
+`pane_current_command` (e.g. `2.1.233` for Claude) is not treated as a
+shell.
+
+`muxa unregister NAME|ID` clears the same pane options as the
+`session-end` hook (`@muxa_name`, `@muxa_id`, `@muxa_parent`,
+`@muxa_kind`, `@muxa_state`, `@muxa_deliver`, `@muxa_session`), resets
+the pane title, and leaves the tmux pane running. Lookup prefers an exact
+name match, then a 12-hex id match. Unknown targets exit 2.
 
 Names are unique per tmux server. Duplicate register fails. Ids are unique
 even when two panes run the same CLI on the same project.
@@ -150,6 +169,7 @@ muxa send <name> <text…>
 muxa send --all <text…>
 muxa send --no-reply <name> <text…>
 muxa who
+muxa unregister <name|id>
 muxa whoami
 muxa id
 muxa session
@@ -158,9 +178,9 @@ muxa children
 muxa spawn [--name worker] [--window] -- command…
 ```
 
-Exit 0 on queued or delivered. Exit 2 if the name is unknown. Exit 3 if
-not running under tmux when tmux is required. Exit 4 if the send is
-forbidden by reachability.
+Exit 0 on queued or delivered. Exit 2 if the name is unknown (including
+`muxa unregister`). Exit 3 if not running under tmux when tmux is required.
+Exit 4 if the send is forbidden by reachability.
 
 ## Etiquette (normative for agents)
 

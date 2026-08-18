@@ -39,6 +39,21 @@ assert_contains() {
   esac
 }
 
+who_status_for() {
+  local who="$1" name="$2" s
+  s="$(printf '%s\n' "$who" | awk -v n="$name" '$1==n { print substr($0, 105, 8); exit }')"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+assert_who_status() {
+  local who="$1" name="$2" want="$3" label="$4"
+  local got
+  got="$(who_status_for "$who" "$name")"
+  [ "$got" = "$want" ] && ok "$label" || bad "$label" "name=$name want=$want got=$got"
+}
+
 tmux -L "$SOCK" new-session -d -s muxa -n alice "cat > '$alice_out'"
 tmux -L "$SOCK" split-window -h -t muxa:alice "exec sleep 3600"
 sleep 0.2
@@ -332,6 +347,72 @@ muxa_as "$proj_pane" register --name projagent --kind generic --deliver inject >
 who="$(muxa_as "$bob_pane" who)"
 assert_contains "$who" "$projdir" "who shows pane cwd"
 assert_contains "$who" "CWD" "who header has CWD"
+assert_contains "$who" "STATUS" "who header has STATUS"
+
+# --- who STATUS: ghost vs live ---
+tmux -L "$SOCK" new-window -t muxa -n zshghost "exec zsh"
+sleep 0.2
+zsh_pane="$(tmux -L "$SOCK" list-panes -t muxa:zshghost -F '#{pane_id}')"
+muxa_as "$zsh_pane" register --name zsh-cursor --kind cursor --deliver hook >/dev/null
+who="$(muxa_as "$bob_pane" who)"
+assert_who_status "$who" "zsh-cursor" "ghost" "cursor+shell is ghost"
+
+tmux -L "$SOCK" new-window -t muxa -n zshpi "exec zsh"
+sleep 0.2
+zshpi_pane="$(tmux -L "$SOCK" list-panes -t muxa:zshpi -F '#{pane_id}')"
+muxa_as "$zshpi_pane" register --name zsh-pi --kind pi --deliver hook >/dev/null
+who="$(muxa_as "$bob_pane" who)"
+assert_who_status "$who" "zsh-pi" "ghost" "pi+shell is ghost"
+
+tmux -L "$SOCK" new-window -t muxa -n zshgen "exec zsh"
+sleep 0.2
+zshgen_pane="$(tmux -L "$SOCK" list-panes -t muxa:zshgen -F '#{pane_id}')"
+muxa_as "$zshgen_pane" register --name zsh-generic --kind generic --deliver inject >/dev/null
+who="$(muxa_as "$bob_pane" who)"
+assert_who_status "$who" "zsh-generic" "live" "generic+shell is live"
+
+gone_dir="$tmpdir/gone-cwd"
+mkdir -p "$gone_dir"
+tmux -L "$SOCK" new-window -t muxa -n badcwd -c "$gone_dir" "exec sleep 3600"
+sleep 0.2
+badcwd_pane="$(tmux -L "$SOCK" list-panes -t muxa:badcwd -F '#{pane_id}')"
+rm -rf "$gone_dir"
+muxa_as "$badcwd_pane" register --name bad-cwd --kind generic --deliver inject >/dev/null
+who="$(muxa_as "$bob_pane" who)"
+assert_who_status "$who" "bad-cwd" "ghost" "missing pane cwd is ghost"
+
+# --- unregister ---
+tmux -L "$SOCK" new-window -t muxa -n unreg "exec sleep 3600"
+sleep 0.2
+unreg_pane="$(tmux -L "$SOCK" list-panes -t muxa:unreg -F '#{pane_id}')"
+muxa_as "$unreg_pane" register --name dropme --kind generic --deliver inject >/dev/null
+unreg_out="$(muxa_as "$bob_pane" unregister dropme)"
+assert_contains "$unreg_out" "unregistered dropme" "unregister by name confirms"
+who="$(muxa_as "$bob_pane" who)"
+case "$who" in
+  *dropme*) bad "unregister by name removes from who" "still listed: $who" ;;
+  *) ok "unregister by name removes from who" ;;
+esac
+
+tmux -L "$SOCK" new-window -t muxa -n unreg2 "exec sleep 3600"
+sleep 0.2
+unreg2_pane="$(tmux -L "$SOCK" list-panes -t muxa:unreg2 -F '#{pane_id}')"
+muxa_as "$unreg2_pane" register --name dropid --kind generic --deliver inject >/dev/null
+drop_id="$(muxa_as "$unreg2_pane" id)"
+unreg_out="$(muxa_as "$bob_pane" unregister "$drop_id")"
+assert_contains "$unreg_out" "unregistered dropid" "unregister by id confirms"
+who="$(muxa_as "$bob_pane" who)"
+case "$who" in
+  *dropid*) bad "unregister by id removes from who" "still listed: $who" ;;
+  *) ok "unregister by id removes from who" ;;
+esac
+
+set +e
+muxa_as "$bob_pane" unregister nobody 2>/dev/null
+unreg_code=$?
+set -e
+[ "$unreg_code" -eq 2 ] && ok "unregister unknown exits 2" \
+  || bad "unregister unknown exits 2" "exit=$unreg_code"
 
 got_sess="$(muxa_as "$alice_pane" session)"
 assert_contains "$got_sess" "cli-sess-123" "muxa session prints CLI session id"
