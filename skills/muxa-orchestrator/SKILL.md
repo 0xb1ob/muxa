@@ -22,17 +22,39 @@ If that prints a name, this pane is a **child**. Stop. Use **muxa-worker** inste
 
 Only continue if `muxa parent` is empty (this pane is a root).
 
+## Intake
+
+Classify every job **before** you spawn, on both axes. Do not blur them.
+
+- **kind** — `ship` (changes code) or `research` (reads and reports; changes nothing)
+- **delivery** — `pr`, `local`, or `pipeline`
+
+```bash
+muxa jobs add JOB kind=ship delivery=pr
+```
+
+Evidence is not authorization. A research or scout result never starts an implementation by itself; a ship job needs its own authorization from the caller.
+
+When a scout should now build, **promote it**: same worker, same worktree, new brief. Do not spawn a duplicate.
+
 ## Worktrees
 
-1. One worktree per worker: `treehouse get --lease` if available, else `git worktree add`. Spawn from that directory (`cd` then spawn, or `muxa spawn --cwd DIR`). Confirm spawn stdout `cwd=` is the worktree before briefing. Brief immediately with the job contract below. Do not leave a new pane unbriefed.
-2. Stay on `main` (or another branch the worker must not attach). Do not leave this checkout on a `feat/…` branch the worker needs.
-3. After the lease is returned, you may kill the pane.
+1. One worktree per worker: `treehouse get --lease` if available, else `git worktree add`.
+2. Preflight before briefing — the primary checkout must sit on the default branch so no worker branch is tangled under it, and each path must be a linked worktree, not the primary checkout:
+
+```bash
+muxa preflight [--base BRANCH] WORKTREE...
+```
+
+3. Spawn from that directory (`cd` then spawn, or `muxa spawn --cwd DIR`). Confirm spawn stdout `cwd=` is the worktree before briefing. Brief immediately with the job contract below. Do not leave a new pane unbriefed.
+4. Optional: start workers from a fresh default-branch tip.
+5. After the lease is returned, you may kill the pane.
 
 ## First brief
 
 On a coding job this contract **wins**. Do not send muxa-parent's slim first-brief template.
 
-The first send **must** name `muxa-worker` and include this job contract (the worker may not have skills installed yet), then the job:
+Send the template below **verbatim**. Fill only the alias and the task — change nothing else.
 
 ```bash
 parent="$(muxa whoami)"
@@ -44,7 +66,7 @@ You are a muxa worker. Parent: ${parent}. Reply only to that parent with muxa se
 You may: do this job in this cwd; message your parent; open a PR if you change code.
 You may not: cd or prefix commands with cd <path> (spawn already set cwd); message siblings or other roots; spawn extra workers; poll muxa peek; ack or narrate; pass CLI trust/yolo/workspace flags.
 
-When done: open a PR if there are code changes (skip if research-only); if this worktree was leased, treehouse return --force <path>; muxa send ${parent} a result or blocker (include the PR URL). Never ack. Then stop.
+When done: open a PR if there are code changes (skip if research-only). If this worktree was leased, return it fail-closed: only when git status --porcelain is empty AND the branch is pushed, run treehouse return --force <path> (plain treehouse return prompts interactively; --force resets without asking, which is why the clean-and-pushed gate comes first). Dirty or unpushed: keep the lease and report a blocker with the path instead of returning. Then muxa send ${parent} a result or blocker (include the PR URL). Never ack. Then stop.
 
 Job:
 <task>
@@ -52,17 +74,44 @@ EOF
 )"
 ```
 
-Wait for `[muxa]` mail. Do not ack results. After the lease is returned, you may kill the pane.
+## Fan out
 
-## Spawn
+Spawn every independent job immediately. Serialize only for a real dependency or shared mutable state. Same-file edits are not a reason to wait.
 
-The model is the caller's choice. Spawn via **muxa-parent**.
+## While they run
+
+- Never poll. Wake on `[muxa]` mail.
+- Unknown or stuck worker state: inspect **once** with `tmux capture-pane -pt PANE`. Never assume idle or busy.
+- Do not auto-restart a stuck worker. Report it.
+- `muxa send` is data only. Interrupt, kill, or restart is tmux control (`tmux kill-pane`, `muxa unregister`) — never a chat message.
+- Freeze scope once validation starts. New scope is a new job.
+- You never do the worker job. Even a small change goes to a worker.
+
+## Delivery
+
+The chosen delivery path owns the rigor. Do not invent extra review gates on top of it. Never merge red.
+
+## Backlog
+
+Record on disk at intake and on completion, so a restart is a reconcile, not a memory test.
+
+```bash
+muxa jobs add JOB kind=ship|research delivery=pr|local|pipeline [k=v...]
+muxa jobs set JOB k=v...
+muxa jobs done JOB [pr=URL]
+muxa jobs list
+```
+
+## Report
+
+Report to the caller in outcomes and decisions, with full PR URLs. Never paste worker dumps.
 
 ## Job bound
 
-Stop after two ping-pongs unless a decision is still open. Comms etiquette (silence, no ack) is SPEC.md.
+Stop after two ping-pongs unless a decision is still open — and a decision stays open until the answer itself closes it. Comms etiquette (silence, no ack) is SPEC.md.
 
 ## Do not
 
 - Do the worker's job in this pane
 - Add MCP tools for muxa
+- Poll a worker, or restart one without being asked
