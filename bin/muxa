@@ -3,7 +3,7 @@
 # bash 3.2+ (macOS / Linux). Requires tmux. python3 used for JSON and spawn quoting.
 set -euo pipefail
 
-VERSION=0.2.0
+VERSION=0.2.1
 TMUX_BIN="${MUXA_TMUX_BIN:-tmux}"
 ENTER_DELAY="${MUXA_ENTER_DELAY:-0.15}"
 INJECT_MAX="${MUXA_INJECT_MAX:-8192}"
@@ -19,8 +19,8 @@ muxa — message other AI CLIs in this tmux server
   muxa id                           this pane's unique id
   muxa parent                       this pane's parent alias (empty if root)
   muxa children                     direct children of this pane
-  muxa send [--no-reply] NAME TEXT  queue + deliver (parent↔child, or root↔root)
-  muxa send --all TEXT              every reachable pane (not siblings)
+  muxa send [--no-reply] NAME TEXT  queue + deliver (parent↔child only)
+  muxa send --all TEXT              every parent/child pane (not siblings or other roots)
   muxa peek [NAME]                  unread mail
   muxa deliver [NAME]               claim + inject now (escape hatch)
   muxa state idle|busy|blocked      presence (hooks call this)
@@ -28,8 +28,8 @@ muxa — message other AI CLIs in this tmux server
   muxa version
 
 Reachability: a parent may message its children; a child may message its
-parent; children cannot message each other. Roots (no parent) may message
-other roots. muxa send --all follows the same rule.
+parent. Children cannot message each other. Roots (no parent) cannot
+message other roots. muxa send --all follows the same rule.
 
 Agents send with Bash. Incoming mail arrives as a user turn.
 Do not poll an inbox. Do not add MCP tools.
@@ -143,7 +143,7 @@ EOF
 }
 
 # Parent may talk to its children. Child may talk to its parent.
-# Children cannot talk to each other. Roots (no parent) may talk to other roots.
+# Children cannot talk to each other. Roots cannot talk to other roots.
 can_send() {
   local from="$1" to="$2"
   local from_parent to_parent
@@ -155,9 +155,6 @@ can_send() {
     return 0
   fi
   if [ "$from_parent" = "$to" ]; then
-    return 0
-  fi
-  if [ -z "$from_parent" ] && [ -z "$to_parent" ]; then
     return 0
   fi
   return 1
@@ -481,7 +478,7 @@ cmd_peek() {
   [ -n "$name" ] || name="$from"
   [ -n "$name" ] || die "pass a name or register this pane"
   if [ "$name" != "$from" ]; then
-    can_send "$from" "$name" || forbid "cannot peek '$name' (not parent/child/root-peer)"
+    can_send "$from" "$name" || forbid "cannot peek '$name' (not parent/child)"
   fi
   box="$(ensure_box "$name")"
   found=0
@@ -495,18 +492,70 @@ cmd_peek() {
   [ "$found" -eq 1 ] || printf '(empty)\n'
 }
 
+lock_acquire() {
+  local dir="$1" i=0 tries="${2:-50}"
+  while [ "$i" -lt "$tries" ]; do
+    if mkdir "$dir" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+lock_release() {
+  rmdir "$1" 2>/dev/null || true
+}
+
+kick_wait_lock() {
+  printf '%s/kick-wait-deliver-%s.lock' "$(runtime_root)" "$1"
+}
+
+spawn_kick_wait() {
+  local pane="$1" name="$2"
+  local runtime lock pidfile
+  runtime="$(runtime_root)"
+  mkdir -p "$runtime"
+  lock="$runtime/kick-wait-spawn-${pane}.lock"
+  pidfile="$runtime/kick-wait-${pane}.pid"
+  if ! lock_acquire "$lock" 10; then
+    return 0
+  fi
+  if [ -f "$pidfile" ]; then
+    if kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null; then
+      lock_release "$lock"
+      return 0
+    fi
+  fi
+  (
+    kick_wait "$pane" "$name"
+    rm -f "$pidfile"
+  ) >/dev/null 2>&1 &
+  printf '%s' "$!" >"$pidfile"
+  lock_release "$lock"
+}
+
 kick_wait() {
   local pane="$1" name="$2"
-  local i state list
+  local i state list lock
   i=0
   list="$(runtime_root)/wait-$$-$RANDOM.list"
+  lock="$(kick_wait_lock "$pane")"
   mkdir -p "$(runtime_root)"
   while [ "$i" -lt 120 ]; do
     state="$(pane_fmt "$pane" '#{@muxa_state}')"
     if [ "$state" = "idle" ] || [ -z "$state" ]; then
-      claim_new "$name" >"$list" || true
-      if [ -s "$list" ]; then
-        deliver_list "$pane" "$list" || true
+      if lock_acquire "$lock" 100; then
+        state="$(pane_fmt "$pane" '#{@muxa_state}')"
+        if [ "$state" = "idle" ] || [ -z "$state" ]; then
+          claim_new "$name" >"$list" || true
+          if [ -s "$list" ]; then
+            set_pane_opt "$pane" @muxa_state busy
+            deliver_list "$pane" "$list" || true
+          fi
+        fi
+        lock_release "$lock"
       fi
       rm -f "$list"
       return 0
@@ -524,14 +573,14 @@ send_one() {
     return 0
   fi
   pane="$(find_pane_by_name "$to")" || die "unknown agent '$to' — muxa who"
-  can_send "$from" "$to" || forbid "forbidden $from → $to (children cannot message siblings; only parent↔child or root↔root)"
+  can_send "$from" "$to" || forbid "forbidden $from → $to (only parent↔child)"
   id="$(write_mail "$from" "$to" "$flags" "$body")"
   state="$(pane_fmt "$pane" '#{@muxa_state}')"
   deliver="$(pane_fmt "$pane" '#{@muxa_deliver}')"
   case "$state" in
     busy|blocked)
       if [ "$deliver" = "inject" ]; then
-        ( kick_wait "$pane" "$to" ) >/dev/null 2>&1 &
+        spawn_kick_wait "$pane" "$to"
         printf 'queued %s → %s id=%s (waiting for idle)\n' "$from" "$to" "$id"
       else
         printf 'queued %s → %s id=%s (hook will drain)\n' "$from" "$to" "$id"
