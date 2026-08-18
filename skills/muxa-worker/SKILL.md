@@ -33,7 +33,7 @@ One Bash call. Incoming mail is already a user turn — do not poll `muxa peek`.
 
 ## You may
 
-- Work in this pane's cwd (the leased worktree, if one was given)
+- Work in this pane's cwd (where `muxa spawn` started you — the leased worktree)
 - Message **only** your parent: `muxa send "$(muxa parent)" "…"`
 - Ask a question, return a result, or report a blocker
 - Open a PR for this job when there are code changes
@@ -49,7 +49,7 @@ One Bash call. Incoming mail is already a user turn — do not poll `muxa peek`.
 
 ## How to work
 
-Stay in this cwd. Use the parent's `muxa` on PATH (already set). Use `$WORKTREE/bin/muxa` only when the job is to change muxa itself.
+Stay in this cwd. Do not `cd` to the parent's checkout. Use the parent's `muxa` on PATH (already set). Use `$PWD/bin/muxa` only when the job is to change muxa itself.
 
 Silence is default. Reply only with a question, a result, or a blocker. Never ack. Stop after two ping-pongs unless a decision is still open.
 
