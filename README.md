@@ -43,12 +43,17 @@ muxa uses surfaces the CLIs already pay for:
 busy / permission prompt  →  write maildir, do not touch the TUI
                              Claude/Cursor/Pi Stop hook claims mail and continues
 idle at the composer      →  paste-buffer into that pane (they are waiting for you)
+                             EXCEPT: never paste into copy-mode, a dead pane, or
+                             a generic pane on the alternate screen (vim/less).
+                             copy-mode accepts the paste with exit 0, holds it,
+                             and later flushes it without Enter onto the next paste.
 ```
 
 tmux user options are the roster (`@muxa_name`, `@muxa_kind`, `@muxa_state`,
-`@muxa_deliver`, `@muxa_session`). `tmux list-panes` is service discovery. Maildir (`tmp/new/cur`
+`@muxa_deliver`, `@muxa_session`). `tmux list-panes` is service discovery. Maildir (`tmp/new/cur/done/dead`
 + atomic `mv`) is the queue — the same trick mail servers used before anyone
-invented SQLite-as-a-bus.
+invented SQLite-as-a-bus. `cur/` is claimed, not consumed; `muxa peek` shows
+stuck claimed mail.
 
 Spec: [SPEC.md](SPEC.md).
 
@@ -130,10 +135,25 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 ## Tests
 
 ```bash
-tests/run.sh
+tests/run.sh          # maildir / inject unit tests
+tests/tmux-facts.sh   # version-sensitive tmux behaviour muxa depends on
 ```
 
 Needs `tmux` and `python3`. Uses a private tmux socket, not your session.
+
+## Environment
+
+| Variable | Default | What |
+| --- | --- | --- |
+| `MUXA_ENTER_DELAY` | `0.15` | Seconds between paste and Enter |
+| `MUXA_INJECT_MAX` | `8192` | Max inject payload size in **bytes** |
+| `MUXA_CLAIM_TTL` | `120` | Seconds before claimed (`cur/`) mail is presumed lost and redelivered |
+| `MUXA_REDELIVER_MAX` | `3` | Redeliveries before parking in `dead/` |
+| `MUXA_BATCH_MAX` | `8` | Max messages claimed per inject attempt |
+| `MUXA_KICK_WAIT_MAX` | `120` | `kick_wait` poll iterations (0.5s each) |
+| `MUXA_FORCE_INJECT` | `0` | `1` skips readiness prechecks (tests / operator escape) |
+| `MUXA_TMUX_SOCKET` | unset | Private tmux socket name (`tmux -L`) |
+| `MUXA_TMUX_BIN` | `tmux` | tmux binary |
 
 ## Trust
 

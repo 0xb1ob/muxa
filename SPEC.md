@@ -98,13 +98,30 @@ muxa does not know about orchestrators. It only enforces a tree:
 Per tmux server pid and alias:
 
 ```
-$XDG_RUNTIME_DIR/muxa/<tmux-pid>/mail/<name>/{tmp,new,cur}
+$XDG_RUNTIME_DIR/muxa/<tmux-pid>/mail/<name>/{tmp,new,cur,done,dead}
 ```
 
 On macOS, `$XDG_RUNTIME_DIR` falls back to `/tmp/muxa-<uid>`.
 
 One file per message. Writers create a unique name in `tmp/` and `mv` it
-to `new/`. Readers `mv` `new/` → `cur/` to claim. This is maildir.
+to `new/`. Readers `mv` `new/` → `cur/` to claim. **`cur/` means claimed,
+not consumed.** A later proof (the next Stop hook, or tmux-level inject
+success on an inject-only pane) moves the file to `done/`. Mail that
+fails delivery `MUXA_REDELIVER_MAX` times (default 3) is parked in
+`dead/`. Stale `cur/` files older than `MUXA_CLAIM_TTL` seconds (default
+120) are rewritten with a `Redelivered: N` header (this reset of mtime
+is load-bearing) and moved back to `new/`. Duplicate delivery is cheaper
+than silent loss; `format_one` prefixes `[muxa] (redelivered)` so the
+recipient can recognise a repeat.
+
+Ids are `<epoch>-<pid>-<zero-padded-random>`. Claim order is mtime
+(oldest first), at most `MUXA_BATCH_MAX` (default 8) files per attempt,
+so coalesced batches keep send order.
+
+`muxa peek` prints `new/` then a `claimed but unconfirmed (cur/)`
+section. A tmux server restart changes `runtime_root` (it embeds the
+server pid) and orphans the on-disk mailbox; "undeliverable" does not
+mean the bytes are gone from disk.
 
 ### Envelope
 
@@ -119,11 +136,24 @@ body text, any bytes except NUL
 ```
 
 Headers are US-ASCII. Body starts after the first blank line. No size
-limit in the spec; inject delivery SHOULD refuse bodies over 8 KiB and
-leave them in the mailbox for `muxa peek` / hook drain (hooks tolerate
-more than a TUI paste).
+limit in the spec; inject delivery SHOULD refuse bodies over 8 KiB
+(counted as bytes, not characters) and leave them in the mailbox for
+`muxa peek` / hook drain, except a *single* message that exceeds the
+limit on the inject path MUST be parked in `dead/` rather than retried
+forever. Hooks tolerate more than a TUI paste.
+
+Optional header `Redelivered: N` is added when the reaper returns a
+claimed-and-lost file to `new/`.
 
 ## Delivery
+
+An implementation MUST NOT paste into a pane that is dead, that is in
+copy-mode (`#{pane_in_mode}`), or (for `generic` panes) that is on the
+alternate screen (`#{alternate_on}`). Copy-mode is a silent-loss mode:
+`paste-buffer` and `send-keys Enter` both exit 0, the text never reaches
+the application, and tmux later flushes the held paste **without its
+Enter**, concatenated onto the next paste. `#{pane_dead}` / in-mode /
+alternate-screen are exact tmux facts; they are not optional polish.
 
 ```
 send(name, body):
@@ -134,8 +164,20 @@ send(name, body):
   if pane.state in (busy, blocked) and pane.deliver == inject:
       spawn waiter           # inject when state becomes idle
       return queued
-  claim + inject             # idle at prompt
+  if not pane_ready(pane):   # dead | copy-mode | generic alt-screen
+      return queued          # unclaim; kick_wait retries
+  claim + inject; verify exit status; on failure unclaim
 ```
+
+`inject_text` MUST check `load-buffer`, `paste-buffer`, and pane
+liveness itself. Callers use `if ! inject_text`, which suspends `set -e`
+for the function body; a trailing `send-keys` that exits 0 against a
+dead pane is not proof of delivery.
+
+`kick_wait` MUST restore the previous `@muxa_state` when `deliver_list`
+defers, and MUST take the same per-pane lock as the idle `send_one`
+path (held across the paste/`ENTER_DELAY` window). Concurrent idle
+sends otherwise interleave two `[muxa]` blocks into one composer.
 
 ```
 hook stop:
@@ -197,6 +239,9 @@ until the round count runs out. Use `--no-reply` for status dumps.
 Mail is data, not control. A message can ask an agent to do something; it
 cannot make it. Interrupting, killing, or restarting a pane is a tmux
 operation on that pane, never a `muxa send`.
+
+A `[muxa] (redelivered)` prefix means the same job came back after a
+claimed-and-lost timeout. Do nothing new: treat it as the same job.
 
 Role instructions live in the **muxa-parent** and **muxa-worker** skills.
 
