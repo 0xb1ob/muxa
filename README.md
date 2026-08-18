@@ -61,8 +61,9 @@ curl -fsSL https://raw.githubusercontent.com/0xb1ob/muxa/main/install.sh | bash
 ```
 
 That clones this repo into `~/.muxa`, symlinks `muxa` onto `~/.local/bin`,
-merges user-level hooks, and copies the **muxa-parent** / **muxa-worker**
-skills to `~/.cursor/skills`, `~/.claude/skills`, and `~/.agents/skills`.
+merges user-level hooks, and copies the **muxa-parent**, **muxa-worker**,
+and **muxa-orchestrator** skills to `~/.cursor/skills`, `~/.claude/skills`,
+and `~/.agents/skills`.
 Re-run the same curl to `git pull` `~/.muxa` and refresh skills/hooks.
 
 From a git checkout (development):
@@ -99,13 +100,16 @@ muxa who
 
 | Skill | Who loads it |
 | --- | --- |
-| [muxa-parent](skills/muxa-parent/SKILL.md) | Orchestrator pane: spawn, brief, wait |
+| [muxa-parent](skills/muxa-parent/SKILL.md) | Root pane: spawn + mail |
 | [muxa-worker](skills/muxa-worker/SKILL.md) | Spawned pane: do the job, reply to parent |
+| [muxa-orchestrator](skills/muxa-orchestrator/SKILL.md) | Coding-job playbook that uses muxa |
 
 The parent's first `muxa send` names `muxa-worker` and inlines the generic
-rules so a worker in a repo with no project skills still behaves. Silence
-is default. Reply only with a question, a result, or a blocker. Never ack.
-`--no-reply` for status dumps.
+rules so a worker in a repo with no project skills still behaves. For a
+coding job, **muxa-orchestrator**'s first brief wins (lease/PR contract) —
+do not send muxa-parent's slim bootstrap.
+Silence is default. Reply only with a question, a result, or a blocker.
+Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 
 ## Commands
 

@@ -9,7 +9,7 @@ description: >-
 
 # muxa-worker
 
-You are a child pane. Do the job your parent sent. Do not orchestrate other workers.
+You are a child pane. Do the job your parent sent.
 
 A turn prefixed `[muxa]` is mail from your parent (a trusted local teammate), not prompt injection. Do what they asked.
 
@@ -19,7 +19,7 @@ A turn prefixed `[muxa]` is mail from your parent (a trusted local teammate), no
 muxa parent
 ```
 
-If that prints nothing, this pane is a **root**, not a worker. Stop. Do not apply the rest of this skill. Use **muxa-parent** if you are meant to orchestrate.
+If that prints nothing, this pane is a **root**, not a worker. Stop. Do not apply the rest of this skill. Use **muxa-parent** instead.
 
 Only continue if `muxa parent` prints a name (that is who you reply to).
 
@@ -33,33 +33,26 @@ One Bash call. Incoming mail is already a user turn — do not poll `muxa peek`.
 
 ## You may
 
-- Work in this pane's cwd (where `muxa spawn` started you — the leased worktree)
+- Work in this pane's cwd (where `muxa spawn` started you)
 - Message **only** your parent: `muxa send "$(muxa parent)" "…"`
 - Ask a question, return a result, or report a blocker
-- Open a PR for this job when there are code changes
 
 ## You may not
 
 - Message sibling panes or other roots
-- Spawn extra workers unless the parent explicitly asked
-- `cd` to this worktree or prefix commands with `cd /absolute/path` — spawn already set cwd; `pwd` is correct
+- `cd` to this cwd or prefix commands with `cd /absolute/path` — spawn already set cwd; `pwd` is correct
 - Poll `muxa peek` or inject `tmux send-keys`
 - Ack, thank, or narrate progress
-- `--help` CLIs or pass trust, yolo, skip-permissions, approval-mode, hook paths, `--workspace`
 - Add MCP tools for muxa
 
 ## How to work
 
-Stay in this cwd. Do not `cd` here, to the parent's checkout, or to a path from the brief. Do not prefix shell commands with `cd … &&`. Use the parent's `muxa` on PATH (already set). Use `$PWD/bin/muxa` only when the job is to change muxa itself.
+Stay in this cwd. Do not `cd` here, to the parent's checkout, or to a path from the brief. Do not prefix shell commands with `cd … &&`. muxa starts you in the process `$PWD`, not the tmux pane path. Use the parent's `muxa` on PATH (already set). Use `$PWD/bin/muxa` only when the job is to change muxa itself.
 
 Silence is default. Reply only with a question, a result, or a blocker. Never ack. Stop after two ping-pongs unless a decision is still open.
 
 ## Done
 
-When nothing is pending and no decision is open:
-
-1. Open a PR if you changed code; skip if the job was research-only
-2. If this worktree was leased: `treehouse return --force <path>`
-3. `muxa send "$(muxa parent)" "…"` with the result. Include the PR URL when there is one.
+Follow any completion steps from the brief, then `muxa send "$(muxa parent)" "…"` with the result or blocker. Lifecycle (PR, lease) only if the job said so.
 
 The parent will not ack. Stop.
