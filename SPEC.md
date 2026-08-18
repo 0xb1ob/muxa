@@ -36,10 +36,13 @@ Each participating pane sets tmux user options:
 | `@muxa_kind`    | `claude` \| `cursor` \| `pi` \| `generic`    |
 | `@muxa_state`   | `idle` \| `busy` \| `blocked`                |
 | `@muxa_deliver` | `hook` \| `inject`                           |
+| `@muxa_hook_ok` | `1` after the first successful `hook stop` (drain path proven) |
+| `@muxa_unread`  | hint: count of `new/` files; maildir is authoritative |
 
 Roster is `tmux list-panes -a`. There is no registry file. `muxa who`
-prints that roster plus each pane's current working directory and a
-**STATUS** column so agents on the same tmux server, in different
+prints that roster plus each pane's current working directory, a
+**STATUS** column, and an **UNREAD** column (maildir `new/` count, or
+`-`) so agents on the same tmux server, in different
 projects, can tell which is which.
 
 **STATUS** is informational only; ghosts are not filtered from the roster
@@ -56,7 +59,8 @@ shell.
 
 `muxa unregister NAME|ID` clears the same pane options as the
 `session-end` hook (`@muxa_name`, `@muxa_id`, `@muxa_parent`,
-`@muxa_kind`, `@muxa_state`, `@muxa_deliver`, `@muxa_session`), resets
+`@muxa_kind`, `@muxa_state`, `@muxa_deliver`, `@muxa_session`,
+`@muxa_hook_ok`, `@muxa_unread`), resets
 the pane title, and leaves the tmux pane running. Lookup prefers an exact
 name match, then a 12-hex id match. Unknown targets exit 2.
 
@@ -159,15 +163,26 @@ alternate-screen are exact tmux facts; they are not optional polish.
 send(name, body):
   resolve name -> pane
   write maildir new/
-  if pane.state in (busy, blocked) and pane.deliver == hook:
-      return queued          # Stop/session_stop/followup will claim
-  if pane.state in (busy, blocked) and pane.deliver == inject:
-      spawn waiter           # inject when state becomes idle
-      return queued
-  if not pane_ready(pane):   # dead | copy-mode | generic alt-screen
-      return queued          # unclaim; kick_wait retries
-  claim + inject; verify exit status; on failure unclaim
+  if pane.deliver == hook and pane.hook_ok:
+      mark unread; return queued        # any state, including idle
+  if pane.state in (busy, blocked):
+      spawn waiter (inject panes only); return queued
+  if not pane_ready(pane):              # dead | copy-mode | generic alt-screen
+      mark unread; return queued
+  claim + inject; verify; on failure unclaim
 ```
+
+The first message to a freshly spawned hook pane is still injected.
+That is intentional: `cmd_spawn` marks `deliver=hook` and `state=idle`
+before the CLI boots, and no Stop hook will run until a turn starts.
+`@muxa_hook_ok` is set only by `hook stop`, so queueing cannot deadlock
+the brief. After that proof, idle hook panes are never pasted — the
+Stop hook drains `new/` on the next turn.
+
+Pane titles are owned by the CLI (OSC-2). `@muxa_unread` is a rendering
+hint for an opt-in `pane-border-format`; muxa MUST recompute it from
+`new/` and MUST NOT increment/decrement a counter. `muxa who` / `peek`
+count the maildir and never trust the option.
 
 `inject_text` MUST check `load-buffer`, `paste-buffer`, and pane
 liveness itself. Callers use `if ! inject_text`, which suspends `set -e`
@@ -181,9 +196,11 @@ sends otherwise interleave two `[muxa]` blocks into one composer.
 
 ```
 hook stop:
+  set hook_ok
+  sweep cur/ -> done/          # previous inject is now confirmed-consumed
   claim all new mail for this pane's name
-  if empty: set state=idle; print nothing
-  else: set state=busy; print native continue payload
+  if empty: clear unread; set state=idle; print nothing
+  else: set state=busy; clear unread; print native continue payload
 ```
 
 Native continue payloads (stdout of `muxa hook stop --format …`):
