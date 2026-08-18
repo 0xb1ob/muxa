@@ -76,6 +76,32 @@ got="$(cat "$alice_out" 2>/dev/null || true)"
 assert_contains "$got" "review src/auth.ts" "alice pane received body"
 assert_contains "$got" "[muxa] from=bob" "alice pane received prefix"
 
+# --- oversized inject refused; mail stays in new/ for peek ---
+muxa_as "$alice_pane" state idle
+big="$(python3 -c "print('O' * 9000)")"
+oversized="$(muxa_as "$bob_pane" send alice "$big" 2>&1)"
+assert_contains "$oversized" "queued bob → alice" "oversized idle send queues"
+assert_contains "$oversized" "exceeds inject limit" "oversized idle send warns"
+peek_big="$(muxa_as "$bob_pane" peek alice)"
+assert_contains "$peek_big" "OOOO" "peek recovers oversized idle mail"
+
+deliver_big="$(muxa_as "$alice_pane" deliver alice 2>&1 || true)"
+assert_contains "$deliver_big" "exceeds inject limit" "deliver refuses oversized"
+peek_big2="$(muxa_as "$bob_pane" peek alice)"
+assert_contains "$peek_big2" "OOOO" "peek recovers after failed deliver"
+
+muxa_as "$alice_pane" state busy
+kick_big="$(muxa_as "$bob_pane" send alice "$big" 2>&1)"
+assert_contains "$kick_big" "waiting for idle" "oversized busy send spawns kick_wait"
+muxa_as "$alice_pane" state idle
+sleep 0.6
+peek_big3="$(muxa_as "$bob_pane" peek alice)"
+assert_contains "$peek_big3" "OOOO" "peek recovers after kick_wait inject failure"
+
+# drain oversized mail before hook tests (hooks tolerate large bodies)
+muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
+muxa_as "$alice_pane" hook stop --format claude >/dev/null || true
+
 # --- busy + hook drain (Claude JSON) ---
 muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
 muxa_as "$alice_pane" state busy
@@ -109,6 +135,21 @@ assert_contains "$pjson" '"continue": true' "pi stop JSON"
 muxa_as "$alice_pane" state busy
 empty="$(muxa_as "$alice_pane" hook stop --format claude)"
 [ -z "$empty" ] && ok "empty stop prints nothing" || bad "empty stop prints nothing" "got: $empty"
+
+# --- concurrent kick_wait while busy (inject) ---
+muxa_as "$alice_pane" register --name alice --kind generic --deliver inject >/dev/null
+muxa_as "$alice_pane" state busy
+: >"$alice_out"
+muxa_as "$bob_pane" send --no-reply alice 'wait-msg-alpha' &
+muxa_as "$bob_pane" send --no-reply alice 'wait-msg-beta' &
+wait
+sleep 0.2
+muxa_as "$alice_pane" state idle
+sleep 1.0
+got="$(cat "$alice_out" 2>/dev/null || true)"
+assert_contains "$got" "wait-msg-alpha" "concurrent wait delivers alpha"
+assert_contains "$got" "wait-msg-beta" "concurrent wait delivers beta"
+assert_contains "$got" "[muxa] 2 messages" "concurrent wait batches into one inject"
 
 # --- unknown target ---
 err="$(muxa_as "$bob_pane" send nobody hi 2>&1 || true)"

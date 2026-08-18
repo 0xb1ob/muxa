@@ -296,6 +296,16 @@ claim_new() {
   done
 }
 
+unclaim_list() {
+  local list="$1" f base box
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    box="$(dirname "$(dirname "$f")")"
+    mv "$f" "$box/new/$base" 2>/dev/null || true
+  done <"$list"
+}
+
 payload_from_claimed() {
   local list="$1"
   local f from flags body n
@@ -334,12 +344,16 @@ inject_text() {
 deliver_list() {
   local pane="$1" list="$2"
   local text
-  text="$(payload_from_claimed "$list")" || return 1
+  text="$(payload_from_claimed "$list")" || { unclaim_list "$list"; return 1; }
   if [ "${#text}" -gt "$INJECT_MAX" ]; then
-    printf 'muxa: body %s bytes exceeds inject limit (%s); claimed in cur/\n' "${#text}" "$INJECT_MAX" >&2
+    printf 'muxa: body %s bytes exceeds inject limit (%s); left in mailbox\n' "${#text}" "$INJECT_MAX" >&2
+    unclaim_list "$list"
     return 1
   fi
-  inject_text "$pane" "$text"
+  if ! inject_text "$pane" "$text"; then
+    unclaim_list "$list"
+    return 1
+  fi
   set_pane_opt "$pane" @muxa_state busy
 }
 
@@ -492,18 +506,70 @@ cmd_peek() {
   [ "$found" -eq 1 ] || printf '(empty)\n'
 }
 
+lock_acquire() {
+  local dir="$1" i=0 tries="${2:-50}"
+  while [ "$i" -lt "$tries" ]; do
+    if mkdir "$dir" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+lock_release() {
+  rmdir "$1" 2>/dev/null || true
+}
+
+kick_wait_lock() {
+  printf '%s/kick-wait-deliver-%s.lock' "$(runtime_root)" "$1"
+}
+
+spawn_kick_wait() {
+  local pane="$1" name="$2"
+  local runtime lock pidfile
+  runtime="$(runtime_root)"
+  mkdir -p "$runtime"
+  lock="$runtime/kick-wait-spawn-${pane}.lock"
+  pidfile="$runtime/kick-wait-${pane}.pid"
+  if ! lock_acquire "$lock" 10; then
+    return 0
+  fi
+  if [ -f "$pidfile" ]; then
+    if kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null; then
+      lock_release "$lock"
+      return 0
+    fi
+  fi
+  (
+    kick_wait "$pane" "$name"
+    rm -f "$pidfile"
+  ) >/dev/null 2>&1 &
+  printf '%s' "$!" >"$pidfile"
+  lock_release "$lock"
+}
+
 kick_wait() {
   local pane="$1" name="$2"
-  local i state list
+  local i state list lock
   i=0
   list="$(runtime_root)/wait-$$-$RANDOM.list"
+  lock="$(kick_wait_lock "$pane")"
   mkdir -p "$(runtime_root)"
   while [ "$i" -lt 120 ]; do
     state="$(pane_fmt "$pane" '#{@muxa_state}')"
     if [ "$state" = "idle" ] || [ -z "$state" ]; then
-      claim_new "$name" >"$list" || true
-      if [ -s "$list" ]; then
-        deliver_list "$pane" "$list" || true
+      if lock_acquire "$lock" 100; then
+        state="$(pane_fmt "$pane" '#{@muxa_state}')"
+        if [ "$state" = "idle" ] || [ -z "$state" ]; then
+          claim_new "$name" >"$list" || true
+          if [ -s "$list" ]; then
+            set_pane_opt "$pane" @muxa_state busy
+            deliver_list "$pane" "$list" || true
+          fi
+        fi
+        lock_release "$lock"
       fi
       rm -f "$list"
       return 0
@@ -528,7 +594,7 @@ send_one() {
   case "$state" in
     busy|blocked)
       if [ "$deliver" = "inject" ]; then
-        ( kick_wait "$pane" "$to" ) >/dev/null 2>&1 &
+        spawn_kick_wait "$pane" "$to"
         printf 'queued %s → %s id=%s (waiting for idle)\n' "$from" "$to" "$id"
       else
         printf 'queued %s → %s id=%s (hook will drain)\n' "$from" "$to" "$id"

@@ -14,9 +14,9 @@ Each pane has a unique **name** and **id**. A pane may have a **parent** (the pa
 - Parent → its children: allowed
 - Child → its parent: allowed
 - Child → another child: forbidden
-- Roots (no parent) may message other roots
+- Root → another root: forbidden
 
-`muxa send --all` only hits reachable panes, never siblings.
+`muxa send --all` only hits parent/child panes, never siblings or other roots.
 
 ## Send
 
@@ -42,3 +42,4 @@ Silence is default. Reply only with a question, a result, or a blocker. Never ac
 - Do not `muxa peek` in a loop
 - Do not inject `tmux send-keys` yourself
 - Do not message sibling panes; send to the parent instead
+- Do not message other root panes; `muxa spawn` a child if you need to talk to another agent
