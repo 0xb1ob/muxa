@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PATH="$ROOT/bin:$PATH"
 
-for skill in muxa-parent muxa-worker; do
+for skill in muxa-parent muxa-worker muxa-orchestrator; do
   src="$ROOT/skills/$skill/SKILL.md"
   [ -f "$src" ] || { echo "missing $src" >&2; exit 1; }
   for copy in "$ROOT/.cursor/skills/$skill/SKILL.md" "$ROOT/.claude/skills/$skill/SKILL.md"; do

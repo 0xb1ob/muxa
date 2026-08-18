@@ -1,6 +1,6 @@
 Send a message to another AI CLI in this tmux server.
 
-Orchestration: skill **muxa-parent**. Spawned workers: skill **muxa-worker**.
+Root pane: skill **muxa-parent**. Spawned workers: skill **muxa-worker**. Coding jobs: skill **muxa-orchestrator**.
 
 Usage: `/muxa <name> <text>` or `/muxa who`
 
