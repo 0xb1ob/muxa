@@ -7,7 +7,7 @@ PATH="$ROOT/bin:$PATH"
 SOCK="muxatest-$$"
 export MUXA_TMUX_SOCKET="$SOCK"
 export MUXA_ENTER_DELAY=0.05
-unset TMUX || true
+unset TMUX MUXA_NAME MUXA_PARENT MUXA_ID MUXA_BIN || true
 
 pass=0
 fail=0
@@ -51,11 +51,12 @@ muxa_as() {
 }
 
 # --- register + who ---
-reg_a="$(muxa_as "$alice_pane" register --name alice --kind generic --deliver inject)"
-assert_contains "$reg_a" "registered alice" "register alice"
-
 reg_b="$(muxa_as "$bob_pane" register --name bob --kind generic --deliver inject)"
 assert_contains "$reg_b" "registered bob" "register bob"
+
+reg_a="$(muxa_as "$alice_pane" register --name alice --kind generic --deliver inject --parent bob)"
+assert_contains "$reg_a" "registered alice" "register alice"
+assert_contains "$reg_a" "parent=bob" "alice is bob's child"
 
 who="$(muxa_as "$bob_pane" who)"
 assert_contains "$who" "alice" "who lists alice"
@@ -145,8 +146,36 @@ assert_contains "$sent" "delivered carol → bob" "child → parent allowed"
 sib="$(muxa_as "$carol_pane" send dave 'nope' 2>&1 || true)"
 assert_contains "$sib" "forbidden" "sibling send refused"
 
-root_to_child="$(muxa_as "$alice_pane" send carol 'nope' 2>&1 || true)"
+sib2="$(muxa_as "$alice_pane" send carol 'nope' 2>&1 || true)"
+assert_contains "$sib2" "forbidden" "sibling alice → carol refused"
+
+# --- send --all dedupes duplicate roster names ---
+saved_dave_name="$(tmux -L "$SOCK" display-message -p -t "$dave_pane" '#{@muxa_name}')"
+tmux -L "$SOCK" set-option -p -t "$dave_pane" @muxa_name carol
+marker="send-all-dedupe-$$"
+muxa_as "$bob_pane" send --no-reply --all "$marker" >/dev/null
+peek_carol="$(muxa_as "$bob_pane" peek carol)"
+count="$(printf '%s\n' "$peek_carol" | grep -cF "$marker" || true)"
+tmux -L "$SOCK" set-option -p -t "$dave_pane" @muxa_name "$saved_dave_name"
+[ "$count" -eq 1 ] && ok "send --all dedupes duplicate roster names" \
+  || bad "send --all dedupes duplicate roster names" "expected 1 message, count=$count peek=$peek_carol"
+
+tmux -L "$SOCK" new-window -t muxa -n eve "exec sleep 3600"
+sleep 0.2
+eve_pane="$(tmux -L "$SOCK" list-panes -t muxa:eve -F '#{pane_id}')"
+muxa_as "$eve_pane" register --name eve --kind generic --deliver inject >/dev/null
+
+r2r="$(muxa_as "$eve_pane" send bob 'nope' 2>&1 || true)"
+assert_contains "$r2r" "forbidden" "root → root refused"
+
+r2r2="$(muxa_as "$bob_pane" send eve 'nope' 2>&1 || true)"
+assert_contains "$r2r2" "forbidden" "root → other root refused"
+
+root_to_child="$(muxa_as "$eve_pane" send carol 'nope' 2>&1 || true)"
 assert_contains "$root_to_child" "forbidden" "unrelated root → child refused"
+
+none="$(muxa_as "$eve_pane" send --all 'nope')"
+assert_contains "$none" "no reachable peers" "root --all has no peers"
 
 # --- spawn ---
 spawned="$(muxa_as "$bob_pane" spawn --name spawned -- sleep 3600)"
