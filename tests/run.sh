@@ -51,7 +51,7 @@ assert_who_status() {
   [ "$got" = "$want" ] && ok "$label" || bad "$label" "name=$name want=$want got=$got"
 }
 
-tmux -L "$SOCK" new-session -d -s muxa -n alice "cat > '$alice_out'"
+tmux -L "$SOCK" new-session -d -s muxa -n alice "exec cat > '$alice_out'"
 tmux -L "$SOCK" split-window -h -t muxa:alice "exec sleep 3600"
 sleep 0.2
 
