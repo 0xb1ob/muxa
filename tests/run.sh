@@ -7,7 +7,7 @@ PATH="$ROOT/bin:$PATH"
 SOCK="muxatest-$$"
 export MUXA_TMUX_SOCKET="$SOCK"
 export MUXA_ENTER_DELAY=0.05
-unset TMUX || true
+unset TMUX MUXA_PARENT MUXA_NAME MUXA_ID || true
 
 pass=0
 fail=0
@@ -51,11 +51,12 @@ muxa_as() {
 }
 
 # --- register + who ---
-reg_a="$(muxa_as "$alice_pane" register --name alice --kind generic --deliver inject)"
-assert_contains "$reg_a" "registered alice" "register alice"
-
 reg_b="$(muxa_as "$bob_pane" register --name bob --kind generic --deliver inject)"
 assert_contains "$reg_b" "registered bob" "register bob"
+
+reg_a="$(muxa_as "$alice_pane" register --name alice --kind generic --deliver inject --parent bob)"
+assert_contains "$reg_a" "registered alice" "register alice"
+assert_contains "$reg_a" "parent=bob" "alice is bob's child"
 
 who="$(muxa_as "$bob_pane" who)"
 assert_contains "$who" "alice" "who lists alice"
@@ -74,6 +75,32 @@ sleep 0.3
 got="$(cat "$alice_out" 2>/dev/null || true)"
 assert_contains "$got" "review src/auth.ts" "alice pane received body"
 assert_contains "$got" "[muxa] from=bob" "alice pane received prefix"
+
+# --- oversized inject refused; mail stays in new/ for peek ---
+muxa_as "$alice_pane" state idle
+big="$(python3 -c "print('O' * 9000)")"
+oversized="$(muxa_as "$bob_pane" send alice "$big" 2>&1)"
+assert_contains "$oversized" "queued bob → alice" "oversized idle send queues"
+assert_contains "$oversized" "exceeds inject limit" "oversized idle send warns"
+peek_big="$(muxa_as "$bob_pane" peek alice)"
+assert_contains "$peek_big" "OOOO" "peek recovers oversized idle mail"
+
+deliver_big="$(muxa_as "$alice_pane" deliver alice 2>&1 || true)"
+assert_contains "$deliver_big" "exceeds inject limit" "deliver refuses oversized"
+peek_big2="$(muxa_as "$bob_pane" peek alice)"
+assert_contains "$peek_big2" "OOOO" "peek recovers after failed deliver"
+
+muxa_as "$alice_pane" state busy
+kick_big="$(muxa_as "$bob_pane" send alice "$big" 2>&1)"
+assert_contains "$kick_big" "waiting for idle" "oversized busy send spawns kick_wait"
+muxa_as "$alice_pane" state idle
+sleep 0.6
+peek_big3="$(muxa_as "$bob_pane" peek alice)"
+assert_contains "$peek_big3" "OOOO" "peek recovers after kick_wait inject failure"
+
+# drain oversized mail before hook tests (hooks tolerate large bodies)
+muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
+muxa_as "$alice_pane" hook stop --format claude >/dev/null || true
 
 # --- busy + hook drain (Claude JSON) ---
 muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
@@ -145,8 +172,25 @@ assert_contains "$sent" "delivered carol → bob" "child → parent allowed"
 sib="$(muxa_as "$carol_pane" send dave 'nope' 2>&1 || true)"
 assert_contains "$sib" "forbidden" "sibling send refused"
 
-root_to_child="$(muxa_as "$alice_pane" send carol 'nope' 2>&1 || true)"
+sib2="$(muxa_as "$alice_pane" send carol 'nope' 2>&1 || true)"
+assert_contains "$sib2" "forbidden" "sibling alice → carol refused"
+
+tmux -L "$SOCK" new-window -t muxa -n eve "exec sleep 3600"
+sleep 0.2
+eve_pane="$(tmux -L "$SOCK" list-panes -t muxa:eve -F '#{pane_id}')"
+muxa_as "$eve_pane" register --name eve --kind generic --deliver inject >/dev/null
+
+r2r="$(muxa_as "$eve_pane" send bob 'nope' 2>&1 || true)"
+assert_contains "$r2r" "forbidden" "root → root refused"
+
+r2r2="$(muxa_as "$bob_pane" send eve 'nope' 2>&1 || true)"
+assert_contains "$r2r2" "forbidden" "root → other root refused"
+
+root_to_child="$(muxa_as "$eve_pane" send carol 'nope' 2>&1 || true)"
 assert_contains "$root_to_child" "forbidden" "unrelated root → child refused"
+
+none="$(muxa_as "$eve_pane" send --all 'nope')"
+assert_contains "$none" "no reachable peers" "root --all has no peers"
 
 # --- spawn ---
 spawned="$(muxa_as "$bob_pane" spawn --name spawned -- sleep 3600)"
