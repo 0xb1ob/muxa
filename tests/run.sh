@@ -147,6 +147,9 @@ muxa_as "$alice_pane" state busy
 muxa_as "$bob_pane" send alice "$big" >/dev/null
 drain_big="$(muxa_as "$alice_pane" hook stop --format claude)"
 assert_contains "$drain_big" "OOOO" "hook stop drains oversized body"
+# Claimed oversized mail would otherwise sit in cur/ and inflate UNREAD below.
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
 
 # --- busy + hook drain (Claude JSON) ---
 muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
