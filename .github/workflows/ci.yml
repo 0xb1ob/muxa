@@ -13,6 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y tmux python3 zsh
+        timeout-minutes: 5
+        run: sudo apt-get -o Acquire::Retries=3 -o Acquire::ForceIPv4=true update && sudo apt-get -o Acquire::Retries=3 -o Acquire::ForceIPv4=true install -y tmux zsh
       - name: Run tests
         run: tests/run.sh && tests/tmux-facts.sh && tests/composer.sh
