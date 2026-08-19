@@ -930,6 +930,26 @@ jobs_code set api bogus=1
 [ "$jobs_status" -eq 2 ] && ok "jobs set unknown key exits 2" \
   || bad "jobs set unknown key exits 2" "exit=$jobs_status"
 
+(cd "$pf_repo" && br create --title "stray-bead" -t task -d "not a muxa job" >/dev/null)
+jobs_out="$(jobs_cli list)"
+case "$jobs_out" in
+  *stray-bead*) bad "jobs list excludes non-muxa br issues" "out=$jobs_out" ;;
+  *) ok "jobs list excludes non-muxa br issues" ;;
+esac
+
+(cd "$pf_repo" && br create --title "shared-title" -t task >/dev/null)
+jobs_cli add shared-title kind=research delivery=local >/dev/null
+jobs_out="$(jobs_cli list)"
+assert_contains "$jobs_out" "shared-title" "jobs add succeeds when non-muxa issue shares title"
+
+jobs_cli set api status=open >/dev/null
+jobs_out="$(jobs_cli list)"
+assert_contains "$jobs_out" "open" "jobs set reopens a closed job to open"
+jobs_cli done api pr=https://example.test/pr/1 >/dev/null
+jobs_cli set api status=running >/dev/null
+jobs_out="$(jobs_cli list)"
+assert_contains "$jobs_out" "running" "jobs set reopens a closed job to running"
+
 legacy_repo="$tmpdir/legacy-jobs"
 legacy_state="$tmpdir/legacy-state"
 git_init_repo "$legacy_repo"

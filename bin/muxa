@@ -1985,7 +1985,9 @@ jobs_br() {
 }
 
 jobs_br_list() {
-  jobs_br list --all --deferred
+  local prefix
+  prefix="$(jobs_br_prefix)"
+  jobs_br list --all --deferred -l "project:$prefix"
 }
 
 jobs_legacy_has_open() {
@@ -2114,6 +2116,14 @@ jobs_apply() {
     set -- "$@" --external-ref "$pr"
   fi
   if [ "$status_set" -eq 1 ]; then
+    cur="$(jobs_issue_status "$issue")"
+    case "$status" in
+      open|running|blocked)
+        if [ "$cur" = "closed" ]; then
+          jobs_br reopen "$id" >/dev/null
+        fi
+        ;;
+    esac
     case "$status" in
       open) set -- "$@" --status open ;;
       running) set -- "$@" --status in_progress ;;
@@ -2124,7 +2134,7 @@ jobs_apply() {
     jobs_br update "$id" "$@" >/dev/null
   fi
   if [ "$status_set" -eq 1 ]; then
-    cur="$(jobs_issue_status "$issue")"
+    [ -n "${cur:-}" ] || cur="$(jobs_issue_status "$issue")"
     case "$status" in
       done)
         reason="done"
