@@ -48,12 +48,13 @@ Orchestrator helpers (git only, no tmux):
                 [worktree=..] [branch=..] [note=..]
   muxa jobs set JOB key=value...    keys: kind delivery worker worktree branch
                                     status pr note
-  muxa jobs done JOB [pr=URL]       mark done
+  muxa jobs done JOB [pr=URL]       mark done (PR URL is the br close reason)
   muxa jobs list                    backlog table (status: open running blocked
                                     done dropped)
-                                one TSV per project under
-                                $XDG_STATE_HOME/muxa/jobs, so an orchestrator
-                                restart is a reconcile, not a memory test
+                                durable store is br (.beads/). worker/worktree/
+                                branch are runtime-only under
+                                $XDG_STATE_HOME/muxa/jobs. br is required;
+                                muxa auto-inits .beads/ on first use
 
 Reachability: a parent may message its children; a child may message its
 parent. Children cannot message each other. Roots (no parent) cannot
@@ -1718,9 +1719,11 @@ cmd_preflight() {
   [ "$PREFLIGHT_FAIL" -eq 0 ] || return 1
 }
 
-# --- jobs: on-disk backlog per project (no tmux) ----------------------------
-# job kind delivery worker worktree branch status pr note updated
-JOBS_HEADER=$'#job\tkind\tdelivery\tworker\tworktree\tbranch\tstatus\tpr\tnote\tupdated'
+# --- jobs: br is the durable backlog; TSV holds runtime-only fields ----------
+# Runtime TSV: job worker worktree branch
+JOBS_RUNTIME_HEADER=$'#job\tworker\tworktree\tbranch'
+JOBS_LEGACY_HEADER=$'#job\tkind\tdelivery\tworker\tworktree\tbranch\tstatus\tpr\tnote\tupdated'
+JOBS_BR_INSTALL='cargo install --git https://github.com/Dicklesworthstone/beads_rust.git beads_rust --locked  (https://github.com/Dicklesworthstone/beads_rust)'
 
 jobs_project_key() {
   local top
@@ -1729,8 +1732,7 @@ jobs_project_key() {
   abs_dir "$top" || printf '%s' "$top"
 }
 
-# One TSV per project, keyed by git toplevel realpath: survives tmux restarts,
-# agent restarts and worktree churn.
+# Runtime-only ledger per project, keyed by git toplevel realpath.
 jobs_file() {
   local key slug hash
   key="$(jobs_project_key)"
@@ -1740,12 +1742,6 @@ jobs_file() {
   printf '%s/muxa/jobs/%s-%s.tsv' "${XDG_STATE_HOME:-$HOME/.local/state}" "$slug" "$hash"
 }
 
-jobs_ensure_file() {
-  mkdir -p "$(dirname "$1")"
-  [ -f "$1" ] || printf '%s\n' "$JOBS_HEADER" >"$1"
-}
-
-# One TSV cell: no tabs, no newlines, empty renders as -
 jobs_clean() {
   local v
   v="$(printf '%s' "$1" | tr '\t\n' '  ')"
@@ -1754,8 +1750,6 @@ jobs_clean() {
   [ -n "$v" ] || v='-'
   printf '%s' "$v"
 }
-
-jobs_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 jobs_check_name() {
   case "$1" in
@@ -1796,61 +1790,392 @@ jobs_lock() {
   lock_acquire "$1.lock" 50 || die "jobs: could not lock $1"
 }
 
-# jobs_apply FILE JOB key=value... — validate, then rewrite the row in place.
+jobs_need_br() {
+  command -v br >/dev/null 2>&1 || die "jobs: br is required — $JOBS_BR_INSTALL"
+}
+
+jobs_br_root() {
+  jobs_project_key
+}
+
+jobs_br_prefix() {
+  local prefix
+  prefix="$(basename "$(jobs_br_root)" | tr '[:upper:]' '[:lower:]')"
+  prefix="$(printf '%s' "$prefix" | tr -cd 'a-z0-9-' | sed 's/^-*//;s/-*$//')"
+  [ -n "$prefix" ] || prefix="muxa"
+  printf '%s' "$prefix"
+}
+
+# JSON helper. Last argv is the JSON payload (heredoc owns stdin).
+jobs_py() {
+  python3 - "$@" <<'PY'
+import json, os, re, sys
+
+def parse(raw):
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+def as_issues(data):
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return [i for i in data if isinstance(i, dict) and i.get("id")]
+    if isinstance(data, dict):
+        if isinstance(data.get("issues"), list):
+            return [i for i in data["issues"] if isinstance(i, dict)]
+        if data.get("id"):
+            return [data]
+    return []
+
+def find_issue(iss, job):
+    hit = [i for i in iss if i.get("id") == job]
+    if hit:
+        return hit[0]
+    hit = [i for i in iss if i.get("title") == job]
+    if len(hit) > 1:
+        sys.stderr.write("muxa: jobs: multiple issues titled '%s'\n" % job)
+        sys.exit(2)
+    return hit[0] if hit else None
+
+def muxa_status(issue):
+    st = issue.get("status") or "open"
+    reason = (issue.get("close_reason") or "").strip()
+    if st == "in_progress":
+        return "running"
+    if st == "deferred":
+        return "blocked"
+    if st == "closed":
+        if reason.lower() == "dropped":
+            return "dropped"
+        return "done"
+    return "open"
+
+def cell(v):
+    v = (v or "").strip()
+    return v if v else "-"
+
+def ts(issue):
+    raw = issue.get("updated_at") or issue.get("created_at") or ""
+    m = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", raw)
+    return (m.group(1) + "Z") if m else (raw or "-")
+
+def label_val(issue, key):
+    prefix = key + ":"
+    for lab in issue.get("labels") or []:
+        if lab.startswith(prefix):
+            return lab[len(prefix):]
+    return "-"
+
+def pr_of(issue):
+    st = muxa_status(issue)
+    reason = (issue.get("close_reason") or "").strip()
+    ext = (issue.get("external_ref") or "").strip()
+    if st == "done":
+        if reason and reason.lower() != "done":
+            return reason
+        return cell(ext)
+    if st == "dropped":
+        return "-"
+    return cell(ext)
+
+def load_runtime(path):
+    out = {}
+    if not path or not os.path.isfile(path):
+        return out
+    with open(path) as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if parts:
+                out[parts[0]] = parts
+    return out
+
+def rt(runtime, title, idx):
+    row = runtime.get(title) or []
+    if len(row) > idx:
+        return cell(row[idx])
+    return "-"
+
+op = sys.argv[1]
+raw = sys.argv[-1] if len(sys.argv) > 1 else ""
+rest = sys.argv[2:-1] if len(sys.argv) > 2 else []
+data = parse(raw)
+
+if op == "message":
+    if isinstance(data, dict) and "error" in data:
+        err = data["error"]
+        if isinstance(err, dict):
+            print(err.get("message") or "br failed")
+        else:
+            print(str(err))
+    elif (raw or "").strip():
+        print((raw.strip().splitlines() or ["br failed"])[0][:400])
+    else:
+        print("br failed")
+elif op == "create-id":
+    if not isinstance(data, dict) or not data.get("id"):
+        sys.exit(2)
+    print(data["id"])
+elif op == "find-id":
+    job = rest[0] if rest else ""
+    issue = find_issue(as_issues(data), job)
+    if issue:
+        print(issue["id"])
+elif op == "issue":
+    job = rest[0] if rest else ""
+    issue = find_issue(as_issues(data), job)
+    if not issue:
+        sys.exit(1)
+    json.dump(issue, sys.stdout)
+elif op == "labels":
+    kind = rest[0] if len(rest) > 0 else ""
+    delivery = rest[1] if len(rest) > 1 else ""
+    issue = data if isinstance(data, dict) else {}
+    labs = list(issue.get("labels") or [])
+    if kind:
+        labs = [l for l in labs if not l.startswith("kind:")]
+        labs.append("kind:" + kind)
+    if delivery:
+        labs = [l for l in labs if not l.startswith("delivery:")]
+        labs.append("delivery:" + delivery)
+    print(",".join(labs))
+elif op == "list":
+    runtime_path = rest[0] if rest else ""
+    runtime = load_runtime(runtime_path)
+    print("%-16s %-8s %-9s %-9s %-14s %-22s %-28s %-21s %-32s %s" % (
+        "JOB", "STATUS", "KIND", "DELIVERY", "WORKER", "BRANCH", "WORKTREE",
+        "UPDATED", "PR", "NOTE"))
+    n = 0
+    for issue in as_issues(data):
+        n += 1
+        title = issue.get("title") or issue.get("id") or "-"
+        print("%-16s %-8s %-9s %-9s %-14s %-22s %-28s %-21s %-32s %s" % (
+            title,
+            muxa_status(issue),
+            label_val(issue, "kind"),
+            label_val(issue, "delivery"),
+            rt(runtime, title, 1),
+            rt(runtime, title, 3),
+            rt(runtime, title, 2),
+            ts(issue),
+            pr_of(issue),
+            cell(issue.get("description")),
+        ))
+    if n == 0:
+        print("(no jobs)")
+else:
+    sys.stderr.write("muxa: jobs: unknown helper '%s'\n" % op)
+    sys.exit(2)
+PY
+}
+
+jobs_ensure_beads() {
+  local root prefix out rc
+  jobs_need_br
+  root="$(jobs_br_root)"
+  [ -d "$root/.beads" ] && return 0
+  prefix="$(jobs_br_prefix)"
+  set +e
+  out="$(cd "$root" && br init --prefix "$prefix" --actor muxa -q 2>&1)"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || die "jobs: br init failed in $root${out:+ ($out)}"
+}
+
+jobs_br() {
+  local root out rc
+  jobs_ensure_beads
+  root="$(jobs_br_root)"
+  set +e
+  out="$(cd "$root" && br --actor muxa --json --no-color "$@")"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    die "jobs: $(jobs_py message "$out")"
+  fi
+  printf '%s' "$out"
+}
+
+jobs_br_list() {
+  local prefix
+  prefix="$(jobs_br_prefix)"
+  jobs_br list --all --deferred -l "project:$prefix"
+}
+
+jobs_legacy_has_open() {
+  awk -F '\t' '
+    NR == 1 { next }
+    $1 == "" || $1 ~ /^#/ { next }
+    $7 == "open" || $7 == "running" || $7 == "blocked" { found = 1; exit }
+    END { exit found ? 0 : 1 }
+  ' "$1"
+}
+
+jobs_legacy_to_runtime() {
+  awk -F '\t' 'BEGIN { OFS = "\t"; print "#job\tworker\tworktree\tbranch" }
+    NR == 1 { next }
+    $1 == "" || $1 ~ /^#/ { next }
+    { print $1, $4, $5, $6 }
+  ' "$1"
+}
+
+jobs_runtime_prepare() {
+  local file="$1" first tmp
+  mkdir -p "$(dirname "$file")"
+  if [ ! -f "$file" ]; then
+    printf '%s\n' "$JOBS_RUNTIME_HEADER" >"$file"
+    return
+  fi
+  first="$(head -1 "$file")"
+  if [ "$first" = "$JOBS_RUNTIME_HEADER" ]; then
+    return
+  fi
+  if [ "$first" = "$JOBS_LEGACY_HEADER" ]; then
+    if jobs_legacy_has_open "$file"; then
+      die "jobs: leftover open jobs in $file; br is now the durable store. Recreate them with muxa jobs add, then delete that file"
+    fi
+    tmp="$file.tmp.$$"
+    jobs_legacy_to_runtime "$file" >"$tmp"
+    mv "$tmp" "$file"
+    return
+  fi
+  die "jobs: unexpected jobs file $file; br is now the durable store. Move that file aside and retry"
+}
+
+jobs_runtime_upsert() {
+  local file="$1" job="$2"
+  local worker="$3" worktree="$4" branch="$5"
+  local row j w wt b
+  row="$(jobs_row "$file" "$job")"
+  if [ -z "$row" ]; then
+    printf '%s\t%s\t%s\t%s\n' "$job" "$(jobs_clean "$worker")" "$(jobs_clean "$worktree")" "$(jobs_clean "$branch")" >>"$file"
+    return
+  fi
+  IFS=$'\t' read -r j w wt b <<EOF
+$row
+EOF
+  [ "$worker" = "__keep" ] || w="$(jobs_clean "$worker")"
+  [ "$worktree" = "__keep" ] || wt="$(jobs_clean "$worktree")"
+  [ "$branch" = "__keep" ] || b="$(jobs_clean "$branch")"
+  jobs_replace_row "$file" "$job" "$(printf '%s\t%s\t%s\t%s' "$j" "$w" "$wt" "$b")"
+}
+
+jobs_issue_status() {
+  python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("status",""))' "$1"
+}
+
+jobs_close() {
+  local id="$1" reason="$2" cur="$3"
+  if [ "$cur" = "closed" ]; then
+    jobs_br reopen "$id" >/dev/null
+  fi
+  jobs_br close "$id" -r "$reason" >/dev/null
+}
+
+# jobs_apply FILE JOB key=value... — durable fields go to br; runtime to TSV.
 jobs_apply() {
   local file="$1" job="$2"
   shift 2
-  local pair key val row lock
-  local f_job f_kind f_delivery f_worker f_worktree f_branch f_status f_pr f_note f_updated
+  local pair key val lock json issue id labs
+  local kind="" delivery="" worker="__keep" worktree="__keep" branch="__keep"
+  local status="" pr="" note=""
+  local kind_set=0 delivery_set=0 note_set=0 pr_set=0 status_set=0
+  local runtime_set=0
+  local reason="" cur skip_pr_ref=0
   [ $# -ge 1 ] || die "jobs: key=value required"
   for pair in "$@"; do
     case "$pair" in *=*) ;; *) die "jobs: expected key=value, got '$pair'" ;; esac
     key="${pair%%=*}"
     val="${pair#*=}"
     case "$key" in
-      kind) jobs_check_kind "$val" ;;
-      delivery) jobs_check_delivery "$val" ;;
-      status) jobs_check_status "$val" ;;
-      worker|worktree|branch|pr|note) ;;
+      kind) jobs_check_kind "$val"; kind="$val"; kind_set=1 ;;
+      delivery) jobs_check_delivery "$val"; delivery="$val"; delivery_set=1 ;;
+      status) jobs_check_status "$val"; status="$val"; status_set=1 ;;
+      worker) worker="$val"; runtime_set=1 ;;
+      worktree) worktree="$val"; runtime_set=1 ;;
+      branch) branch="$val"; runtime_set=1 ;;
+      pr) pr="$val"; pr_set=1 ;;
+      note) note="$val"; note_set=1 ;;
       *) die "jobs: unknown key '$key'" ;;
     esac
   done
   lock="$file"
   jobs_lock "$lock"
-  row="$(jobs_row "$file" "$job")"
-  if [ -z "$row" ]; then
-    lock_release "$lock.lock"
+  trap 'lock_release "'"$lock"'.lock"' EXIT
+  json="$(jobs_br_list)"
+  if ! issue="$(jobs_py issue "$job" "$json")"; then
     die "jobs: unknown job '$job' — muxa jobs list"
   fi
-  IFS=$'\t' read -r f_job f_kind f_delivery f_worker f_worktree f_branch f_status f_pr f_note f_updated <<EOF
-$row
-EOF
-  for pair in "$@"; do
-    key="${pair%%=*}"
-    val="$(jobs_clean "${pair#*=}")"
-    case "$key" in
-      kind) f_kind="$val" ;;
-      delivery) f_delivery="$val" ;;
-      worker) f_worker="$val" ;;
-      worktree) f_worktree="$val" ;;
-      branch) f_branch="$val" ;;
-      status) f_status="$val" ;;
-      pr) f_pr="$val" ;;
-      note) f_note="$val" ;;
+  id="$(jobs_py find-id "$job" "$json")"
+  if [ -z "$id" ]; then
+    die "jobs: unknown job '$job' — muxa jobs list"
+  fi
+  labs=""
+  if [ "$kind_set" -eq 1 ] || [ "$delivery_set" -eq 1 ]; then
+    labs="$(jobs_py labels "$kind" "$delivery" "$issue")"
+  fi
+  if [ "$status_set" -eq 1 ]; then
+    case "$status" in done|dropped) skip_pr_ref=1 ;; esac
+  fi
+  set --
+  if [ -n "$labs" ]; then
+    set -- "$@" --set-labels "$labs"
+  fi
+  if [ "$note_set" -eq 1 ]; then
+    set -- "$@" --description "$note"
+  fi
+  if [ "$pr_set" -eq 1 ] && [ "$skip_pr_ref" -eq 0 ]; then
+    set -- "$@" --external-ref "$pr"
+  fi
+  if [ "$status_set" -eq 1 ]; then
+    cur="$(jobs_issue_status "$issue")"
+    case "$status" in
+      open|running|blocked)
+        if [ "$cur" = "closed" ]; then
+          jobs_br reopen "$id" >/dev/null
+        fi
+        ;;
     esac
-  done
-  f_updated="$(jobs_now)"
-  jobs_replace_row "$file" "$f_job" \
-    "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
-      "$f_job" "$f_kind" "$f_delivery" "$f_worker" "$f_worktree" \
-      "$f_branch" "$f_status" "$f_pr" "$f_note" "$f_updated")"
+    case "$status" in
+      open) set -- "$@" --status open ;;
+      running) set -- "$@" --status in_progress ;;
+      blocked) set -- "$@" --status deferred ;;
+    esac
+  fi
+  if [ $# -gt 0 ]; then
+    jobs_br update "$id" "$@" >/dev/null
+  fi
+  if [ "$status_set" -eq 1 ]; then
+    [ -n "${cur:-}" ] || cur="$(jobs_issue_status "$issue")"
+    case "$status" in
+      done)
+        reason="done"
+        [ "$pr_set" -eq 1 ] && [ -n "$pr" ] && reason="$pr"
+        jobs_close "$id" "$reason" "$cur"
+        ;;
+      dropped)
+        jobs_close "$id" "dropped" "$cur"
+        ;;
+    esac
+  fi
+  if [ "$runtime_set" -eq 1 ]; then
+    jobs_runtime_upsert "$file" "$job" "$worker" "$worktree" "$branch"
+  fi
   lock_release "$lock.lock"
+  trap - EXIT
 }
 
 cmd_jobs_add() {
   local file="$1" job="$2"
   shift 2
-  local pair key val lock
+  local pair key val lock json prefix
   local kind="" delivery="" worker="" worktree="" branch="" note=""
   for pair in "$@"; do
     case "$pair" in *=*) ;; *) die "jobs add: expected key=value, got '$pair'" ;; esac
@@ -1873,29 +2198,28 @@ cmd_jobs_add() {
   jobs_check_delivery "$delivery"
   lock="$file"
   jobs_lock "$lock"
-  if [ -n "$(jobs_row "$file" "$job")" ]; then
-    lock_release "$lock.lock"
+  trap 'lock_release "'"$lock"'.lock"' EXIT
+  json="$(jobs_br_list)"
+  if [ -n "$(jobs_py find-id "$job" "$json")" ]; then
     die "jobs add: job '$job' already exists"
   fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$job" "$kind" "$delivery" "$(jobs_clean "$worker")" "$(jobs_clean "$worktree")" \
-    "$(jobs_clean "$branch")" open '-' "$(jobs_clean "$note")" "$(jobs_now)" >>"$file"
+  prefix="$(jobs_br_prefix)"
+  set -- create --title "$job" --slug "$job" -t task \
+    -l "kind:$kind,delivery:$delivery,project:$prefix"
+  if [ -n "$note" ]; then
+    set -- "$@" -d "$note"
+  fi
+  jobs_br "$@" >/dev/null
+  jobs_runtime_upsert "$file" "$job" "$worker" "$worktree" "$branch"
   lock_release "$lock.lock"
+  trap - EXIT
   printf 'added %s kind=%s delivery=%s status=open\n' "$job" "$kind" "$delivery"
 }
 
 cmd_jobs_list() {
-  local file="$1" n=0
-  local c1 c2 c3 c4 c5 c6 c7 c8 c9 c10
-  printf '%-16s %-8s %-9s %-9s %-14s %-22s %-28s %-21s %-32s %s\n' \
-    JOB STATUS KIND DELIVERY WORKER BRANCH WORKTREE UPDATED PR NOTE
-  while IFS=$'\t' read -r c1 c2 c3 c4 c5 c6 c7 c8 c9 c10; do
-    case "$c1" in "" | '#'*) continue ;; esac
-    n=$((n + 1))
-    printf '%-16s %-8s %-9s %-9s %-14s %-22s %-28s %-21s %-32s %s\n' \
-      "$c1" "$c7" "$c2" "$c3" "$c4" "$c6" "$c5" "$c10" "$c8" "$c9"
-  done <"$file"
-  [ "$n" -gt 0 ] || printf '(no jobs)\n'
+  local file="$1" json
+  json="$(jobs_br_list)"
+  jobs_py list "$file" "$json"
 }
 
 cmd_jobs() {
@@ -1906,8 +2230,10 @@ cmd_jobs() {
     "") die "jobs: add|set|done|list required" ;;
     *) die "jobs: unknown subcommand '$sub'" ;;
   esac
+  jobs_need_br
   file="$(jobs_file)"
-  jobs_ensure_file "$file"
+  jobs_runtime_prepare "$file"
+  jobs_ensure_beads
   case "$sub" in
     list)
       [ $# -eq 0 ] || die "jobs list: unexpected argument '$1'"

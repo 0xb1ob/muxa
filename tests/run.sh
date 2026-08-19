@@ -823,7 +823,7 @@ set -e
 [ "$pf_code" -eq 2 ] && ok "preflight unknown flag exits 2" \
   || bad "preflight unknown flag exits 2" "exit=$pf_code"
 
-# --- jobs backlog (no tmux, survives restarts) ---
+# --- jobs backlog (br durable store; no tmux) ---
 jobs_state="$tmpdir/state"
 jobs_cli() {
   (cd "$pf_repo" && XDG_STATE_HOME="$jobs_state" "$ROOT/bin/muxa" jobs "$@")
@@ -835,9 +835,35 @@ jobs_code() {
   set -e
 }
 
+nobr_path=""
+oldifs="$IFS"
+IFS=:
+for d in $PATH; do
+  [ -n "$d" ] || continue
+  [ -x "$d/br" ] && continue
+  if [ -z "$nobr_path" ]; then
+    nobr_path="$d"
+  else
+    nobr_path="$nobr_path:$d"
+  fi
+done
+IFS="$oldifs"
+set +e
+jobs_nobr_err="$(cd "$pf_repo" && PATH="$nobr_path" XDG_STATE_HOME="$jobs_state" "$ROOT/bin/muxa" jobs list 2>&1)"
+jobs_nobr_rc=$?
+set -e
+[ "$jobs_nobr_rc" -eq 2 ] && ok "jobs without br exits 2" \
+  || bad "jobs without br exits 2" "exit=$jobs_nobr_rc err=$jobs_nobr_err"
+assert_contains "$jobs_nobr_err" "br is required" "missing br names the hard requirement"
+assert_contains "$jobs_nobr_err" "Dicklesworthstone/beads_rust" "missing br includes the install URL"
+[ ! -d "$pf_repo/.beads" ] && ok "missing br does not init .beads" \
+  || bad "missing br does not init .beads" "unexpected .beads under $pf_repo"
+
 jobs_out="$(jobs_cli list)"
 assert_contains "$jobs_out" "(no jobs)" "empty backlog lists nothing"
 assert_contains "$jobs_out" "UPDATED" "jobs list header has UPDATED"
+[ -d "$pf_repo/.beads" ] && ok "jobs list auto-inits .beads" \
+  || bad "jobs list auto-inits .beads" "no .beads under $pf_repo after muxa jobs list"
 
 jobs_out="$(jobs_cli add api kind=ship delivery=pr worker=bob branch=feat/api note='wire the endpoint')"
 assert_contains "$jobs_out" "added api" "jobs add confirms"
@@ -867,8 +893,23 @@ assert_contains "$jobs_out" "https://example.test/pr/1" "jobs done stores the PR
 assert_contains "$jobs_out" "notes" "unrelated job survives the update"
 
 tsv="$(find "$jobs_state/muxa/jobs" -name '*.tsv' | head -1)"
-[ -n "$tsv" ] && ok "jobs backlog persists to XDG state dir" \
-  || bad "jobs backlog persists to XDG state dir" "no tsv under $jobs_state/muxa/jobs"
+if [ -n "$tsv" ]; then
+  ok "jobs runtime ledger persists to XDG state dir"
+else
+  bad "jobs runtime ledger persists to XDG state dir" "no tsv under $jobs_state/muxa/jobs"
+fi
+if [ -n "$tsv" ]; then
+  tsv_head="$(head -1 "$tsv")"
+  case "$tsv_head" in
+    $'#job\tworker\tworktree\tbranch') ok "runtime TSV has no durable columns" ;;
+    *) bad "runtime TSV has no durable columns" "header=$tsv_head" ;;
+  esac
+  if grep -Eq $'\t(ship|research|open|running|done|https://example.test/pr/1)\t' "$tsv"; then
+    bad "runtime TSV does not duplicate durable fields" "tsv=$(cat "$tsv")"
+  else
+    ok "runtime TSV does not duplicate durable fields"
+  fi
+fi
 
 jobs_code set nope status=open
 [ "$jobs_status" -eq 2 ] && ok "jobs set unknown job exits 2" \
@@ -888,6 +929,44 @@ jobs_code add other kind=ship
 jobs_code set api bogus=1
 [ "$jobs_status" -eq 2 ] && ok "jobs set unknown key exits 2" \
   || bad "jobs set unknown key exits 2" "exit=$jobs_status"
+
+(cd "$pf_repo" && br create --title "stray-bead" -t task -d "not a muxa job" >/dev/null)
+jobs_out="$(jobs_cli list)"
+case "$jobs_out" in
+  *stray-bead*) bad "jobs list excludes non-muxa br issues" "out=$jobs_out" ;;
+  *) ok "jobs list excludes non-muxa br issues" ;;
+esac
+
+(cd "$pf_repo" && br create --title "shared-title" -t task >/dev/null)
+jobs_cli add shared-title kind=research delivery=local >/dev/null
+jobs_out="$(jobs_cli list)"
+assert_contains "$jobs_out" "shared-title" "jobs add succeeds when non-muxa issue shares title"
+
+jobs_cli set api status=open >/dev/null
+jobs_out="$(jobs_cli list)"
+assert_contains "$jobs_out" "open" "jobs set reopens a closed job to open"
+jobs_cli done api pr=https://example.test/pr/1 >/dev/null
+jobs_cli set api status=running >/dev/null
+jobs_out="$(jobs_cli list)"
+assert_contains "$jobs_out" "running" "jobs set reopens a closed job to running"
+
+legacy_repo="$tmpdir/legacy-jobs"
+legacy_state="$tmpdir/legacy-state"
+git_init_repo "$legacy_repo"
+legacy_key="$(cd "$legacy_repo" && pwd -P)"
+legacy_slug="$(printf '%s' "$(basename "$legacy_key")" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^\.*//')"
+legacy_hash="$(printf '%s' "$legacy_key" | python3 -c 'import hashlib, sys; print(hashlib.sha1(sys.stdin.buffer.read()).hexdigest()[:8])')"
+legacy_tsv="$legacy_state/muxa/jobs/${legacy_slug}-${legacy_hash}.tsv"
+mkdir -p "$(dirname "$legacy_tsv")"
+printf '%s\n' $'#job\tkind\tdelivery\tworker\tworktree\tbranch\tstatus\tpr\tnote\tupdated' >"$legacy_tsv"
+printf '%s\n' $'oldjob\tship\tpr\t-\t-\t-\topen\t-\t-\t2026-01-01T00:00:00Z' >>"$legacy_tsv"
+set +e
+legacy_err="$(cd "$legacy_repo" && XDG_STATE_HOME="$legacy_state" "$ROOT/bin/muxa" jobs list 2>&1)"
+legacy_rc=$?
+set -e
+[ "$legacy_rc" -eq 2 ] && ok "legacy open TSV refuses to start" \
+  || bad "legacy open TSV refuses to start" "exit=$legacy_rc err=$legacy_err"
+assert_contains "$legacy_err" "leftover open jobs" "legacy open TSV names the leftover file"
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

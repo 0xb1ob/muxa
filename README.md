@@ -150,6 +150,8 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 | `muxa peek [NAME]` | Unread (humans/scripts, not the model loop) |
 | `muxa deliver [--force] [NAME]` | Claim + inject now (escape hatch). Prechecks by default; `--force` skips them |
 | `muxa hook stop --format claude\|cursor\|pi` | Native continue payload |
+| `muxa preflight [--base BRANCH] [WORKTREE...]` | Repo checks before handing out jobs (git only, no tmux) |
+| `muxa jobs add\|set\|done\|list` | Orchestrator backlog. Durable fields live in **br** (`.beads/`); worker/worktree/branch are runtime-only. `br` is required; muxa auto-inits `.beads/` on first use |
 
 ## Tests
 
@@ -160,6 +162,7 @@ tests/composer.sh     # composer-verdict fixtures (no tmux)
 ```
 
 Needs `tmux` and `python3`. Uses a private tmux socket, not your session.
+`muxa jobs` tests also need [`br`](https://github.com/Dicklesworthstone/beads_rust) on `PATH`.
 
 ## Environment
 

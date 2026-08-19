@@ -107,7 +107,9 @@ A queued message reaches an idle hook pane on its next turn; use `muxa deliver` 
 
 ## Backlog
 
-Record on disk at intake and on completion, so a restart is a reconcile, not a memory test.
+**br** (beads_rust) is mandatory and is what `muxa jobs` uses under the hood. Durable fields — job id, kind, delivery, status, PR URL — live in br (`kind:` / `delivery:` / `project:` labels; PR URL in the close reason). muxa auto-inits `.beads/` on first `muxa jobs` use. If `br` is not installed, `muxa jobs` fails immediately with an install instruction. There is no fallback store.
+
+Runtime fields (worker, worktree, branch) stay in muxa's own state and are cleared at teardown.
 
 ```bash
 muxa jobs add JOB kind=ship|research delivery=pr|local|pipeline [k=v...]
