@@ -107,7 +107,16 @@ A queued message reaches an idle hook pane on its next turn; use `muxa deliver` 
 
 ## Backlog
 
-Record on disk at intake and on completion, so a restart is a reconcile, not a memory test.
+If `.beads/` exists, **br** is the single durable backlog. Intake is `br create` with `project:<name>` and `delivery:pr|local|pipeline`. Completion is `br close` with the PR URL in the close reason. `muxa jobs` is then a runtime-only ledger: add at spawn recording worker/worktree, remove or mark done at teardown. Never duplicate kind, delivery, status, or PR URL there.
+
+```bash
+br create TITLE -l project:NAME,delivery:pr
+br close ID -r 'PR URL'
+muxa jobs add JOB worker=ALIAS worktree=PATH
+muxa jobs done JOB
+```
+
+If `.beads/` is absent, `muxa jobs` remains the full backlog. Record on disk at intake and on completion, so a restart is a reconcile, not a memory test.
 
 ```bash
 muxa jobs add JOB kind=ship|research delivery=pr|local|pipeline [k=v...]
