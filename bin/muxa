@@ -3,7 +3,7 @@
 # bash 3.2+ (macOS / Linux). Requires tmux. python3 used for JSON and spawn quoting.
 set -euo pipefail
 
-VERSION=0.2.2
+VERSION=0.2.3
 TMUX_BIN="${MUXA_TMUX_BIN:-tmux}"
 ENTER_DELAY="${MUXA_ENTER_DELAY:-0.15}"
 INJECT_MAX="${MUXA_INJECT_MAX:-8192}"
@@ -12,6 +12,9 @@ REDELIVER_MAX="${MUXA_REDELIVER_MAX:-3}"
 BATCH_MAX="${MUXA_BATCH_MAX:-8}"
 KICK_WAIT_MAX="${MUXA_KICK_WAIT_MAX:-120}"
 COMPOSER_SETTLE="${MUXA_COMPOSER_SETTLE:-0.25}"
+# Same-turn dual Stop hooks (user + project hooks.json) must not sweep
+# each other's just-claimed cur/ files. Next turn is always >= 1s later.
+SWEEP_MIN_AGE="${MUXA_SWEEP_MIN_AGE:-1}"
 
 usage() {
   cat <<'EOF'
@@ -72,17 +75,19 @@ need_tmux() {
   [ -n "${TMUX:-}" ] || [ -n "${MUXA_TMUX_SOCKET:-}" ] || { printf 'muxa: not in tmux (hard requirement)\n' >&2; exit 3; }
 }
 
+# Hooks for IDE-hosted sessions run outside tmux (no TMUX/TMUX_PANE).
+# The default socket is enough; do not require being inside a pane.
+tmux_reachable() {
+  [ -n "${TMUX:-}" ] && return 0
+  [ -n "${MUXA_TMUX_SOCKET:-}" ] && return 0
+  tmux_do list-sessions >/dev/null 2>&1
+}
+
 tmux_do() {
   if [ -n "${MUXA_TMUX_SOCKET:-}" ]; then
     "$TMUX_BIN" -L "$MUXA_TMUX_SOCKET" "$@"
   else
     "$TMUX_BIN" "$@"
-  fi
-}
-
-consume_stdin() {
-  if [ ! -t 0 ]; then
-    cat >/dev/null
   fi
 }
 
@@ -249,6 +254,129 @@ EOF
   return 1
 }
 
+pane_is_registered() {
+  [ -n "$1" ] && [ -n "$(pane_fmt "$1" '#{@muxa_name}')" ]
+}
+
+find_pane_by_session() {
+  local sid="$1" line
+  [ -n "$sid" ] || return 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    [ "$(printf '%s\n' "$line" | field 9)" = "$sid" ] || continue
+    printf '%s' "$(printf '%s\n' "$line" | field 1)"
+    return 0
+  done <<EOF
+$(roster_lines)
+EOF
+  return 1
+}
+
+# Prefer a hook-deliver root (empty parent) at $1, especially kind=cursor.
+# IDE-hosted Cursor hooks have no TMUX_PANE; the registered launch pane's
+# cwd matches CURSOR_PROJECT_DIR / PWD.
+find_hook_pane_by_cwd() {
+  local want="$1" line pane kind deliver parent cwd best="" cursor_root=""
+  [ -n "$want" ] || return 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    cwd="$(printf '%s\n' "$line" | field 10)"
+    [ "$cwd" = "$want" ] || continue
+    pane="$(printf '%s\n' "$line" | field 1)"
+    parent="$(printf '%s\n' "$line" | field 4)"
+    kind="$(printf '%s\n' "$line" | field 5)"
+    deliver="$(printf '%s\n' "$line" | field 7)"
+    [ "$deliver" = "hook" ] || continue
+    if [ -z "$parent" ] && [ "$kind" = "cursor" ]; then
+      cursor_root="$pane"
+      break
+    fi
+    if [ -z "$parent" ] && [ -z "$best" ]; then
+      best="$pane"
+    fi
+  done <<EOF
+$(roster_lines)
+EOF
+  if [ -n "$cursor_root" ]; then
+    printf '%s' "$cursor_root"
+    return 0
+  fi
+  if [ -n "$best" ]; then
+    printf '%s' "$best"
+    return 0
+  fi
+  return 1
+}
+
+# Resolve the pane a hook event belongs to. Never use the tmux client's
+# active pane (display-message without -t): IDE hooks inherit TMUX but
+# not TMUX_PANE, so that would be whichever pane the human is watching.
+hook_target_pane() {
+  local sid="$1" event="${2:-}" pane="" sess=""
+  if [ -n "${MUXA_PANE:-}" ] && pane_is_registered "$MUXA_PANE"; then
+    printf '%s' "$MUXA_PANE"
+    return 0
+  fi
+  # In-pane CLI session-start: this process IS the pane. Pin it before
+  # conversation_id lookup so a previous @muxa_session cannot steal us.
+  if [ "$event" = "session-start" ] && [ -n "${TMUX_PANE:-}" ]; then
+    printf '%s' "$TMUX_PANE"
+    return 0
+  fi
+  if pane="$(find_pane_by_session "$sid")" && [ -n "$pane" ]; then
+    printf '%s' "$pane"
+    return 0
+  fi
+  if [ -n "${TMUX_PANE:-}" ] && pane_is_registered "$TMUX_PANE"; then
+    sess="$(pane_fmt "$TMUX_PANE" '#{@muxa_session}')"
+    if [ -z "$sid" ] || [ -z "$sess" ] || [ "$sess" = "$sid" ]; then
+      printf '%s' "$TMUX_PANE"
+      return 0
+    fi
+  fi
+  if pane="$(find_hook_pane_by_cwd "${CURSOR_PROJECT_DIR:-}")" && [ -n "$pane" ]; then
+    printf '%s' "$pane"
+    return 0
+  fi
+  if pane="$(find_hook_pane_by_cwd "${PWD:-}")" && [ -n "$pane" ]; then
+    printf '%s' "$pane"
+    return 0
+  fi
+  if pane="$(find_hook_pane_by_cwd "${CLAUDE_PROJECT_DIR:-}")" && [ -n "$pane" ]; then
+    printf '%s' "$pane"
+    return 0
+  fi
+  return 1
+}
+
+parse_hook_payload() {
+  python3 -c '
+import json, sys
+raw = sys.stdin.read()
+sid = status = ""
+try:
+    data = json.loads(raw) if raw.strip() else {}
+except Exception:
+    data = {}
+if isinstance(data, dict):
+    for key in ("session_id", "sessionId", "conversation_id"):
+        val = data.get(key)
+        if val is None:
+            continue
+        text = str(val).strip()
+        if text:
+            sid = text
+            break
+    status = str(data.get("status") or "").strip()
+print(sid)
+print(status)
+'
+}
+
+cursor_session_env() {
+  python3 -c 'import json, sys; print(json.dumps({"env": {"MUXA_PANE": sys.argv[1], "TMUX_PANE": sys.argv[1]}}))' "$1"
+}
+
 name_parent() {
   local pane
   pane="$(find_pane_by_name "$1")" || { printf ''; return 0; }
@@ -378,32 +506,6 @@ apply_cli_session() {
   fi
 }
 
-read_session_id_from_stdin() {
-  if [ -t 0 ]; then
-    return 0
-  fi
-  python3 -c '
-import json, sys
-raw = sys.stdin.read()
-if not raw.strip():
-    sys.exit(0)
-try:
-    data = json.loads(raw)
-except Exception:
-    sys.exit(0)
-if not isinstance(data, dict):
-    sys.exit(0)
-for key in ("session_id", "sessionId", "conversation_id"):
-    val = data.get(key)
-    if val is None:
-        continue
-    text = str(val).strip()
-    if text:
-        print(text)
-        break
-' 2>/dev/null || true
-}
-
 default_name() {
   local pane="$1" existing
   if [ -n "${MUXA_NAME:-}" ]; then
@@ -436,18 +538,20 @@ import json, sys
 text = sys.stdin.read()
 fmt = sys.argv[1]
 if fmt == "claude":
-    print(json.dumps({
+    out = json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "Stop",
             "additionalContext": text,
         }
-    }))
+    })
 elif fmt == "cursor":
-    print(json.dumps({"followup_message": text}))
+    out = json.dumps({"followup_message": text})
 elif fmt == "pi":
-    print(json.dumps({"continue": True, "additionalContext": text}))
+    out = json.dumps({"continue": True, "additionalContext": text})
 else:
     raise SystemExit(1)
+sys.stdout.write(out + "\n")
+sys.stdout.flush()
 ' "$1"
 }
 
@@ -567,11 +671,15 @@ reap_stale_claims() {
 
 # Proof-of-life sweep: the pane completed another turn, so anything still
 # sitting in cur/ was handed to a CLI that is demonstrably running.
+# Skip files younger than SWEEP_MIN_AGE so a same-turn second Stop hook
+# (user + project hooks.json) does not confirm the first hook's claim.
 sweep_consumed() {
-  local name="$1" box f base
+  local name="$1" box f base age
   box="$(ensure_box "$name")"
   for f in "$box/cur"/*; do
     [ -f "$f" ] || continue
+    age="$(file_age_s "$f")"
+    [ "$age" -ge "$SWEEP_MIN_AGE" ] || continue
     base="$(basename "$f")"
     mv "$f" "$box/done/$base" 2>/dev/null || true
   done
@@ -609,6 +717,10 @@ claim_new() {
     f="$box/new/$base"
     [ -f "$f" ] || continue
     mv "$f" "$box/cur/$base" 2>/dev/null || continue
+    # Age for sweep_consumed is time-since-claim. mv preserves mtime from
+    # new/, so a message that sat in the queue would look "old" to a
+    # same-turn second Stop hook.
+    touch "$box/cur/$base" 2>/dev/null || true
     printf '%s\n' "$box/cur/$base"
     n=$((n + 1))
   done <<EOF
@@ -661,7 +773,7 @@ list_count() {
 mailbox_unread_count() {
   local box f n=0
   box="$(ensure_box "$1")"
-  for f in "$box/new"/*; do
+  for f in "$box/new"/* "$box/cur"/*; do
     [ -f "$f" ] || continue
     n=$((n + 1))
   done
@@ -1529,11 +1641,31 @@ cmd_spawn() {
   printf 'spawned %s id=%s parent=%s kind=%s pane=%s cwd=%s\n' "$name" "$id" "$parent" "$kind" "$child" "$cwd"
 }
 
+hook_register_pane() {
+  local pane="$1" kind="$2"
+  local saved="${TMUX_PANE:-}"
+  TMUX_PANE="$pane"
+  if [ -n "${MUXA_NAME:-}" ] && [ -n "${MUXA_PARENT:-}" ]; then
+    cmd_register --name "$MUXA_NAME" --kind "$kind" --deliver hook --parent "$MUXA_PARENT" >/dev/null
+  elif [ -n "${MUXA_NAME:-}" ]; then
+    cmd_register --name "$MUXA_NAME" --kind "$kind" --deliver hook >/dev/null
+  elif [ -n "${MUXA_PARENT:-}" ]; then
+    cmd_register --kind "$kind" --deliver hook --parent "$MUXA_PARENT" >/dev/null
+  else
+    cmd_register --kind "$kind" --deliver hook >/dev/null
+  fi
+  if [ -n "$saved" ]; then
+    TMUX_PANE="$saved"
+  else
+    unset TMUX_PANE
+  fi
+}
+
 cmd_hook() {
-  need_tmux
+  tmux_reachable || { printf 'muxa: not in tmux (hard requirement)\n' >&2; exit 3; }
   local event="${1:-}"
   shift || true
-  local format="claude" kind="" session_id=""
+  local format="claude" kind="" session_id="" status="" pane="" meta
   while [ $# -gt 0 ]; do
     case "$1" in
       --format) format="$2"; shift 2 ;;
@@ -1541,77 +1673,100 @@ cmd_hook() {
       *) shift ;;
     esac
   done
+  if [ -t 0 ]; then
+    session_id=""
+    status=""
+  else
+    meta="$(parse_hook_payload)"
+    session_id="$(printf '%s\n' "$meta" | awk 'NR==1 { print; exit }')"
+    status="$(printf '%s\n' "$meta" | awk 'NR==2 { print; exit }')"
+  fi
   case "$event" in
-    session-start|SessionStart|sessionStart)
-      session_id="$(read_session_id_from_stdin)"
-      [ -n "$kind" ] || kind="$(detect_kind "$(this_pane)")"
-      if [ -n "${MUXA_NAME:-}" ] && [ -n "${MUXA_PARENT:-}" ]; then
-        cmd_register --name "$MUXA_NAME" --kind "$kind" --deliver hook --parent "$MUXA_PARENT" >/dev/null
-      elif [ -n "${MUXA_NAME:-}" ]; then
-        cmd_register --name "$MUXA_NAME" --kind "$kind" --deliver hook >/dev/null
-      elif [ -n "${MUXA_PARENT:-}" ]; then
-        cmd_register --kind "$kind" --deliver hook --parent "$MUXA_PARENT" >/dev/null
-      else
-        cmd_register --kind "$kind" --deliver hook >/dev/null
-      fi
+    session-start|SessionStart|sessionStart) event="session-start" ;;
+    session-end|SessionEnd|sessionEnd) event="session-end" ;;
+    busy|PreToolUse|preToolUse) event="busy" ;;
+    blocked|PermissionRequest) event="blocked" ;;
+    idle|afterAgentResponse) event="idle" ;;
+    stop|Stop|session_stop) event="stop" ;;
+  esac
+  pane="$(hook_target_pane "$session_id" "$event")" || pane=""
+  case "$event" in
+    session-start)
+      [ -n "$pane" ] || return 0
+      [ -n "$kind" ] || kind="$(detect_kind "$pane")"
+      hook_register_pane "$pane" "$kind"
       if [ -n "$session_id" ]; then
-        apply_cli_session "$(this_pane)" "$session_id"
+        apply_cli_session "$pane" "$session_id"
       fi
-      cmd_state idle
+      set_pane_opt "$pane" @muxa_state idle
+      if [ "$kind" = "cursor" ]; then
+        cursor_session_env "$pane"
+      fi
       ;;
-    session-end|SessionEnd|sessionEnd)
-      consume_stdin
-      clear_muxa_registration "$(this_pane)"
+    session-end)
+      [ -n "$pane" ] || return 0
+      clear_muxa_registration "$pane"
       ;;
-    busy|PreToolUse|preToolUse)
-      consume_stdin
-      cmd_state busy
+    busy)
+      [ -n "$pane" ] || return 0
+      set_pane_opt "$pane" @muxa_state busy
+      if [ -n "$session_id" ]; then
+        apply_cli_session "$pane" "$session_id"
+      fi
       ;;
-    blocked|PermissionRequest)
-      consume_stdin
-      cmd_state blocked
+    blocked)
+      [ -n "$pane" ] || return 0
+      set_pane_opt "$pane" @muxa_state blocked
       ;;
     idle)
-      consume_stdin
-      cmd_state idle
+      [ -n "$pane" ] || return 0
+      set_pane_opt "$pane" @muxa_state idle
       ;;
-    stop|Stop|session_stop)
-      consume_stdin
+    stop)
       local name list payload lock
-      name="$(pane_fmt "$(this_pane)" '#{@muxa_name}')"
+      [ -n "$pane" ] || return 0
+      name="$(pane_fmt "$pane" '#{@muxa_name}')"
       if [ -z "$name" ]; then
-        [ -n "$kind" ] || kind="$(detect_kind "$(this_pane)")"
-        cmd_register --kind "$kind" --deliver hook >/dev/null
-        name="$(pane_fmt "$(this_pane)" '#{@muxa_name}')"
+        [ -n "$kind" ] || kind="$(detect_kind "$pane")"
+        hook_register_pane "$pane" "$kind"
+        name="$(pane_fmt "$pane" '#{@muxa_name}')"
       fi
+      [ -n "$name" ] || return 0
+      case "$status" in
+        aborted|error)
+          set_pane_opt "$pane" @muxa_state idle
+          refresh_unread "$pane" "$name"
+          return 0
+          ;;
+      esac
       list="$(runtime_root)/hook-$$.list"
-      lock="$(kick_wait_lock "$(this_pane)")"
+      lock="$(kick_wait_lock "$pane")"
       mkdir -p "$(runtime_root)"
       if lock_acquire "$lock" 100; then
-        set_pane_opt "$(this_pane)" @muxa_hook_ok 1
+        set_pane_opt "$pane" @muxa_hook_ok 1
         sweep_consumed "$name"
         claim_new "$name" >"$list" || true
         lock_release "$lock"
       else
-        set_pane_opt "$(this_pane)" @muxa_hook_ok 1
+        set_pane_opt "$pane" @muxa_hook_ok 1
         sweep_consumed "$name"
         claim_new "$name" >"$list" || true
       fi
       if [ ! -s "$list" ]; then
         rm -f "$list"
-        unset_pane_opt "$(this_pane)" @muxa_unread
-        cmd_state idle
+        set_pane_opt "$pane" @muxa_state idle
+        refresh_unread "$pane" "$name"
         return 0
       fi
-      cmd_state busy
+      # Leave claimed mail in cur/ until a later Stop sweeps it. Confirming
+      # here hid the message from peek/who when the CLI deferred followup.
+      set_pane_opt "$pane" @muxa_state busy
       payload="$(payload_from_claimed "$list")"
-      confirm_list "$list"
       rm -f "$list"
-      unset_pane_opt "$(this_pane)" @muxa_unread
+      refresh_unread "$pane" "$name"
       printf '%s' "$payload" | json_out "$format"
       ;;
     *)
-      consume_stdin
       die "hook: unknown event $event"
       ;;
   esac

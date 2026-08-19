@@ -37,7 +37,7 @@ Each participating pane sets tmux user options:
 | `@muxa_state`   | `idle` \| `busy` \| `blocked`                |
 | `@muxa_deliver` | `hook` \| `inject`                           |
 | `@muxa_hook_ok` | `1` after the first successful `hook stop` (drain path proven) |
-| `@muxa_unread`  | hint: count of `new/` files; maildir is authoritative |
+| `@muxa_unread`  | hint: count of `new/` + `cur/` files; maildir is authoritative |
 
 Roster is `tmux list-panes -a`. There is no registry file. `muxa who`
 prints that roster plus each pane's current working directory, a
@@ -108,7 +108,8 @@ $XDG_RUNTIME_DIR/muxa/<tmux-pid>/mail/<name>/{tmp,new,cur,done,dead}
 On macOS, `$XDG_RUNTIME_DIR` falls back to `/tmp/muxa-<uid>`.
 
 One file per message. Writers create a unique name in `tmp/` and `mv` it
-to `new/`. Readers `mv` `new/` → `cur/` to claim. **`cur/` means claimed,
+to `new/`. Readers `mv` `new/` → `cur/` to claim and reset mtime (sweep age is
+time-since-claim, not time-since-send). **`cur/` means claimed,
 not consumed.** A later proof (the next Stop hook, or tmux-level inject
 success on an inject-only pane) moves the file to `done/`. Mail that
 fails delivery `MUXA_REDELIVER_MAX` times (default 3) is parked in
@@ -123,7 +124,8 @@ Ids are `<epoch>-<pid>-<zero-padded-random>`. Claim order is mtime
 so coalesced batches keep send order.
 
 `muxa peek` prints `new/` then a `claimed but unconfirmed (cur/)`
-section. A tmux server restart changes `runtime_root` (it embeds the
+section. `muxa who` **UNREAD** is `new/` plus `cur/` (mail that has been
+claimed but not yet proven consumed). A tmux server restart changes `runtime_root` (it embeds the
 server pid) and orphans the on-disk mailbox; "undeliverable" does not
 mean the bytes are gone from disk.
 
@@ -189,11 +191,24 @@ That is intentional: `cmd_spawn` marks `deliver=hook` and `state=idle`
 before the CLI boots, and no Stop hook will run until a turn starts.
 `@muxa_hook_ok` is set only by `hook stop`, so queueing cannot deadlock
 the brief. After that proof, idle hook panes are never pasted — the
-Stop hook drains `new/` on the next turn.
+Stop hook drains `new/` when the turn ends.
+
+IDE-hosted Cursor sessions are not a process in the registered pane.
+Their hooks often inherit `TMUX` but not `TMUX_PANE`, so `display-message`
+would resolve the *active* pane (a worker the human is watching) instead
+of the root. Hook events resolve the pane in this order: `MUXA_PANE`
+(pinned by Cursor `sessionStart` `env`), `@muxa_session` matching
+`conversation_id`, registered `TMUX_PANE` if its session matches, then a
+hook-deliver root whose cwd is `CURSOR_PROJECT_DIR` / `PWD`. Hooks may
+run outside tmux as long as the tmux server is reachable. Cursor
+`sessionStart` emits `{"env":{"MUXA_PANE":"%id","TMUX_PANE":"%id"}}` so
+later hooks stay pinned. `afterAgentResponse` sets `idle` so a missed
+Stop cannot leave the roster stuck `busy`. `status: aborted|error` sets
+`idle` and does not claim mail.
 
 Pane titles are owned by the CLI (OSC-2). `@muxa_unread` is a rendering
 hint for an opt-in `pane-border-format`; muxa MUST recompute it from
-`new/` and MUST NOT increment/decrement a counter. `muxa who` / `peek`
+`new/` plus `cur/` and MUST NOT increment/decrement a counter. `muxa who` / `peek`
 count the maildir and never trust the option.
 
 `inject_text` MUST check `load-buffer`, `paste-buffer`, and pane
@@ -208,11 +223,15 @@ sends otherwise interleave two `[muxa]` blocks into one composer.
 
 ```
 hook stop:
+  if aborted|error: set state=idle; print nothing (leave new/)
   set hook_ok
-  sweep cur/ -> done/          # previous inject is now confirmed-consumed
+  sweep cur/ older than 1s -> done/   # previous turn's claim is now consumed;
+                                      # skip younger files so a second Stop in
+                                      # the same turn (user + project hooks)
+                                      # cannot hide the first hook's claim
   claim all new mail for this pane's name
-  if empty: clear unread; set state=idle; print nothing
-  else: set state=busy; clear unread; print native continue payload
+  if empty: set state=idle; print nothing
+  else: set state=busy; print native continue payload; leave in cur/
 ```
 
 Native continue payloads (stdout of `muxa hook stop --format …`):

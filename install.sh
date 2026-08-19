@@ -157,6 +157,7 @@ wanted = {
     "sessionEnd": [{"command": muxa + " hook session-end"}],
     "preToolUse": [{"command": muxa + " hook busy"}],
     "stop": [{"command": muxa + " hook stop --format cursor", "loop_limit": None}],
+    "afterAgentResponse": [{"command": muxa + " hook idle"}],
 }
 changed = False
 for event, entries in wanted.items():
