@@ -53,8 +53,6 @@ Silence is default. Reply only with a question, a result, or a blocker. Never ac
 
 ## Done
 
-Follow any completion steps from the brief, then `muxa send "$(muxa parent)" "…"` with the result or blocker. Lifecycle (PR, lease) only if the job said so.
-
-Teardown is fail-closed: verify `git status --porcelain` is empty and the branch is pushed before reporting done, and never run `treehouse return` — returning the lease belongs to the parent after your result, unless the brief explicitly says otherwise (`treehouse return --force` from inside the worktree kills your own process tree and can leave the lease held). If the tree is dirty or unpushed, keep the lease and report a blocker that names the worktree path.
+Follow any completion steps from the brief, then `muxa send "$(muxa parent)" "…"` with the result or blocker.
 
 The parent will not ack. Stop.
