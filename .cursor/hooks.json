@@ -25,6 +25,12 @@
         "timeout": 10,
         "loop_limit": null
       }
+    ],
+    "afterAgentResponse": [
+      {
+        "command": "scripts/muxa-hook.sh idle",
+        "timeout": 5
+      }
     ]
   }
 }

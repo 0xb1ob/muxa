@@ -12,6 +12,9 @@
     ],
     "stop": [
       { "command": "muxa hook stop --format cursor", "loop_limit": null }
+    ],
+    "afterAgentResponse": [
+      { "command": "muxa hook idle" }
     ]
   }
 }

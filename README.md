@@ -56,7 +56,10 @@ idle inject pane          →  paste-buffer, except never into copy-mode, a dead
 The first brief to a freshly spawned hook pane is still injected: spawn
 marks `hook+idle` before the CLI boots, and no Stop hook exists until a
 turn has run. After the first successful `muxa hook stop`, further idle
-sends queue.
+sends queue. Stop drains that queue when the turn ends — including for
+an IDE-hosted Cursor root whose pane is only a tmux registration, not
+the agent process. Claimed mail stays visible in `muxa peek` / `muxa who`
+UNREAD until a later Stop proves it was consumed.
 
 tmux user options are the roster (`@muxa_name`, `@muxa_kind`, `@muxa_state`,
 `@muxa_deliver`, `@muxa_session`, `@muxa_hook_ok`, `@muxa_unread`). `tmux list-panes` is service discovery. Maildir (`tmp/new/cur/done/dead`
@@ -175,6 +178,7 @@ Needs `tmux` and `python3`. Uses a private tmux socket, not your session.
 | `MUXA_ENTER_DELAY` | `0.15` | Seconds between paste and Enter |
 | `MUXA_INJECT_MAX` | `8192` | Max inject payload size in **bytes** |
 | `MUXA_CLAIM_TTL` | `120` | Seconds before claimed (`cur/`) mail is presumed lost and redelivered |
+| `MUXA_SWEEP_MIN_AGE` | `1` | Seconds a `cur/` file must age before Stop moves it to `done/` |
 | `MUXA_REDELIVER_MAX` | `3` | Redeliveries before parking in `dead/` |
 | `MUXA_BATCH_MAX` | `8` | Max messages claimed per inject attempt |
 | `MUXA_KICK_WAIT_MAX` | `120` | `kick_wait` poll iterations (0.5s each) |

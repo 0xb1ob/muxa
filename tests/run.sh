@@ -147,6 +147,9 @@ muxa_as "$alice_pane" state busy
 muxa_as "$bob_pane" send alice "$big" >/dev/null
 drain_big="$(muxa_as "$alice_pane" hook stop --format claude)"
 assert_contains "$drain_big" "OOOO" "hook stop drains oversized body"
+# Claimed oversized mail would otherwise sit in cur/ and inflate UNREAD below.
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
 
 # --- busy + hook drain (Claude JSON) ---
 muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
@@ -163,7 +166,28 @@ assert_contains "$drain" "queued while busy" "drain includes body"
 assert_contains "$drain" "Do not reply" "no-reply flag honored"
 
 peek2="$(muxa_as "$bob_pane" peek alice)"
-assert_contains "$peek2" "(empty)" "mailbox empty after drain"
+assert_contains "$peek2" "claimed but unconfirmed" "peek shows claimed mail after drain"
+assert_contains "$peek2" "queued while busy" "peek still has body after drain"
+who_drain="$(muxa_as "$bob_pane" who)"
+who_drain_n="$(printf '%s\n' "$who_drain" | awk '$1=="alice" { print substr($0, 114, 8); exit }')"
+who_drain_n="${who_drain_n#"${who_drain_n%%[![:space:]]*}"}"
+who_drain_n="${who_drain_n%"${who_drain_n##*[![:space:]]}"}"
+[ "$who_drain_n" = "1" ] && ok "who UNREAD counts claimed mail" \
+  || bad "who UNREAD counts claimed mail" "got='$who_drain_n'"
+python3 - "$(muxa_box alice)/cur" <<'PY'
+import os, sys, time
+d = sys.argv[1]
+now = time.time()
+for name in os.listdir(d):
+    p = os.path.join(d, name)
+    if os.path.isfile(p):
+        os.utime(p, (now - 5, now - 5))
+PY
+empty_after="$(muxa_as "$alice_pane" hook stop --format claude)"
+[ -z "$empty_after" ] && ok "next stop sweeps claimed mail silently" \
+  || bad "next stop sweeps claimed mail silently" "got: $empty_after"
+peek2b="$(muxa_as "$bob_pane" peek alice)"
+assert_contains "$peek2b" "(empty)" "mailbox empty after sweep"
 
 # --- Cursor JSON ---
 muxa_as "$alice_pane" state busy
@@ -181,6 +205,8 @@ assert_contains "$pjson" '"continue": true' "pi stop JSON"
 muxa_as "$alice_pane" state busy
 empty="$(muxa_as "$alice_pane" hook stop --format claude)"
 [ -z "$empty" ] && ok "empty stop prints nothing" || bad "empty stop prints nothing" "got: $empty"
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
 
 # --- concurrent kick_wait while busy (inject) ---
 muxa_as "$alice_pane" register --name alice --kind generic --deliver inject >/dev/null
@@ -393,6 +419,20 @@ empty_stop="$(muxa_as "$alice_pane" hook stop --format claude)"
 hook_ok="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_hook_ok}')"
 [ "$hook_ok" = "1" ] && ok "@muxa_hook_ok set on first hook stop" \
   || bad "@muxa_hook_ok set on first hook stop" "got: $hook_ok"
+# Bootstrap inject left a young cur/ claim; sweep it so UNREAD below is
+# only the queued idle send (Stop skips claims younger than 1s).
+python3 - "$(muxa_box alice)/cur" <<'PY'
+import os, sys, time
+d = sys.argv[1]
+if not os.path.isdir(d):
+    raise SystemExit(0)
+now = time.time()
+for name in os.listdir(d):
+    p = os.path.join(d, name)
+    if os.path.isfile(p):
+        os.utime(p, (now - 5, now - 5))
+PY
+muxa_as "$alice_pane" hook stop --format claude >/dev/null
 muxa_as "$alice_pane" state idle
 : >"$alice_out"
 qidle="$(muxa_as "$bob_pane" send alice 'HOOK_QUEUE_BODY')"
@@ -418,27 +458,42 @@ who_unread="${who_unread%"${who_unread##*[![:space:]]}"}"
 drain_q="$(muxa_as "$alice_pane" hook stop --format claude)"
 assert_contains "$drain_q" "HOOK_QUEUE_BODY" "hook stop drains queued idle mail"
 unread2="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_unread}')"
-[ -z "$unread2" ] && ok "@muxa_unread cleared after hook drain" \
-  || bad "@muxa_unread cleared after hook drain" "got: $unread2"
+[ "$unread2" = "1" ] && ok "@muxa_unread stays until claimed mail is swept" \
+  || bad "@muxa_unread stays until claimed mail is swept" "got: $unread2"
 who2="$(muxa_as "$bob_pane" who)"
 who_unread2="$(printf '%s\n' "$who2" | awk '$1=="alice" { print substr($0, 114, 8); exit }')"
 who_unread2="${who_unread2#"${who_unread2%%[![:space:]]*}"}"
 who_unread2="${who_unread2%"${who_unread2##*[![:space:]]}"}"
-[ "$who_unread2" = "-" ] && ok "who shows UNREAD=- after drain" \
-  || bad "who shows UNREAD=- after drain" "got='$who_unread2'"
+[ "$who_unread2" = "1" ] && ok "who shows UNREAD=1 while claimed" \
+  || bad "who shows UNREAD=1 while claimed" "got='$who_unread2'"
+python3 - "$(muxa_box alice)/cur" <<'PY'
+import os, sys, time
+d = sys.argv[1]
+now = time.time()
+for name in os.listdir(d):
+    p = os.path.join(d, name)
+    if os.path.isfile(p):
+        os.utime(p, (now - 5, now - 5))
+PY
+muxa_as "$alice_pane" hook stop --format claude >/dev/null
+unread3="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_unread}')"
+[ -z "$unread3" ] && ok "@muxa_unread cleared after sweep" \
+  || bad "@muxa_unread cleared after sweep" "got: $unread3"
 
 # --- unread recompute under concurrency ---
 muxa_as "$alice_pane" state busy
 find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
 muxa_as "$bob_pane" send alice 'conc-unread-a' >/dev/null &
 muxa_as "$bob_pane" send alice 'conc-unread-b' >/dev/null &
 wait
 sleep 0.2
 opt="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_unread}')"
 files="$(find "$(muxa_box alice)/new" -type f | awk 'END { print NR }')"
-[ "$opt" = "$files" ] && [ "$files" = "2" ] && ok "unread option equals new/ count under concurrency" \
-  || bad "unread option equals new/ count under concurrency" "opt=$opt files=$files"
+[ "$opt" = "$files" ] && [ "$files" = "2" ] && ok "unread option equals mailbox count under concurrency" \
+  || bad "unread option equals mailbox count under concurrency" "opt=$opt files=$files"
 find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
 tmux -L "$SOCK" set-option -p -t "$alice_pane" -u @muxa_unread 2>/dev/null || true
 
 # restore alice as bob's child for later ACL tests
@@ -663,6 +718,74 @@ sid="$(tmux -L "$SOCK" display-message -p -t "$alice_pane" '#{@muxa_session}')"
 
 who="$(muxa_as "$bob_pane" who)"
 assert_contains "$who" "cli-sess-123" "who shows session id"
+
+# --- Cursor session-start pins MUXA_PANE for later IDE hooks ---
+cursor_env="$(printf '%s' '{"session_id":"cursor-conv-1"}' | muxa_as "$alice_pane" hook session-start --kind cursor)"
+assert_contains "$cursor_env" '"MUXA_PANE"' "cursor session-start emits MUXA_PANE env"
+assert_contains "$cursor_env" "$alice_pane" "cursor session-start env names this pane"
+
+# --- IDE Stop: conversation_id wins over the caller's TMUX_PANE ---
+muxa_as "$alice_pane" register --name alice --kind cursor --deliver hook --parent bob >/dev/null
+printf '%s' '{"session_id":"ide-conv-9"}' | muxa_as "$alice_pane" hook session-start --kind cursor >/dev/null
+muxa_as "$alice_pane" state busy
+muxa_as "$bob_pane" state idle
+muxa_as "$bob_pane" send alice 'IDE_SESSION_DRAIN' >/dev/null
+ide_drain="$(printf '%s' '{"conversation_id":"ide-conv-9","status":"completed"}' | muxa_as "$bob_pane" hook stop --format cursor)"
+assert_contains "$ide_drain" "followup_message" "stop from other pane still emits cursor JSON"
+assert_contains "$ide_drain" "IDE_SESSION_DRAIN" "conversation_id drains the session mailbox"
+alice_st="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_state}')"
+[ "$alice_st" = "busy" ] && ok "session stop marks the target pane busy" \
+  || bad "session stop marks the target pane busy" "state=$alice_st"
+bob_st="$(tmux -L "$SOCK" display-message -t "$bob_pane" -p '#{@muxa_state}')"
+[ "$bob_st" = "idle" ] && ok "session stop does not mark the caller pane busy" \
+  || bad "session stop does not mark the caller pane busy" "bob_state=$bob_st"
+ide_peek="$(muxa_as "$bob_pane" peek alice)"
+assert_contains "$ide_peek" "IDE_SESSION_DRAIN" "queued drain stays visible in peek"
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
+
+# --- IDE Stop with no TMUX_PANE (GUI hook) ---
+muxa_as "$alice_pane" state idle
+muxa_as "$bob_pane" send alice 'NO_TMUX_PANE_DRAIN' >/dev/null
+no_pane_drain="$(printf '%s' '{"conversation_id":"ide-conv-9","status":"completed"}' | muxa hook stop --format cursor)"
+assert_contains "$no_pane_drain" "NO_TMUX_PANE_DRAIN" "stop without TMUX_PANE drains by conversation_id"
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
+
+# --- aborted stop leaves mail queued ---
+muxa_as "$alice_pane" state busy
+muxa_as "$bob_pane" send alice 'ABORT_KEEP' >/dev/null
+abort_out="$(printf '%s' '{"conversation_id":"ide-conv-9","status":"aborted"}' | muxa_as "$alice_pane" hook stop --format cursor)"
+[ -z "$abort_out" ] && ok "aborted stop prints nothing" \
+  || bad "aborted stop prints nothing" "got: $abort_out"
+abort_peek="$(muxa_as "$bob_pane" peek alice)"
+assert_contains "$abort_peek" "ABORT_KEEP" "aborted stop does not claim mail"
+abort_st="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_state}')"
+[ "$abort_st" = "idle" ] && ok "aborted stop sets idle" \
+  || bad "aborted stop sets idle" "state=$abort_st"
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+
+# --- afterAgentResponse clears stuck busy ---
+muxa_as "$alice_pane" state busy
+muxa_as "$alice_pane" hook afterAgentResponse
+aar_st="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_state}')"
+[ "$aar_st" = "idle" ] && ok "afterAgentResponse sets idle" \
+  || bad "afterAgentResponse sets idle" "state=$aar_st"
+
+# --- same-turn second Stop does not hide claimed mail ---
+muxa_as "$alice_pane" state busy
+muxa_as "$bob_pane" send alice 'DUAL_STOP_BODY' >/dev/null
+muxa_as "$alice_pane" hook stop --format cursor >/dev/null
+second_stop="$(MUXA_SWEEP_MIN_AGE=60 muxa_as "$alice_pane" hook stop --format cursor)"
+[ -z "$second_stop" ] && ok "same-turn second stop is silent" \
+  || bad "same-turn second stop is silent" "got: $second_stop"
+dual_peek="$(muxa_as "$bob_pane" peek alice)"
+assert_contains "$dual_peek" "DUAL_STOP_BODY" "same-turn second stop does not sweep claim"
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
+
+printf '%s' '{"session_id":"cli-sess-123"}' | muxa_as "$alice_pane" hook session-start --kind generic >/dev/null
+muxa_as "$alice_pane" register --name alice --kind generic --deliver inject --parent bob >/dev/null
 
 projdir="$tmpdir/acme-widgets"
 mkdir -p "$projdir"
