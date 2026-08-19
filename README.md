@@ -148,7 +148,7 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 | `muxa send NAME TEXT` | Queue + deliver if parent↔child |
 | `muxa send --all TEXT` | Every parent/child pane (not siblings or other roots) |
 | `muxa peek [NAME]` | Unread (humans/scripts, not the model loop) |
-| `muxa deliver [NAME]` | Force inject (escape hatch) |
+| `muxa deliver [--force] [NAME]` | Claim + inject now (escape hatch). Prechecks by default; `--force` skips them |
 | `muxa hook stop --format claude\|cursor\|pi` | Native continue payload |
 
 ## Tests
@@ -156,6 +156,7 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 ```bash
 tests/run.sh          # maildir / inject unit tests
 tests/tmux-facts.sh   # version-sensitive tmux behaviour muxa depends on
+tests/composer.sh     # composer-verdict fixtures (no tmux)
 ```
 
 Needs `tmux` and `python3`. Uses a private tmux socket, not your session.
@@ -170,7 +171,9 @@ Needs `tmux` and `python3`. Uses a private tmux socket, not your session.
 | `MUXA_REDELIVER_MAX` | `3` | Redeliveries before parking in `dead/` |
 | `MUXA_BATCH_MAX` | `8` | Max messages claimed per inject attempt |
 | `MUXA_KICK_WAIT_MAX` | `120` | `kick_wait` poll iterations (0.5s each) |
-| `MUXA_FORCE_INJECT` | `0` | `1` skips readiness prechecks (tests / operator escape) |
+| `MUXA_FORCE_INJECT` | `0` | `1` skips readiness prechecks (tests / `muxa deliver --force`) |
+| `MUXA_COMPOSER_CHECK` | `1` | `0` disables styled-content composer parsing for CLI kinds |
+| `MUXA_COMPOSER_SETTLE` | `0.25` | Seconds between the two composer-empty reads |
 | `MUXA_TMUX_SOCKET` | unset | Private tmux socket name (`tmux -L`) |
 | `MUXA_TMUX_BIN` | `tmux` | tmux binary |
 
