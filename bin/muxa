@@ -7,6 +7,10 @@ VERSION=0.2.2
 TMUX_BIN="${MUXA_TMUX_BIN:-tmux}"
 ENTER_DELAY="${MUXA_ENTER_DELAY:-0.15}"
 INJECT_MAX="${MUXA_INJECT_MAX:-8192}"
+CLAIM_TTL="${MUXA_CLAIM_TTL:-120}"
+REDELIVER_MAX="${MUXA_REDELIVER_MAX:-3}"
+BATCH_MAX="${MUXA_BATCH_MAX:-8}"
+KICK_WAIT_MAX="${MUXA_KICK_WAIT_MAX:-120}"
 
 usage() {
   cat <<'EOF'
@@ -26,7 +30,7 @@ muxa — message other AI CLIs in this tmux server
   muxa children                     direct children of this pane
   muxa send [--no-reply] NAME TEXT  queue + deliver (parent↔child only)
   muxa send --all TEXT              every parent/child pane (not siblings or other roots)
-  muxa peek [NAME]                  unread mail
+  muxa peek [NAME]                  unread mail (new/) and claimed-but-unconfirmed (cur/)
   muxa deliver [NAME]               claim + inject now (escape hatch)
   muxa state idle|busy|blocked      presence (hooks call this)
   muxa hook EVENT [--format FMT] [--kind KIND]
@@ -95,7 +99,7 @@ mail_box() {
 ensure_box() {
   local box
   box="$(mail_box "$1")"
-  mkdir -p "$box/tmp" "$box/new" "$box/cur"
+  mkdir -p "$box/tmp" "$box/new" "$box/cur" "$box/done" "$box/dead"
   printf '%s' "$box"
 }
 
@@ -448,8 +452,12 @@ shlex_join() {
 }
 
 format_one() {
-  local from="$1" flags="$2" body="$3"
-  printf '[muxa] from=%s\n' "$from"
+  local from="$1" flags="$2" body="$3" redel="${4:-}"
+  if [ -n "$redel" ] && [ "$redel" -gt 0 ] 2>/dev/null; then
+    printf '[muxa] (redelivered) from=%s\n' "$from"
+  else
+    printf '[muxa] from=%s\n' "$from"
+  fi
   printf '%s\n' "$body"
   case " $flags " in
     *" no-reply "*) printf 'Do not reply.\n' ;;
@@ -473,7 +481,9 @@ write_mail() {
   local from="$1" to="$2" flags="$3" body="$4"
   local box id tmp
   box="$(ensure_box "$to")"
-  id="$(date +%s)-$$-$RANDOM"
+  # Zero-pad RANDOM so lexicographic glob order matches send order within
+  # the same second (E8). claim_new also sorts by mtime.
+  id="$(date +%s)-$$-$(printf '%05d' "$RANDOM")"
   tmp="$box/tmp/$id"
   {
     printf 'From: %s\n' "$from"
@@ -489,16 +499,117 @@ write_mail() {
   printf '%s' "$id"
 }
 
-claim_new() {
-  local name="$1"
-  local box f base
+# Age in seconds of $1, or a large number if it cannot be stat'd.
+file_age_s() {
+  python3 - "$1" <<'PY' 2>/dev/null || printf '99999'
+import os, sys, time
+try:
+    print(int(time.time() - os.stat(sys.argv[1]).st_mtime))
+except OSError:
+    print(99999)
+PY
+}
+
+# Rewrite $1 with Redelivered: $2. Must rewrite (not mv) so mtime resets;
+# otherwise a file moved back to new/ keeps its old age and the reaper loops (E24).
+bump_redelivered() {
+  local f="$1" n="$2" tmp
+  tmp="$f.tmp.$$"
+  python3 - "$f" "$tmp" "$n" <<'PY'
+import sys
+src, dst, n = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(src, "r", encoding="utf-8", errors="replace").read()
+if "\n\n" in text:
+    headers, body = text.split("\n\n", 1)
+else:
+    headers, body = text, ""
+lines = headers.split("\n")
+out, seen = [], False
+for line in lines:
+    if line.startswith("Redelivered:"):
+        out.append("Redelivered: %s" % n)
+        seen = True
+    else:
+        out.append(line)
+if not seen:
+    out.append("Redelivered: %s" % n)
+open(dst, "w", encoding="utf-8").write("\n".join(out) + "\n\n" + body)
+PY
+  mv "$tmp" "$f"
+}
+
+# Claimed mail older than CLAIM_TTL that nobody swept is presumed lost:
+# put it back in new/ with a Redelivered count, park it after N attempts.
+reap_stale_claims() {
+  local name="$1" box f base age n
   box="$(ensure_box "$name")"
-  for f in "$box/new"/*; do
+  for f in "$box/cur"/*; do
+    [ -f "$f" ] || continue
+    age="$(file_age_s "$f")"
+    [ "$age" -ge "$CLAIM_TTL" ] || continue
+    base="$(basename "$f")"
+    n="$(parse_header "$f" Redelivered)"
+    [ -n "$n" ] || n=0
+    if [ "$n" -ge "$REDELIVER_MAX" ]; then
+      mv "$f" "$box/dead/$base" 2>/dev/null || true
+      printf 'muxa: mail %s for %s undeliverable after %s attempts (parked in dead/)\n' \
+        "$base" "$name" "$n" >&2
+      continue
+    fi
+    bump_redelivered "$f" "$((n + 1))"
+    mv "$f" "$box/new/$base" 2>/dev/null || true
+  done
+}
+
+# Proof-of-life sweep: the pane completed another turn, so anything still
+# sitting in cur/ was handed to a CLI that is demonstrably running.
+sweep_consumed() {
+  local name="$1" box f base
+  box="$(ensure_box "$name")"
+  for f in "$box/cur"/*; do
     [ -f "$f" ] || continue
     base="$(basename "$f")"
+    mv "$f" "$box/done/$base" 2>/dev/null || true
+  done
+}
+
+# Basenames in $1/new, oldest mtime first (then name).
+maildir_sorted_new() {
+  python3 - "$1" <<'PY'
+import os, sys
+d = os.path.join(sys.argv[1], "new")
+try:
+    names = os.listdir(d)
+except OSError:
+    sys.exit(0)
+files = []
+for name in names:
+    p = os.path.join(d, name)
+    if os.path.isfile(p):
+        st = os.stat(p)
+        files.append((st.st_mtime, name))
+files.sort()
+for _, name in files:
+    print(name)
+PY
+}
+
+claim_new() {
+  local name="$1"
+  local box f base n=0
+  box="$(ensure_box "$name")"
+  reap_stale_claims "$name"
+  while IFS= read -r base; do
+    [ -n "$base" ] || continue
+    [ "$n" -ge "$BATCH_MAX" ] && break
+    f="$box/new/$base"
+    [ -f "$f" ] || continue
     mv "$f" "$box/cur/$base" 2>/dev/null || continue
     printf '%s\n' "$box/cur/$base"
-  done
+    n=$((n + 1))
+  done <<EOF
+$(maildir_sorted_new "$box")
+EOF
 }
 
 unclaim_list() {
@@ -511,9 +622,41 @@ unclaim_list() {
   done <"$list"
 }
 
+confirm_list() {
+  local list="$1" f base box
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    box="$(dirname "$(dirname "$f")")"
+    mkdir -p "$box/done"
+    mv "$f" "$box/done/$base" 2>/dev/null || true
+  done <"$list"
+}
+
+park_list_dead() {
+  local list="$1" reason="$2" f base box
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    box="$(dirname "$(dirname "$f")")"
+    mkdir -p "$box/dead"
+    mv "$f" "$box/dead/$base" 2>/dev/null || true
+    printf 'muxa: mail %s undeliverable (%s); parked in dead/\n' "$base" "$reason" >&2
+  done <"$list"
+}
+
+list_count() {
+  local list="$1" f n=0
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -f "$f" ] || continue
+    n=$((n + 1))
+  done <"$list"
+  printf '%s' "$n"
+}
+
 payload_from_claimed() {
   local list="$1"
-  local f from flags body n
+  local f from flags body n redel
   n=0
   while IFS= read -r f; do
     [ -n "$f" ] && [ -f "$f" ] || continue
@@ -527,32 +670,87 @@ payload_from_claimed() {
     [ -n "$f" ] && [ -f "$f" ] || continue
     from="$(parse_header "$f" From)"
     flags="$(parse_header "$f" Flags)"
+    redel="$(parse_header "$f" Redelivered)"
     body="$(parse_body "$f")"
     if [ "$n" -gt 1 ]; then
       printf -- '-- from=%s id=%s\n' "$from" "$(parse_header "$f" Id)"
     fi
-    format_one "$from" "$flags" "$body"
+    format_one "$from" "$flags" "$body" "$redel"
     printf '\n'
   done <"$list"
 }
 
+# empty | pending | unknown — fail closed: anything unrecognised is unknown.
+# PR1: cheap tmux facts only (dead / copy-mode / generic alt-screen).
+# Composer parsing is a later layer and must not be required here.
+pane_inject_verdict() {
+  local pane="$1" kind="$2"
+  [ "$(pane_fmt "$pane" '#{pane_dead}')" = "1" ] && { printf 'unknown'; return; }
+  # A pane in copy-mode accepts paste-buffer with exit 0, never delivers it to
+  # the app, and flushes it (minus the Enter) when the mode exits. Verified.
+  [ "$(pane_fmt "$pane" '#{pane_in_mode}')" = "1" ] && { printf 'unknown'; return; }
+  if [ "$kind" = "generic" ] && [ "$(pane_fmt "$pane" '#{alternate_on}')" = "1" ]; then
+    printf 'unknown'; return
+  fi
+  printf 'empty'
+}
+
+pane_inject_ready() {
+  local pane="$1" kind="$2" a
+  a="$(pane_inject_verdict "$pane" "$kind")"
+  [ "$a" = "empty" ] || { printf '%s' "$a"; return 1; }
+  printf 'empty'
+}
+
+# Check every step. Cannot rely on set -e: callers use `if ! inject_text`,
+# which suspends set -e for the whole function body.
 inject_text() {
   local pane="$1" text="$2"
-  local buf
+  local buf rc=0
   buf="muxa-$$-$RANDOM"
-  printf '%s' "$text" | tmux_do load-buffer -b "$buf" -
-  tmux_do paste-buffer -p -d -b "$buf" -t "$pane"
+  if ! printf '%s' "$text" | tmux_do load-buffer -b "$buf" -; then
+    printf 'muxa: load-buffer failed for %s\n' "$pane" >&2
+    return 1
+  fi
+  # paste-buffer -d deletes the buffer only on success; clean up on failure.
+  if ! tmux_do paste-buffer -p -d -b "$buf" -t "$pane"; then
+    printf 'muxa: paste-buffer failed for %s\n' "$pane" >&2
+    tmux_do delete-buffer -b "$buf" 2>/dev/null || true
+    return 1
+  fi
   sleep "$ENTER_DELAY"
-  tmux_do send-keys -t "$pane" Enter
+  tmux_do send-keys -t "$pane" Enter || rc=1
+  # send-keys exits 0 against a dead pane; liveness is the only real proof.
+  [ "$(pane_fmt "$pane" '#{pane_dead}')" = "1" ] && rc=1
+  return "$rc"
 }
 
 deliver_list() {
   local pane="$1" list="$2"
-  local text
+  local text kind name verdict nbytes nfiles
+  kind="$(pane_fmt "$pane" '#{@muxa_kind}')"
+  name="$(pane_fmt "$pane" '#{@muxa_name}')"
+  if [ "${MUXA_FORCE_INJECT:-0}" != "1" ]; then
+    verdict="$(pane_inject_ready "$pane" "$kind")" || {
+      printf 'muxa: %s not ready to receive (%s); left queued\n' \
+        "${name:-$pane}" "$verdict" >&2
+      unclaim_list "$list"
+      return 1
+    }
+  fi
   text="$(payload_from_claimed "$list")" || { unclaim_list "$list"; return 1; }
-  if [ "${#text}" -gt "$INJECT_MAX" ]; then
-    printf 'muxa: body %s bytes exceeds inject limit (%s); left in mailbox\n' "${#text}" "$INJECT_MAX" >&2
-    unclaim_list "$list"
+  nbytes="$(printf '%s' "$text" | wc -c)"
+  nbytes="${nbytes#"${nbytes%%[![:space:]]*}"}"
+  nbytes="${nbytes%"${nbytes##*[![:space:]]}"}"
+  if [ "$nbytes" -gt "$INJECT_MAX" ]; then
+    printf 'muxa: body %s bytes exceeds inject limit (%s); left in mailbox\n' \
+      "$nbytes" "$INJECT_MAX" >&2
+    nfiles="$(list_count "$list")"
+    if [ "$nfiles" -eq 1 ]; then
+      park_list_dead "$list" "exceeds inject limit"
+    else
+      unclaim_list "$list"
+    fi
     return 1
   fi
   if ! inject_text "$pane" "$text"; then
@@ -560,6 +758,12 @@ deliver_list() {
     return 1
   fi
   set_pane_opt "$pane" @muxa_state busy
+  # Hook panes leave mail in cur/ until the next Stop hook proves the CLI
+  # processed it. Inject-only panes have no such proof — tmux-level success
+  # is the ceiling, so confirm now or the reaper would duplicate every send.
+  if [ "$(pane_fmt "$pane" '#{@muxa_deliver}')" != "hook" ]; then
+    confirm_list "$list"
+  fi
 }
 
 cmd_register() {
@@ -717,7 +921,7 @@ cmd_state() {
 
 cmd_peek() {
   need_tmux
-  local name="${1:-}" box f found from
+  local name="${1:-}" box f found from age redel cur_header
   from="$(pane_fmt "$(this_pane)" '#{@muxa_name}')"
   [ -n "$name" ] || name="$from"
   [ -n "$name" ] || die "pass a name or register this pane"
@@ -730,6 +934,21 @@ cmd_peek() {
     [ -f "$f" ] || continue
     found=1
     printf '%s\n' "--- $(basename "$f")"
+    cat "$f"
+    printf '\n'
+  done
+  cur_header=0
+  for f in "$box/cur"/*; do
+    [ -f "$f" ] || continue
+    found=1
+    if [ "$cur_header" -eq 0 ]; then
+      printf '%s\n' "--- claimed but unconfirmed (cur/) ---"
+      cur_header=1
+    fi
+    age="$(file_age_s "$f")"
+    redel="$(parse_header "$f" Redelivered)"
+    [ -n "$redel" ] || redel=0
+    printf -- '--- %s  age=%ss  redelivered=%s\n' "$(basename "$f")" "$age" "$redel"
     cat "$f"
     printf '\n'
   done
@@ -782,43 +1001,70 @@ spawn_kick_wait() {
 
 kick_wait() {
   local pane="$1" name="$2"
-  local i state list lock
-  i=0
+  local i=0 state prev kind list lock verdict
   list="$(runtime_root)/wait-$$-$RANDOM.list"
   lock="$(kick_wait_lock "$pane")"
+  kind="$(pane_fmt "$pane" '#{@muxa_kind}')"
   mkdir -p "$(runtime_root)"
-  while [ "$i" -lt 120 ]; do
+  while [ "$i" -lt "$KICK_WAIT_MAX" ]; do
     state="$(pane_fmt "$pane" '#{@muxa_state}')"
     if [ "$state" = "idle" ] || [ -z "$state" ]; then
-      if lock_acquire "$lock" 100; then
-        state="$(pane_fmt "$pane" '#{@muxa_state}')"
-        if [ "$state" = "idle" ] || [ -z "$state" ]; then
-          claim_new "$name" >"$list" || true
-          if [ -s "$list" ]; then
-            set_pane_opt "$pane" @muxa_state busy
-            deliver_list "$pane" "$list" || true
+      verdict="$(pane_inject_verdict "$pane" "$kind")"
+      if [ "$verdict" = "empty" ]; then
+        if lock_acquire "$lock" 100; then
+          prev="$(pane_fmt "$pane" '#{@muxa_state}')"
+          if [ "$prev" = "idle" ] || [ -z "$prev" ]; then
+            claim_new "$name" >"$list" || true
+            if [ -s "$list" ]; then
+              set_pane_opt "$pane" @muxa_state busy
+              if ! deliver_list "$pane" "$list"; then
+                # nothing was delivered: do not leave a false busy behind (E21)
+                if [ -z "$prev" ]; then
+                  unset_pane_opt "$pane" @muxa_state
+                else
+                  set_pane_opt "$pane" @muxa_state "$prev"
+                fi
+                lock_release "$lock"
+                rm -f "$list"
+                sleep 0.5
+                i=$((i + 1))
+                continue
+              fi
+              lock_release "$lock"
+              rm -f "$list"
+              return 0
+            fi
           fi
+          lock_release "$lock"
         fi
-        lock_release "$lock"
+        rm -f "$list"
+        return 0                       # idle, ready, nothing to send
       fi
-      rm -f "$list"
-      return 0
     fi
     sleep 0.5
     i=$((i + 1))
   done
   rm -f "$list"
+  # 60s expired with mail still queued: make it visible instead of silent.
+  printf 'muxa: %s still not ready after 60s; mail left queued\n' "$name" >&2
 }
 
 send_one() {
   local from="$1" to="$2" flags="$3" body="$4"
-  local pane state deliver id list
+  local pane state deliver id list lock kind cwd cmd
   if [ "$to" = "$from" ]; then
     return 0
   fi
   pane="$(find_pane_by_name "$to")" || die "unknown agent '$to' — muxa who"
   can_send "$from" "$to" || forbid "forbidden $from → $to (only parent↔child)"
   id="$(write_mail "$from" "$to" "$flags" "$body")"
+  reap_stale_claims "$to"
+  kind="$(pane_fmt "$pane" '#{@muxa_kind}')"
+  cwd="$(pane_fmt "$pane" '#{pane_current_path}')"
+  cmd="$(pane_fmt "$pane" '#{pane_current_command}')"
+  if [ "$(pane_status "$kind" "$cwd" "$cmd")" = "ghost" ]; then
+    printf 'muxa: target %s looks ghost: shell at prompt\n' "$to" >&2
+  fi
   state="$(pane_fmt "$pane" '#{@muxa_state}')"
   deliver="$(pane_fmt "$pane" '#{@muxa_deliver}')"
   case "$state" in
@@ -831,11 +1077,18 @@ send_one() {
       fi
       ;;
     *)
+      # Per-pane lock around claim→inject, held across ENTER_DELAY (E13/E22).
       list="$(runtime_root)/send-$$-$RANDOM.list"
+      lock="$(kick_wait_lock "$pane")"
       mkdir -p "$(runtime_root)"
-      claim_new "$to" >"$list" || true
-      if [ -s "$list" ] && deliver_list "$pane" "$list"; then
-        printf 'delivered %s → %s id=%s\n' "$from" "$to" "$id"
+      if lock_acquire "$lock" 100; then
+        claim_new "$to" >"$list" || true
+        if [ -s "$list" ] && deliver_list "$pane" "$list"; then
+          printf 'delivered %s → %s id=%s\n' "$from" "$to" "$id"
+        else
+          printf 'queued %s → %s id=%s\n' "$from" "$to" "$id"
+        fi
+        lock_release "$lock"
       else
         printf 'queued %s → %s id=%s\n' "$from" "$to" "$id"
       fi
@@ -899,7 +1152,7 @@ EOF
 
 cmd_deliver() {
   need_tmux
-  local name="${1:-}" pane list from
+  local name="${1:-}" pane list from lock
   from="$(pane_fmt "$(this_pane)" '#{@muxa_name}')"
   [ -n "$name" ] || name="$from"
   [ -n "$name" ] || die "pass a name"
@@ -908,16 +1161,28 @@ cmd_deliver() {
   fi
   pane="$(find_pane_by_name "$name")" || die "unknown agent '$name'"
   list="$(runtime_root)/deliver-$$.list"
+  lock="$(kick_wait_lock "$pane")"
   mkdir -p "$(runtime_root)"
+  if ! lock_acquire "$lock" 100; then
+    rm -f "$list"
+    die "could not lock pane for deliver"
+  fi
   claim_new "$name" >"$list" || true
   if [ ! -s "$list" ]; then
+    lock_release "$lock"
     rm -f "$list"
     printf 'no mail\n'
     return 0
   fi
-  deliver_list "$pane" "$list"
-  printf 'injected into %s\n' "$name"
+  if deliver_list "$pane" "$list"; then
+    printf 'injected into %s\n' "$name"
+    lock_release "$lock"
+    rm -f "$list"
+    return 0
+  fi
+  lock_release "$lock"
   rm -f "$list"
+  return 1
 }
 
 # Child start directory: --cwd, else the muxa process $PWD, else the
@@ -1062,7 +1327,7 @@ cmd_hook() {
       ;;
     stop|Stop|session_stop)
       consume_stdin
-      local name list payload
+      local name list payload lock
       name="$(pane_fmt "$(this_pane)" '#{@muxa_name}')"
       if [ -z "$name" ]; then
         [ -n "$kind" ] || kind="$(detect_kind "$(this_pane)")"
@@ -1070,8 +1335,16 @@ cmd_hook() {
         name="$(pane_fmt "$(this_pane)" '#{@muxa_name}')"
       fi
       list="$(runtime_root)/hook-$$.list"
+      lock="$(kick_wait_lock "$(this_pane)")"
       mkdir -p "$(runtime_root)"
-      claim_new "$name" >"$list" || true
+      if lock_acquire "$lock" 100; then
+        sweep_consumed "$name"
+        claim_new "$name" >"$list" || true
+        lock_release "$lock"
+      else
+        sweep_consumed "$name"
+        claim_new "$name" >"$list" || true
+      fi
       if [ ! -s "$list" ]; then
         rm -f "$list"
         cmd_state idle
@@ -1079,6 +1352,7 @@ cmd_hook() {
       fi
       cmd_state busy
       payload="$(payload_from_claimed "$list")"
+      confirm_list "$list"
       rm -f "$list"
       printf '%s' "$payload" | json_out "$format"
       ;;

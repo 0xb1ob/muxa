@@ -51,6 +51,24 @@ assert_who_status() {
   [ "$got" = "$want" ] && ok "$label" || bad "$label" "name=$name want=$want got=$got"
 }
 
+muxa_box() {
+  local name="$1" pid base
+  pid="$(tmux -L "$SOCK" list-sessions -F '#{pid}' | head -1)"
+  base="${XDG_RUNTIME_DIR:-/tmp/muxa-${UID:-$(id -u)}}"
+  printf '%s/muxa/%s/mail/%s' "$base" "$pid" "$name"
+}
+
+place_mail() {
+  local box="$1" id="$2" body="$3" extra="${4:-}"
+  mkdir -p "$box/tmp" "$box/new" "$box/cur" "$box/done" "$box/dead"
+  {
+    printf 'From: bob\nTo: alice\nId: %s\nTime: 2026-01-01T00:00:00Z\nFlags: \n' "$id"
+    [ -n "$extra" ] && printf '%s\n' "$extra"
+    printf '\n%s\n' "$body"
+  } >"$box/tmp/$id"
+  mv "$box/tmp/$id" "$box/new/$id"
+}
+
 tmux -L "$SOCK" new-session -d -s muxa -n alice "exec cat > '$alice_out'"
 tmux -L "$SOCK" split-window -h -t muxa:alice "exec sleep 3600"
 sleep 0.2
@@ -96,31 +114,39 @@ got="$(cat "$alice_out" 2>/dev/null || true)"
 assert_contains "$got" "review src/auth.ts" "alice pane received body"
 assert_contains "$got" "[muxa] from=bob" "alice pane received prefix"
 
-# --- oversized inject refused; mail stays in new/ for peek ---
+# --- oversized inject refused; a single oversize parks in dead/ (E7) ---
 muxa_as "$alice_pane" state idle
 big="$(python3 -c "print('O' * 9000)")"
 oversized="$(muxa_as "$bob_pane" send alice "$big" 2>&1)"
 assert_contains "$oversized" "queued bob → alice" "oversized idle send queues"
 assert_contains "$oversized" "exceeds inject limit" "oversized idle send warns"
 peek_big="$(muxa_as "$bob_pane" peek alice)"
-assert_contains "$peek_big" "OOOO" "peek recovers oversized idle mail"
-
-deliver_big="$(muxa_as "$alice_pane" deliver alice 2>&1 || true)"
-assert_contains "$deliver_big" "exceeds inject limit" "deliver refuses oversized"
-peek_big2="$(muxa_as "$bob_pane" peek alice)"
-assert_contains "$peek_big2" "OOOO" "peek recovers after failed deliver"
+case "$peek_big" in
+  *OOOO*) bad "oversized idle mail is not left in new/" "peek still has body: $peek_big" ;;
+  *) ok "oversized idle mail is not left in new/" ;;
+esac
+alice_box="$(muxa_box alice)"
+dead_n="$(find "$alice_box/dead" -type f 2>/dev/null | awk 'END { print NR }')"
+[ "$dead_n" -ge 1 ] && ok "oversized idle mail parked in dead/" \
+  || bad "oversized idle mail parked in dead/" "dead_n=$dead_n box=$alice_box"
 
 muxa_as "$alice_pane" state busy
 kick_big="$(muxa_as "$bob_pane" send alice "$big" 2>&1)"
 assert_contains "$kick_big" "waiting for idle" "oversized busy send spawns kick_wait"
 muxa_as "$alice_pane" state idle
-sleep 0.6
+sleep 0.8
 peek_big3="$(muxa_as "$bob_pane" peek alice)"
-assert_contains "$peek_big3" "OOOO" "peek recovers after kick_wait inject failure"
+case "$peek_big3" in
+  *OOOO*) bad "oversized kick_wait mail is not left in new/" "peek still has body" ;;
+  *) ok "oversized kick_wait mail is not left in new/" ;;
+esac
 
-# drain oversized mail before hook tests (hooks tolerate large bodies)
+# hooks still tolerate large bodies (never inject, so never park)
 muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
-muxa_as "$alice_pane" hook stop --format claude >/dev/null || true
+muxa_as "$alice_pane" state busy
+muxa_as "$bob_pane" send alice "$big" >/dev/null
+drain_big="$(muxa_as "$alice_pane" hook stop --format claude)"
+assert_contains "$drain_big" "OOOO" "hook stop drains oversized body"
 
 # --- busy + hook drain (Claude JSON) ---
 muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
@@ -170,6 +196,191 @@ got="$(cat "$alice_out" 2>/dev/null || true)"
 assert_contains "$got" "wait-msg-alpha" "concurrent wait delivers alpha"
 assert_contains "$got" "wait-msg-beta" "concurrent wait delivers beta"
 assert_contains "$got" "[muxa] 2 messages" "concurrent wait batches into one inject"
+
+# --- copy-mode defers (the reproduced incident) ---
+muxa_as "$alice_pane" register --name alice --kind generic --deliver inject >/dev/null
+muxa_as "$alice_pane" state idle
+: >"$alice_out"
+tmux -L "$SOCK" copy-mode -t "$alice_pane"
+copy_sent="$(muxa_as "$bob_pane" send alice 'COPY_MODE_BODY' 2>&1)"
+assert_contains "$copy_sent" "queued bob → alice" "copy-mode send queues"
+sleep 0.2
+got="$(cat "$alice_out" 2>/dev/null || true)"
+case "$got" in
+  *COPY_MODE_BODY*) bad "copy-mode does not deliver to the app" "got: $got" ;;
+  *) ok "copy-mode does not deliver to the app" ;;
+esac
+peek_copy="$(muxa_as "$bob_pane" peek alice)"
+assert_contains "$peek_copy" "COPY_MODE_BODY" "peek still shows copy-mode mail"
+tmux -L "$SOCK" send-keys -t "$alice_pane" -X cancel 2>/dev/null || true
+sleep 0.1
+# Stash the deferred mail so the next inject is a clean paste (claim_new would
+# otherwise coalesce it). Ghost-flush is a tmux paste-buffer property.
+copy_box="$(muxa_box alice)"
+stash="$(mktemp -d "$tmpdir/stash.XXXXXX")"
+find "$copy_box/new" -type f -exec mv {} "$stash/" \; 2>/dev/null || true
+muxa_as "$alice_pane" state idle
+later="$(muxa_as "$bob_pane" send alice 'AFTER_CANCEL_MSG' 2>&1)"
+assert_contains "$later" "delivered" "send after leaving copy-mode delivers"
+sleep 0.3
+got="$(cat "$alice_out" 2>/dev/null || true)"
+assert_contains "$got" "AFTER_CANCEL_MSG" "pane received the later message"
+case "$got" in
+  *COPY_MODE_BODYAFTER_CANCEL_MSG*) bad "copy-mode ghost flush is prevented" "got concatenated: $got" ;;
+  *) ok "copy-mode ghost flush is prevented" ;;
+esac
+find "$stash" -type f -exec mv {} "$copy_box/new/" \; 2>/dev/null || true
+# original body still queued; deliver now that copy-mode is off
+del_copy="$(muxa_as "$bob_pane" deliver alice 2>&1)"
+assert_contains "$del_copy" "injected into alice" "deliver after cancel injects"
+sleep 0.2
+got="$(cat "$alice_out" 2>/dev/null || true)"
+assert_contains "$got" "COPY_MODE_BODY" "deliver lands the deferred copy-mode body"
+
+# --- dead pane: send queues, mail stays in new/, peek finds it ---
+tmux -L "$SOCK" set-window-option -g remain-on-exit off 2>/dev/null || true
+tmux -L "$SOCK" new-window -t muxa -n deadpane "exec sleep 3600"
+sleep 0.2
+dead_pane="$(tmux -L "$SOCK" list-panes -t muxa:deadpane -F '#{pane_id}' | head -1)"
+muxa_as "$dead_pane" register --name deadagent --kind generic --deliver inject --parent bob >/dev/null
+tmux -L "$SOCK" set-window-option -t muxa:deadpane remain-on-exit on
+dead_pid="$(tmux -L "$SOCK" display-message -t "$dead_pane" -p '#{pane_pid}')"
+kill "$dead_pid" 2>/dev/null || true
+sleep 0.3
+dead_flag="$(tmux -L "$SOCK" display-message -t "$dead_pane" -p '#{pane_dead}' 2>/dev/null || echo 1)"
+[ "$dead_flag" = "1" ] && ok "dead pane fixture is pane_dead=1" \
+  || bad "dead pane fixture is pane_dead=1" "pane_dead=$dead_flag"
+dead_sent="$(muxa_as "$bob_pane" send deadagent 'DEAD_PANE_BODY' 2>&1)"
+assert_contains "$dead_sent" "queued bob → deadagent" "dead pane send queues"
+peek_dead="$(muxa_as "$bob_pane" peek deadagent)"
+assert_contains "$peek_dead" "DEAD_PANE_BODY" "peek finds mail for a dead pane"
+case "$peek_dead" in
+  *claimed\ but\ unconfirmed*) bad "dead pane mail is not stuck in cur/" "$peek_dead" ;;
+  *) ok "dead pane mail is not stuck in cur/" ;;
+esac
+
+# --- alternate screen, generic pane ---
+tmux -L "$SOCK" new-window -t muxa -n altpane "printf '\\033[?1049h'; exec cat"
+sleep 0.3
+alt_pane="$(tmux -L "$SOCK" list-panes -t muxa:altpane -F '#{pane_id}' | head -1)"
+muxa_as "$alt_pane" register --name altagent --kind generic --deliver inject --parent bob >/dev/null
+alt_on="$(tmux -L "$SOCK" display-message -t "$alt_pane" -p '#{alternate_on}')"
+if [ "$alt_on" = "1" ]; then
+  alt_sent="$(muxa_as "$bob_pane" send altagent 'ALT_SCREEN_BODY' 2>&1)"
+  assert_contains "$alt_sent" "queued bob → altagent" "generic alt-screen send queues"
+  peek_alt="$(muxa_as "$bob_pane" peek altagent)"
+  assert_contains "$peek_alt" "ALT_SCREEN_BODY" "alt-screen mail stays in mailbox"
+else
+  ok "generic alt-screen send queues (skip: alternate_on=$alt_on)"
+  ok "alt-screen mail stays in mailbox (skip)"
+fi
+
+# --- peek shows cur/ ---
+box="$(muxa_box alice)"
+mkdir -p "$box/cur"
+{
+  printf 'From: bob\nTo: alice\nId: claimed-1\nTime: 2026-01-01T00:00:00Z\nFlags: \n\nSTUCK_CLAIMED\n'
+} >"$box/cur/claimed-1"
+peek_cur="$(muxa_as "$bob_pane" peek alice)"
+assert_contains "$peek_cur" "claimed but unconfirmed" "peek shows cur/ section"
+assert_contains "$peek_cur" "age=" "peek shows claimed age"
+assert_contains "$peek_cur" "STUCK_CLAIMED" "peek shows claimed body"
+rm -f "$box/cur/claimed-1"
+
+# --- reaper redelivers stale cur/ and resets mtime (E24) ---
+muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
+muxa_as "$alice_pane" state busy
+box="$(muxa_box alice)"
+mkdir -p "$box/cur" "$box/new" "$box/dead"
+{
+  printf 'From: bob\nTo: alice\nId: stale-1\nTime: 2026-01-01T00:00:00Z\nFlags: \n\nREAP_ME\n'
+} >"$box/cur/stale-1"
+touch -t 202001010000 "$box/cur/stale-1"
+muxa_as "$bob_pane" send alice 'reaper-trigger' >/dev/null
+[ -f "$box/new/stale-1" ] && ok "reaper moves stale cur/ to new/" \
+  || bad "reaper moves stale cur/ to new/" "missing $box/new/stale-1"
+assert_contains "$(cat "$box/new/stale-1")" "Redelivered: 1" "reaper writes Redelivered: 1"
+age_s="$(python3 - "$box/new/stale-1" <<'PY'
+import os, sys, time
+print(int(time.time() - os.stat(sys.argv[1]).st_mtime))
+PY
+)"
+[ "$age_s" -lt 30 ] && ok "reaper rewrite resets mtime" \
+  || bad "reaper rewrite resets mtime" "age=${age_s}s"
+find "$box/new" -type f -exec rm -f {} + 2>/dev/null || true
+
+# --- reaper parks after N ---
+{
+  printf 'From: bob\nTo: alice\nId: stale-max\nTime: 2026-01-01T00:00:00Z\nFlags: \nRedelivered: 3\n\nPARK_ME\n'
+} >"$box/cur/stale-max"
+touch -t 202001010000 "$box/cur/stale-max"
+park_err="$(muxa_as "$bob_pane" send alice 'park-trigger' 2>&1)"
+assert_contains "$park_err" "undeliverable" "reaper warns when parking"
+[ -f "$box/dead/stale-max" ] && ok "reaper parks after max attempts" \
+  || bad "reaper parks after max attempts" "$(ls -la "$box/cur" "$box/dead" 2>&1)"
+find "$box/new" -type f -exec rm -f {} + 2>/dev/null || true
+
+# --- kick_wait does not poison state (E21) ---
+muxa_as "$alice_pane" register --name alice --kind generic --deliver inject >/dev/null
+muxa_as "$alice_pane" state busy
+tmux -L "$SOCK" copy-mode -t "$alice_pane"
+muxa_as "$bob_pane" send alice 'POISON_CHECK' >/dev/null
+muxa_as "$alice_pane" state idle
+sleep 0.8
+st="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_state}')"
+[ "$st" = "idle" ] && ok "kick_wait restores idle after deferral" \
+  || bad "kick_wait restores idle after deferral" "state=$st"
+tmux -L "$SOCK" send-keys -t "$alice_pane" -X cancel 2>/dev/null || true
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
+
+# --- batch cap ---
+muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
+muxa_as "$alice_pane" state busy
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+i=1
+while [ "$i" -le 20 ]; do
+  muxa_as "$bob_pane" send alice "batch-msg-$i" >/dev/null
+  i=$((i + 1))
+done
+new_n="$(find "$(muxa_box alice)/new" -type f | awk 'END { print NR }')"
+[ "$new_n" -eq 20 ] && ok "queued 20 messages before claim" \
+  || bad "queued 20 messages before claim" "new_n=$new_n"
+MUXA_BATCH_MAX=8 muxa_as "$alice_pane" hook stop --format claude >/dev/null
+left_n="$(find "$(muxa_box alice)/new" -type f | awk 'END { print NR }')"
+[ "$left_n" -eq 12 ] && ok "claim caps at MUXA_BATCH_MAX" \
+  || bad "claim caps at MUXA_BATCH_MAX" "left_in_new=$left_n"
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/done" -type f -exec rm -f {} + 2>/dev/null || true
+
+# --- ordering: lex-unsafe ids still deliver in mtime/send order (E8) ---
+muxa_as "$alice_pane" register --name alice --kind generic --deliver inject >/dev/null
+muxa_as "$alice_pane" state idle
+: >"$alice_out"
+obox="$(muxa_box alice)"
+find "$obox/new" -type f -exec rm -f {} + 2>/dev/null || true
+epoch="$(date +%s)"
+# Same epoch, lex order would be -40 < -400 < -5 if unpadded; send order is 5, 40, 400.
+place_mail "$obox" "${epoch}-1-5" "ORDER_FIRST"
+sleep 0.05
+place_mail "$obox" "${epoch}-1-40" "ORDER_SECOND"
+sleep 0.05
+place_mail "$obox" "${epoch}-1-400" "ORDER_THIRD"
+muxa_as "$bob_pane" deliver alice >/dev/null
+sleep 0.3
+got="$(cat "$alice_out" 2>/dev/null || true)"
+python3 - "$got" <<'PY' && ok "coalesced payload preserves send order" || bad "coalesced payload preserves send order" "got: $got"
+import sys
+text = sys.argv[1]
+i1, i2, i3 = text.find("ORDER_FIRST"), text.find("ORDER_SECOND"), text.find("ORDER_THIRD")
+sys.exit(0 if -1 not in (i1, i2, i3) and i1 < i2 < i3 else 1)
+PY
+
+# restore alice as bob's child for later ACL tests
+muxa_as "$alice_pane" register --name alice --kind generic --deliver inject --parent bob >/dev/null
+muxa_as "$alice_pane" state idle
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
 
 # --- unknown target ---
 err="$(muxa_as "$bob_pane" send nobody hi 2>&1 || true)"
