@@ -80,9 +80,10 @@ ln -sfn "$ROOT/bin/muxa" "$BIN/muxa"
 chmod +x "$ROOT/bin/muxa" "$ROOT/install.sh" "$ROOT/tests/run.sh"
 
 # Skills: on-demand, not MCP. Progressive disclosure = fewer tokens.
-# Global so any project can load muxa-parent / muxa-worker / muxa-orchestrator.
+# Global so any project can load muxa-parent / muxa-worker.
 rm -rf "$HOME/.cursor/skills/muxa" "$HOME/.claude/skills/muxa" "$HOME/.agents/skills/muxa"
-for skill in muxa-parent muxa-worker muxa-orchestrator; do
+rm -rf "$HOME/.cursor/skills/muxa-orchestrator" "$HOME/.claude/skills/muxa-orchestrator" "$HOME/.agents/skills/muxa-orchestrator"
+for skill in muxa-parent muxa-worker; do
   for dest in "$HOME/.cursor/skills/$skill" "$HOME/.claude/skills/$skill" "$HOME/.agents/skills/$skill"; do
     mkdir -p "$dest"
     cp "$ROOT/skills/$skill/SKILL.md" "$dest/SKILL.md"
@@ -183,5 +184,5 @@ done
 
 echo
 echo "muxa $("$BIN/muxa" version) -> $BIN/muxa  (repo $ROOT)"
-echo "Skills muxa-parent / muxa-worker / muxa-orchestrator -> ~/.cursor/skills, ~/.claude/skills, ~/.agents/skills"
+echo "Skills muxa-parent / muxa-worker -> ~/.cursor/skills, ~/.claude/skills, ~/.agents/skills"
 echo "Put $BIN on PATH if needed. Start each CLI inside tmux, then: muxa who"

@@ -71,9 +71,7 @@ Unknown means inspect — never assume idle or busy. One read, not a poll: do no
 
 ## First brief
 
-This template is spawn+mail only. On a coding job, **muxa-orchestrator** is in use: send that skill's job contract instead. Do not send this bootstrap (it omits lease/PR).
-
-The first send to a new worker **must** name `muxa-worker` and include the generic rules (the worker may not have skills installed yet), then the job:
+The first send to a new worker **must** name `muxa-worker` and include the generic rules (the worker may not have skills installed yet), then the job. For worktree leasing, PR contracts, or multi-worker dispatch, use [command-post](https://github.com/0xb1ob/command-post) — muxa is spawn+mail only.
 
 ```bash
 parent="$(muxa whoami)"

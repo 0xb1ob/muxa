@@ -37,7 +37,7 @@ muxa — message other AI CLIs in this tmux server
   muxa hook EVENT [--format FMT] [--kind KIND]
   muxa version
 
-Orchestrator helpers (git only, no tmux):
+Repo helpers (git only, no tmux):
 
   muxa preflight [--base BRANCH] [WORKTREE...]
                                 repo checks before handing out jobs: the primary
@@ -1678,7 +1678,7 @@ cmd_preflight() {
   [ -n "$base" ] || base="$(default_base_branch "$repo")"
   pf_ok "base branch $base"
 
-  # The orchestrator must not sit on a branch a worker needs to build on.
+  # The primary checkout must not sit on a branch a worker needs to build on.
   primary="$(primary_worktree "$repo")"
   if [ -z "$primary" ]; then
     pf_fail "primary checkout: git worktree list returned nothing"

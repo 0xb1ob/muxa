@@ -10,6 +10,11 @@ muxa send reviewer "auth.ts is ready for review"
 
 The other agent sees a normal user turn tagged `[muxa]`. That is the protocol.
 
+**Scope:** muxa is tmux agent spawn, mail, preflight, and a runtime jobs map
+(`muxa jobs`). It is not a job orchestrator. For worktree leasing, dispatch
+contracts, and multi-worker coding jobs, use
+[command-post](https://github.com/0xb1ob/command-post).
+
 ## Research: what already exists, and why not
 
 The constraint was: **light, zero wasted tokens, use each CLI's built-in
@@ -85,9 +90,8 @@ curl -fsSL https://raw.githubusercontent.com/0xb1ob/muxa/main/install.sh | bash
 ```
 
 That clones this repo into `~/.muxa`, symlinks `muxa` onto `~/.local/bin`,
-merges user-level hooks, and copies the **muxa-parent**, **muxa-worker**,
-and **muxa-orchestrator** skills to `~/.cursor/skills`, `~/.claude/skills`,
-and `~/.agents/skills`.
+merges user-level hooks, and copies the **muxa-parent** and **muxa-worker**
+skills to `~/.cursor/skills`, `~/.claude/skills`, and `~/.agents/skills`.
 Re-run the same curl to `git pull` `~/.muxa` and refresh skills/hooks.
 
 From a git checkout (development):
@@ -126,12 +130,12 @@ muxa who
 | --- | --- |
 | [muxa-parent](skills/muxa-parent/SKILL.md) | Root pane: spawn + mail |
 | [muxa-worker](skills/muxa-worker/SKILL.md) | Spawned pane: do the job, reply to parent |
-| [muxa-orchestrator](skills/muxa-orchestrator/SKILL.md) | Coding-job playbook that uses muxa |
 
 The parent's first `muxa send` names `muxa-worker` and inlines the generic
-rules so a worker in a repo with no project skills still behaves. For a
-coding job, **muxa-orchestrator**'s first brief wins (lease/PR contract) —
-do not send muxa-parent's slim bootstrap.
+rules so a worker in a repo with no project skills still behaves. For
+orchestration (leases, worktrees, PR contracts), use
+[command-post](https://github.com/0xb1ob/command-post) — muxa stays
+spawn+mail only.
 Silence is default. Reply only with a question, a result, or a blocker.
 Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 
@@ -151,7 +155,7 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 | `muxa deliver [--force] [NAME]` | Claim + inject now (escape hatch). Prechecks by default; `--force` skips them |
 | `muxa hook stop --format claude\|cursor\|pi` | Native continue payload |
 | `muxa preflight [--base BRANCH] [WORKTREE...]` | Repo checks before handing out jobs (git only, no tmux) |
-| `muxa jobs add\|set\|done\|list` | Orchestrator backlog. Durable fields live in **br** (`.beads/`); worker/worktree/branch are runtime-only. `br` is required; muxa auto-inits `.beads/` on first use |
+| `muxa jobs add\|set\|done\|list` | Job backlog map. Durable fields live in **br** (`.beads/`); worker/worktree/branch are runtime-only. `br` is required; muxa auto-inits `.beads/` on first use |
 
 ## Tests
 
