@@ -78,8 +78,11 @@ direction follows pane count
 `split-window -v`, otherwise a column with `-h`) so successive children fill
 a 2D grid rather than a single row. Then `select-layout tiled` on the window.
 `--window` opens a dedicated tmux window instead. `--split` is accepted for
-compatibility (split is the default). Sets `MUXA_PARENT`, and records
-`@muxa_parent` before the child CLI boots. Omit `--name` to get a generated
+compatibility (split is the default). If a live registered worker already
+occupies that start directory (same physical path, including a worktree),
+spawn prints a warning on stderr and still creates the pane. Ghosts and
+roots occupying the path do not warn; name conflicts still fail as today.
+Sets `MUXA_PARENT` and records `@muxa_parent` before the child CLI boots. Omit `--name` to get a generated
 `adjective-noun` alias (`swift-oak`, `quiet-lark`, …), unique on the tmux
 roster. Explicit `--name` and `MUXA_NAME` still win. `@muxa_id` is muxa's
 registration id, not the CLI session id — that lives in `@muxa_session`
