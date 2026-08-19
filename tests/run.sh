@@ -377,6 +377,70 @@ i1, i2, i3 = text.find("ORDER_FIRST"), text.find("ORDER_SECOND"), text.find("ORD
 sys.exit(0 if -1 not in (i1, i2, i3) and i1 < i2 < i3 else 1)
 PY
 
+# --- @muxa_hook_ok gate (Fix A) ---
+muxa_as "$alice_pane" register --name alice --kind claude --deliver hook --parent bob >/dev/null
+tmux -L "$SOCK" set-option -p -t "$alice_pane" -u @muxa_hook_ok 2>/dev/null || true
+muxa_as "$alice_pane" state idle
+: >"$alice_out"
+boot="$(muxa_as "$bob_pane" send alice 'BOOTSTRAP_BRIEF')"
+assert_contains "$boot" "delivered bob → alice" "idle hook pane injects before hook_ok"
+sleep 0.3
+got="$(cat "$alice_out" 2>/dev/null || true)"
+assert_contains "$got" "BOOTSTRAP_BRIEF" "bootstrap brief reached the pane"
+empty_stop="$(muxa_as "$alice_pane" hook stop --format claude)"
+[ -z "$empty_stop" ] && ok "first hook stop with empty mailbox is silent" \
+  || bad "first hook stop with empty mailbox is silent" "got: $empty_stop"
+hook_ok="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_hook_ok}')"
+[ "$hook_ok" = "1" ] && ok "@muxa_hook_ok set on first hook stop" \
+  || bad "@muxa_hook_ok set on first hook stop" "got: $hook_ok"
+muxa_as "$alice_pane" state idle
+: >"$alice_out"
+qidle="$(muxa_as "$bob_pane" send alice 'HOOK_QUEUE_BODY')"
+assert_contains "$qidle" "queued bob → alice id=" "idle hook pane queues after hook_ok"
+assert_contains "$qidle" "idle; next turn will drain" "idle hook queue reason"
+sleep 0.2
+got="$(cat "$alice_out" 2>/dev/null || true)"
+case "$got" in
+  *HOOK_QUEUE_BODY*) bad "idle hook pane is not pasted after hook_ok" "got: $got" ;;
+  *) ok "idle hook pane is not pasted after hook_ok" ;;
+esac
+unread="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_unread}')"
+[ "$unread" = "1" ] && ok "@muxa_unread=1 after queued idle send" \
+  || bad "@muxa_unread=1 after queued idle send" "got: $unread"
+who="$(muxa_as "$bob_pane" who)"
+assert_contains "$who" "UNREAD" "who header has UNREAD"
+# UNREAD column is 8 chars starting at 114 (after STATUS)
+who_unread="$(printf '%s\n' "$who" | awk '$1=="alice" { print substr($0, 114, 8); exit }')"
+who_unread="${who_unread#"${who_unread%%[![:space:]]*}"}"
+who_unread="${who_unread%"${who_unread##*[![:space:]]}"}"
+[ "$who_unread" = "1" ] && ok "who shows UNREAD=1" \
+  || bad "who shows UNREAD=1" "got='$who_unread' line=$(printf '%s\n' "$who" | awk '$1=="alice"')"
+drain_q="$(muxa_as "$alice_pane" hook stop --format claude)"
+assert_contains "$drain_q" "HOOK_QUEUE_BODY" "hook stop drains queued idle mail"
+unread2="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_unread}')"
+[ -z "$unread2" ] && ok "@muxa_unread cleared after hook drain" \
+  || bad "@muxa_unread cleared after hook drain" "got: $unread2"
+who2="$(muxa_as "$bob_pane" who)"
+who_unread2="$(printf '%s\n' "$who2" | awk '$1=="alice" { print substr($0, 114, 8); exit }')"
+who_unread2="${who_unread2#"${who_unread2%%[![:space:]]*}"}"
+who_unread2="${who_unread2%"${who_unread2##*[![:space:]]}"}"
+[ "$who_unread2" = "-" ] && ok "who shows UNREAD=- after drain" \
+  || bad "who shows UNREAD=- after drain" "got='$who_unread2'"
+
+# --- unread recompute under concurrency ---
+muxa_as "$alice_pane" state busy
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+muxa_as "$bob_pane" send alice 'conc-unread-a' >/dev/null &
+muxa_as "$bob_pane" send alice 'conc-unread-b' >/dev/null &
+wait
+sleep 0.2
+opt="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_unread}')"
+files="$(find "$(muxa_box alice)/new" -type f | awk 'END { print NR }')"
+[ "$opt" = "$files" ] && [ "$files" = "2" ] && ok "unread option equals new/ count under concurrency" \
+  || bad "unread option equals new/ count under concurrency" "opt=$opt files=$files"
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+tmux -L "$SOCK" set-option -p -t "$alice_pane" -u @muxa_unread 2>/dev/null || true
+
 # restore alice as bob's child for later ACL tests
 muxa_as "$alice_pane" register --name alice --kind generic --deliver inject --parent bob >/dev/null
 muxa_as "$alice_pane" state idle

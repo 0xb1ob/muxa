@@ -207,6 +207,8 @@ clear_muxa_registration() {
   unset_pane_opt "$pane" @muxa_state
   unset_pane_opt "$pane" @muxa_deliver
   unset_pane_opt "$pane" @muxa_session
+  unset_pane_opt "$pane" @muxa_hook_ok
+  unset_pane_opt "$pane" @muxa_unread
   set_pane_title "$pane" ""
 }
 
@@ -654,6 +656,30 @@ list_count() {
   printf '%s' "$n"
 }
 
+mailbox_unread_count() {
+  local box f n=0
+  box="$(ensure_box "$1")"
+  for f in "$box/new"/*; do
+    [ -f "$f" ] || continue
+    n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
+
+# Recompute from the maildir. Never increment: a counter cannot be updated
+# atomically through tmux options, and it drifts the moment anything else
+# touches new/.
+refresh_unread() {
+  local pane="$1" name="$2" n
+  [ -n "$pane" ] && [ -n "$name" ] || return 0
+  n="$(mailbox_unread_count "$name")"
+  if [ "$n" -gt 0 ]; then
+    set_pane_opt "$pane" @muxa_unread "$n"
+  else
+    unset_pane_opt "$pane" @muxa_unread
+  fi
+}
+
 payload_from_claimed() {
   local list="$1"
   local f from flags body n redel
@@ -735,10 +761,11 @@ deliver_list() {
       printf 'muxa: %s not ready to receive (%s); left queued\n' \
         "${name:-$pane}" "$verdict" >&2
       unclaim_list "$list"
+      refresh_unread "$pane" "$name"
       return 1
     }
   fi
-  text="$(payload_from_claimed "$list")" || { unclaim_list "$list"; return 1; }
+  text="$(payload_from_claimed "$list")" || { unclaim_list "$list"; refresh_unread "$pane" "$name"; return 1; }
   nbytes="$(printf '%s' "$text" | wc -c)"
   nbytes="${nbytes#"${nbytes%%[![:space:]]*}"}"
   nbytes="${nbytes%"${nbytes##*[![:space:]]}"}"
@@ -751,10 +778,12 @@ deliver_list() {
     else
       unclaim_list "$list"
     fi
+    refresh_unread "$pane" "$name"
     return 1
   fi
   if ! inject_text "$pane" "$text"; then
     unclaim_list "$list"
+    refresh_unread "$pane" "$name"
     return 1
   fi
   set_pane_opt "$pane" @muxa_state busy
@@ -764,6 +793,7 @@ deliver_list() {
   if [ "$(pane_fmt "$pane" '#{@muxa_deliver}')" != "hook" ]; then
     confirm_list "$list"
   fi
+  refresh_unread "$pane" "$name"
 }
 
 cmd_register() {
@@ -820,6 +850,10 @@ cmd_register() {
   fi
   ensure_box "$name" >/dev/null
   set_pane_title "$pane" "$name"
+  if [ "$deliver" != "hook" ]; then
+    unset_pane_opt "$pane" @muxa_hook_ok
+  fi
+  refresh_unread "$pane" "$name"
   if [ -n "$parent" ]; then
     printf 'registered %s id=%s parent=%s kind=%s deliver=%s pane=%s\n' \
       "$name" "$id" "$parent" "$kind" "$deliver" "$pane"
@@ -831,23 +865,27 @@ cmd_register() {
 
 cmd_who() {
   need_tmux
-  printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-8s %-16s %s\n' \
-    NAME ID SESSION PARENT KIND STATE STATUS DELIVER PANE WHERE CWD
-  local line kind cwd cmd status
+  printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-8s %-8s %-16s %s\n' \
+    NAME ID SESSION PARENT KIND STATE STATUS UNREAD DELIVER PANE WHERE CWD
+  local line kind cwd cmd status name unread
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     kind="$(printf '%s\n' "$line" | field 5)"
     cwd="$(printf '%s\n' "$line" | field 10)"
     cmd="$(printf '%s\n' "$line" | field 11)"
     status="$(pane_status "$kind" "$cwd" "$cmd")"
-    printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-8s %-16s %s\n' \
-      "$(printf '%s\n' "$line" | field 2)" \
+    name="$(printf '%s\n' "$line" | field 2)"
+    unread="$(mailbox_unread_count "$name")"
+    [ "$unread" -gt 0 ] 2>/dev/null || unread="-"
+    printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-8s %-8s %-16s %s\n' \
+      "$name" \
       "$(printf '%s\n' "$line" | field 3)" \
       "$(printf '%s\n' "$line" | field 9)" \
       "$(printf '%s\n' "$line" | field 4)" \
       "$kind" \
       "$(printf '%s\n' "$line" | field 6)" \
       "$status" \
+      "$unread" \
       "$(printf '%s\n' "$line" | field 7)" \
       "$(printf '%s\n' "$line" | field 1)" \
       "$(printf '%s\n' "$line" | field 8)" \
@@ -1047,6 +1085,7 @@ kick_wait() {
   rm -f "$list"
   # 60s expired with mail still queued: make it visible instead of silent.
   printf 'muxa: %s still not ready after 60s; mail left queued\n' "$name" >&2
+  refresh_unread "$pane" "$name"
 }
 
 send_one() {
@@ -1073,26 +1112,37 @@ send_one() {
         spawn_kick_wait "$pane" "$to"
         printf 'queued %s → %s id=%s (waiting for idle)\n' "$from" "$to" "$id"
       else
+        refresh_unread "$pane" "$to"
         printf 'queued %s → %s id=%s (hook will drain)\n' "$from" "$to" "$id"
       fi
       ;;
     *)
-      # Per-pane lock around claim→inject, held across ENTER_DELAY (E13/E22).
-      list="$(runtime_root)/send-$$-$RANDOM.list"
-      lock="$(kick_wait_lock "$pane")"
-      mkdir -p "$(runtime_root)"
-      if lock_acquire "$lock" 100; then
-        claim_new "$to" >"$list" || true
-        if [ -s "$list" ] && deliver_list "$pane" "$list"; then
-          printf 'delivered %s → %s id=%s\n' "$from" "$to" "$id"
+      # An idle hook pane is still a hook pane. Do not type at it —
+      # unless we have never seen its Stop hook fire, in which case queueing
+      # would deadlock the very first brief.
+      if [ "$deliver" = "hook" ] && [ "$(pane_fmt "$pane" '#{@muxa_hook_ok}')" = "1" ]; then
+        refresh_unread "$pane" "$to"
+        printf 'queued %s → %s id=%s (idle; next turn will drain)\n' "$from" "$to" "$id"
+      else
+        # Per-pane lock around claim→inject, held across ENTER_DELAY (E13/E22).
+        list="$(runtime_root)/send-$$-$RANDOM.list"
+        lock="$(kick_wait_lock "$pane")"
+        mkdir -p "$(runtime_root)"
+        if lock_acquire "$lock" 100; then
+          claim_new "$to" >"$list" || true
+          if [ -s "$list" ] && deliver_list "$pane" "$list"; then
+            printf 'delivered %s → %s id=%s\n' "$from" "$to" "$id"
+          else
+            refresh_unread "$pane" "$to"
+            printf 'queued %s → %s id=%s\n' "$from" "$to" "$id"
+          fi
+          lock_release "$lock"
         else
+          refresh_unread "$pane" "$to"
           printf 'queued %s → %s id=%s\n' "$from" "$to" "$id"
         fi
-        lock_release "$lock"
-      else
-        printf 'queued %s → %s id=%s\n' "$from" "$to" "$id"
+        rm -f "$list"
       fi
-      rm -f "$list"
       ;;
   esac
 }
@@ -1338,15 +1388,18 @@ cmd_hook() {
       lock="$(kick_wait_lock "$(this_pane)")"
       mkdir -p "$(runtime_root)"
       if lock_acquire "$lock" 100; then
+        set_pane_opt "$(this_pane)" @muxa_hook_ok 1
         sweep_consumed "$name"
         claim_new "$name" >"$list" || true
         lock_release "$lock"
       else
+        set_pane_opt "$(this_pane)" @muxa_hook_ok 1
         sweep_consumed "$name"
         claim_new "$name" >"$list" || true
       fi
       if [ ! -s "$list" ]; then
         rm -f "$list"
+        unset_pane_opt "$(this_pane)" @muxa_unread
         cmd_state idle
         return 0
       fi
@@ -1354,6 +1407,7 @@ cmd_hook() {
       payload="$(payload_from_claimed "$list")"
       confirm_list "$list"
       rm -f "$list"
+      unset_pane_opt "$(this_pane)" @muxa_unread
       printf '%s' "$payload" | json_out "$format"
       ;;
     *)

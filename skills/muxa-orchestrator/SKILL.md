@@ -103,6 +103,8 @@ Spawn every independent job immediately. Serialize only for a real dependency or
 
 The chosen delivery path owns the rigor. Do not invent extra review gates on top of it. Never merge red.
 
+A queued message reaches an idle hook pane on its next turn; use `muxa deliver` if you need it now, and check `muxa who` for UNREAD before concluding a worker is ignoring you.
+
 ## Backlog
 
 Record on disk at intake and on completion, so a restart is a reconcile, not a memory test.

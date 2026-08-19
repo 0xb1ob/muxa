@@ -244,11 +244,45 @@ inject_u="MUXA_INJECT_CURSOR_$TOKEN"
 inject_p="MUXA_INJECT_PI_$TOKEN"
 sent="$(muxa_as "$claude_pane" send --no-reply cursor "$inject_u" 2>&1 || true)"
 printf '%s\n' "$sent" | grep -Eq 'delivered|queued' && ok "parent → cursor send ($sent)" || bad "parent → cursor send" "$sent"
+# A-bootstrap: a freshly spawned hook child must still receive the first brief.
+if printf '%s\n' "$sent" | grep -q delivered; then
+  ok "A-bootstrap: first cursor brief injected"
+elif printf '%s\n' "$sent" | grep -q queued; then
+  ok "A-bootstrap: first cursor brief queued (Stop hook already proven)"
+fi
 sent="$(muxa_as "$claude_pane" send --no-reply pi "$inject_p" 2>&1 || true)"
 printf '%s\n' "$sent" | grep -Eq 'delivered|queued' && ok "parent → pi send ($sent)" || bad "parent → pi send" "$sent"
 
 wait_pane_has "$cursor_pane" "$inject_u" 20 && ok "cursor TUI shows parent inject" || bad "cursor TUI shows parent inject" "$(pane_text "$cursor_pane" | tail -n 40)"
 wait_pane_has "$pi_pane" "$inject_p" 20 && ok "pi TUI shows parent inject" || bad "pi TUI shows parent inject" "$(pane_text "$pi_pane" | tail -n 40)"
+
+# A-path: once Stop has proven the drain, idle hook panes must not be pasted.
+wait_state cursor idle 30 || true
+cursor_hook_ok="$(tmux_e display-message -t "$cursor_pane" -p '#{@muxa_hook_ok}' 2>/dev/null || true)"
+a_path="MUXA_A_PATH_$TOKEN"
+if [ "$cursor_hook_ok" = "1" ]; then
+  sent="$(muxa_as "$claude_pane" send --no-reply cursor "$a_path" 2>&1 || true)"
+  if printf '%s\n' "$sent" | grep -q 'next turn will drain'; then
+    ok "A-path: idle hook cursor queues"
+  else
+    bad "A-path: idle hook cursor queues" "$sent"
+  fi
+  unread="$(tmux_e display-message -t "$cursor_pane" -p '#{@muxa_unread}' 2>/dev/null || true)"
+  [ "$unread" = "1" ] && ok "A-path: @muxa_unread becomes 1" \
+    || bad "A-path: @muxa_unread becomes 1" "unread=$unread"
+  sleep 1
+  if pane_text "$cursor_pane" | grep -Fq "$a_path"; then
+    bad "A-path: body is not pasted immediately" "$(pane_text "$cursor_pane" | tail -n 20)"
+  else
+    ok "A-path: body is not pasted immediately"
+  fi
+  # Escape hatch so later hop tests are not blocked by leftover queued mail.
+  muxa_as "$claude_pane" deliver cursor >/dev/null 2>&1 || true
+else
+  ok "A-path skipped (cursor @muxa_hook_ok not yet 1)"
+  ok "A-path unread skipped"
+  ok "A-path no-paste skipped"
+fi
 
 # --- LLM: type into the parent pane (roots cannot muxa-send to each other) ---
 wait_state claude idle 60 || true
@@ -261,15 +295,26 @@ sleep "${MUXA_ENTER_DELAY}"
 tmux_e send-keys -t "$claude_pane" Enter
 printf 'hop typed into claude pane\n'
 
-if wait_pane_has "$cursor_pane" "$hop" "$HOP_S"; then
+if wait_pane_has "$cursor_pane" "$hop" 20; then
   ok "cursor child received parent hop"
 else
-  bad "cursor child received parent hop" "claude:"$'\n'"$(pane_text "$claude_pane" | tail -n 40)"$'\n'"cursor:"$'\n'"$(pane_text "$cursor_pane" | tail -n 40)"
+  # Fix A: an idle hook child queues until Stop; deliver is the escape hatch.
+  muxa_as "$claude_pane" deliver cursor >/dev/null 2>&1 || true
+  if wait_pane_has "$cursor_pane" "$hop" "$HOP_S"; then
+    ok "cursor child received parent hop"
+  else
+    bad "cursor child received parent hop" "claude:"$'\n'"$(pane_text "$claude_pane" | tail -n 40)"$'\n'"cursor:"$'\n'"$(pane_text "$cursor_pane" | tail -n 40)"
+  fi
 fi
-if wait_pane_has "$pi_pane" "$hop" 30; then
+if wait_pane_has "$pi_pane" "$hop" 15; then
   ok "pi child received parent hop"
 else
-  bad "pi child received parent hop" "$(pane_text "$pi_pane" | tail -n 40)"
+  muxa_as "$claude_pane" deliver pi >/dev/null 2>&1 || true
+  if wait_pane_has "$pi_pane" "$hop" 30; then
+    ok "pi child received parent hop"
+  else
+    bad "pi child received parent hop" "$(pane_text "$pi_pane" | tail -n 40)"
+  fi
 fi
 
 dump
