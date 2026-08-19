@@ -144,7 +144,7 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 | Command | What |
 | --- | --- |
 | `muxa register [--name --id --parent --kind --deliver]` | Set pane identity (hooks do this) |
-| `muxa spawn [--name NAME] [--cwd DIR] [--split] [--window] -- CMD` | Split a child pane into a tiled grid in the parent's window. Child cwd is `--cwd`, else process `$PWD`, else the parent pane path. Omit `--name` for a unique `adjective-noun` alias. `--window` for a dedicated window; `--split` is compat |
+| `muxa spawn [--name NAME] [--cwd DIR] [--split] [--window] -- CMD` | Split a child pane into a tiled grid in the parent's window. Child cwd is `--cwd`, else process `$PWD`, else the parent pane path. Warns on stderr if a live worker already has that cwd (does not refuse). Omit `--name` for a unique `adjective-noun` alias. `--window` for a dedicated window; `--split` is compat |
 | `muxa who` | Roster (name, id, session, parent, cwd, STATUS, UNREAD, …) |
 | `muxa unregister NAME\|ID` | Clear muxa registration; leave pane running |
 | `muxa session` | This pane's CLI session/conversation id |

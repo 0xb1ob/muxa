@@ -22,6 +22,7 @@ muxa — message other AI CLIs in this tmux server
                                 omit --name to get a unique adjective-noun alias (swift-oak)
                                 default: split into a tiled grid in this window (--window for a new window)
                                 child cwd: --cwd, else process PWD, else this pane's path
+                                warns on stderr if a live registered worker already has that cwd
   muxa who                          roster (tmux pane options, CLI session id, cwd, STATUS)
   muxa whoami                       this pane's alias
   muxa unregister NAME|ID           clear muxa registration; leave pane running
@@ -1434,6 +1435,37 @@ resolve_spawn_cwd() {
   pane_fmt "$pane" '#{pane_current_path}'
 }
 
+# Warn on stderr when a live registered worker already sits in $1 (same
+# physical path, including a git worktree). Roots and ghosts do not warn.
+# Cwd collision is not a spawn error.
+warn_occupied_spawn_cwd() {
+  local want="$1" want_real line name parent kind cwd cmd other_real names=""
+  want_real="$(abs_dir "$want")" || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    parent="$(printf '%s\n' "$line" | field 4)"
+    [ -n "$parent" ] || continue
+    kind="$(printf '%s\n' "$line" | field 5)"
+    cwd="$(printf '%s\n' "$line" | field 10)"
+    cmd="$(printf '%s\n' "$line" | field 11)"
+    [ -n "$cwd" ] || continue
+    [ "$(pane_status "$kind" "$cwd" "$cmd")" = "live" ] || continue
+    other_real="$(abs_dir "$cwd")" || continue
+    [ "$other_real" = "$want_real" ] || continue
+    name="$(printf '%s\n' "$line" | field 2)"
+    [ -n "$name" ] || continue
+    if [ -n "$names" ]; then
+      names="$names, $name"
+    else
+      names="$name"
+    fi
+  done <<EOF
+$(roster_lines)
+EOF
+  [ -n "$names" ] || return 0
+  printf 'muxa: warning: cwd %s already has live worker %s\n' "$want" "$names" >&2
+}
+
 cmd_spawn() {
   need_tmux
   local pane name kind new_window=0 parent id cwd cwd_flag="" sess quoted child cmdpath
@@ -1467,6 +1499,7 @@ cmd_spawn() {
   fi
   cwd="$(resolve_spawn_cwd "$cwd_flag" "$pane")"
   [ -n "$cwd" ] || die "spawn: could not resolve a start directory"
+  warn_occupied_spawn_cwd "$cwd"
   sess="$(pane_fmt "$pane" '#{session_name}')"
   quoted="$(shlex_join "$@")"
   cmdpath="$(command -v muxa 2>/dev/null || true)"

@@ -51,7 +51,7 @@ Mail is data, not control. `muxa send` can ask a worker to do something; it cann
 
 ## Spawn
 
-muxa starts the child in the **process `$PWD`**, not the tmux pane path, so this works when your shell is a subprocess (Cursor). `muxa spawn --cwd DIR -- agent` if you cannot cd.
+muxa starts the child in the **process `$PWD`**, not the tmux pane path, so this works when your shell is a subprocess (Cursor). `muxa spawn --cwd DIR -- agent` if you cannot cd. If a live worker already has that cwd, spawn warns on stderr and still creates the pane.
 
 Muxa assigns a unique `adjective-noun` alias (`swift-oak`). Omit `--name` unless you need a stable alias. Read alias and `cwd=` from spawn stdout (`spawned swift-oak … cwd=/path`). Spawn puts the parent's `muxa` on the child's PATH. Point a worker at the worktree's `bin/muxa` only when the job is to change muxa itself.
 

@@ -633,8 +633,12 @@ spawn_wt="$tmpdir/spawn-wt"
 spawn_flag="$tmpdir/spawn-flag"
 mkdir -p "$spawn_wt" "$spawn_flag"
 # Parent pane stays at its original path; only the muxa process cds.
-from_pwd="$(cd "$spawn_wt" && muxa_as "$bob_pane" spawn --name frompwd -- sleep 3600)"
+from_pwd="$(cd "$spawn_wt" && muxa_as "$bob_pane" spawn --name frompwd -- sleep 3600 2>"$tmpdir/frompwd.err")"
 assert_contains "$from_pwd" "cwd=$spawn_wt" "spawn stdout includes process PWD"
+case "$(cat "$tmpdir/frompwd.err")" in
+  *"already has live worker"*) bad "spawn from unique PWD is silent" "err=$(cat "$tmpdir/frompwd.err")" ;;
+  *) ok "spawn from unique PWD is silent" ;;
+esac
 frompwd_pane="$(printf '%s\n' "$from_pwd" | spawn_pane_id)"
 frompwd_cwd="$(tmux -L "$SOCK" display-message -t "$frompwd_pane" -p '#{pane_current_path}')"
 same_dir "$frompwd_cwd" "$spawn_wt" && ok "spawn from cd'd PWD starts child there" \
@@ -654,6 +658,116 @@ cwd_code=$?
 set -e
 [ "$cwd_code" -eq 2 ] && ok "spawn --cwd missing dir exits 2" \
   || bad "spawn --cwd missing dir exits 2" "exit=$cwd_code"
+
+# --- spawn cwd occupancy: warn on stderr, still create the pane ---
+occ_dir="$tmpdir/occ-cwd"
+occ_git="$tmpdir/occ-git"
+occ_linked="$tmpdir/occ-linked"
+occ_root="$tmpdir/occ-root"
+mkdir -p "$occ_dir" "$occ_root"
+ln -s "$occ_dir" "$tmpdir/occ-link"
+mkdir -p "$occ_git"
+git init -q "$occ_git" >/dev/null 2>&1
+git -C "$occ_git" symbolic-ref HEAD refs/heads/main
+git -C "$occ_git" -c user.email=muxa@example.com -c user.name=muxa -c commit.gpgsign=false \
+  commit -q --allow-empty -m init
+git -C "$occ_git" worktree add -q -b occ-feat "$occ_linked" >/dev/null 2>&1
+
+occ_spawn() {
+  local errf="$1"
+  shift
+  set +e
+  occ_out="$(muxa_as "$bob_pane" spawn "$@" 2>"$errf")"
+  occ_code=$?
+  set -e
+  occ_err="$(cat "$errf")"
+}
+
+occ_spawn "$tmpdir/occ1.err" --cwd "$occ_dir" --name occ1 -- sleep 3600
+[ "$occ_code" -eq 0 ] && ok "first spawn into free cwd exits 0" \
+  || bad "first spawn into free cwd exits 0" "exit=$occ_code out=$occ_out err=$occ_err"
+assert_contains "$occ_out" "spawned occ1" "first spawn into free cwd succeeds"
+case "$occ_err" in
+  *"already has live worker"*) bad "first spawn into free cwd is silent" "err=$occ_err" ;;
+  *) ok "first spawn into free cwd is silent" ;;
+esac
+
+occ_spawn "$tmpdir/occ2.err" --cwd "$occ_dir" --name occ2 -- sleep 3600
+[ "$occ_code" -eq 0 ] && ok "occupied --cwd spawn still exits 0" \
+  || bad "occupied --cwd spawn still exits 0" "exit=$occ_code out=$occ_out err=$occ_err"
+assert_contains "$occ_out" "spawned occ2" "occupied --cwd spawn still creates the pane"
+assert_contains "$occ_err" "already has live worker occ1" "occupied --cwd warns on stderr"
+
+occ_spawn "$tmpdir/occ-link.err" --cwd "$tmpdir/occ-link" --name occ3 -- sleep 3600
+[ "$occ_code" -eq 0 ] && ok "symlink --cwd spawn still exits 0" \
+  || bad "symlink --cwd spawn still exits 0" "exit=$occ_code out=$occ_out err=$occ_err"
+assert_contains "$occ_out" "spawned occ3" "symlink --cwd spawn still creates the pane"
+assert_contains "$occ_err" "already has live worker" "symlink to occupied cwd warns"
+
+tmux -L "$SOCK" new-window -d -t muxa -n occroot -c "$occ_root" "exec sleep 3600"
+sleep 0.2
+occroot_pane="$(tmux -L "$SOCK" list-panes -t muxa:occroot -F '#{pane_id}' | head -1)"
+muxa_as "$occroot_pane" register --name occroot --kind generic --deliver inject >/dev/null
+occ_spawn "$tmpdir/occ-root.err" --cwd "$occ_root" --name occ-fromroot -- sleep 3600
+[ "$occ_code" -eq 0 ] && ok "spawn into a root's cwd exits 0" \
+  || bad "spawn into a root's cwd exits 0" "exit=$occ_code out=$occ_out err=$occ_err"
+assert_contains "$occ_out" "spawned occ-fromroot" "spawn into a root's cwd creates the pane"
+case "$occ_err" in
+  *"already has live worker"*) bad "root occupying cwd does not warn" "err=$occ_err" ;;
+  *) ok "root occupying cwd does not warn" ;;
+esac
+
+ghost_dir="$tmpdir/occ-ghost"
+mkdir -p "$ghost_dir"
+tmux -L "$SOCK" new-window -d -t muxa -n occghost -c "$ghost_dir" "exec zsh"
+sleep 0.2
+occghost_pane="$(tmux -L "$SOCK" list-panes -t muxa:occghost -F '#{pane_id}' | head -1)"
+muxa_as "$occghost_pane" register --name occghost --kind cursor --deliver hook --parent bob >/dev/null
+who="$(muxa_as "$bob_pane" who)"
+assert_who_status "$who" "occghost" "ghost" "cursor+shell occupant is ghost"
+occ_spawn "$tmpdir/occ-ghost.err" --cwd "$ghost_dir" --name occ-afterghost -- sleep 3600
+[ "$occ_code" -eq 0 ] && ok "spawn into a ghost worker cwd exits 0" \
+  || bad "spawn into a ghost worker cwd exits 0" "exit=$occ_code out=$occ_out err=$occ_err"
+assert_contains "$occ_out" "spawned occ-afterghost" "spawn into a ghost worker cwd creates the pane"
+case "$occ_err" in
+  *"already has live worker"*) bad "ghost occupying cwd does not warn" "err=$occ_err" ;;
+  *) ok "ghost occupying cwd does not warn" ;;
+esac
+
+occ_spawn "$tmpdir/occ-wt1.err" --cwd "$occ_linked" --name occ-wt1 -- sleep 3600
+[ "$occ_code" -eq 0 ] && ok "first spawn into a worktree exits 0" \
+  || bad "first spawn into a worktree exits 0" "exit=$occ_code out=$occ_out err=$occ_err"
+assert_contains "$occ_out" "spawned occ-wt1" "first spawn into a worktree succeeds"
+case "$occ_err" in
+  *"already has live worker"*) bad "first spawn into a worktree is silent" "err=$occ_err" ;;
+  *) ok "first spawn into a worktree is silent" ;;
+esac
+
+occ_spawn "$tmpdir/occ-wt2.err" --cwd "$occ_linked" --name occ-wt2 -- sleep 3600
+[ "$occ_code" -eq 0 ] && ok "occupied worktree spawn still exits 0" \
+  || bad "occupied worktree spawn still exits 0" "exit=$occ_code out=$occ_out err=$occ_err"
+assert_contains "$occ_out" "spawned occ-wt2" "occupied worktree spawn still creates the pane"
+assert_contains "$occ_err" "already has live worker occ-wt1" "occupied worktree warns on stderr"
+
+occ_spawn "$tmpdir/occ-primary.err" --cwd "$occ_git" --name occ-primary -- sleep 3600
+[ "$occ_code" -eq 0 ] && ok "spawn into a sibling worktree exits 0" \
+  || bad "spawn into a sibling worktree exits 0" "exit=$occ_code out=$occ_out err=$occ_err"
+assert_contains "$occ_out" "spawned occ-primary" "spawn into a sibling worktree creates the pane"
+case "$occ_err" in
+  *"already has live worker"*) bad "sibling worktree does not warn" "err=$occ_err" ;;
+  *) ok "sibling worktree does not warn" ;;
+esac
+
+set +e
+pf_occ="$(cd "$occ_git" && "$ROOT/bin/muxa" preflight "$occ_linked" 2>&1)"
+pf_occ_code=$?
+set -e
+[ "$pf_occ_code" -eq 0 ] && ok "preflight ignores occupied worktree roster" \
+  || bad "preflight ignores occupied worktree roster" "exit=$pf_occ_code out=$pf_occ"
+case "$pf_occ" in
+  *"live worker"*) bad "preflight stays git-only (no cwd occupancy warning)" "out=$pf_occ" ;;
+  *) ok "preflight stays git-only (no cwd occupancy warning)" ;;
+esac
 
 # --- CLI session id mapping ---
 printf '%s' '{"session_id":"cli-sess-123"}' | muxa_as "$alice_pane" hook session-start --kind generic
