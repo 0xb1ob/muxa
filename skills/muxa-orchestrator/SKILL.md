@@ -124,8 +124,18 @@ Report to the caller in outcomes and decisions, with full PR URLs. Never paste w
 
 Stop after two ping-pongs unless a decision is still open — and a decision stays open until the answer itself closes it. Comms etiquette (silence, no ack) is SPEC.md.
 
+## Hard rules
+
+1. **Research is worker-scoped.** Reading implementation code, exploring APIs, investigating solutions, fetching external docs, or browsing repositories is never done in this pane. Classify the job, spawn a worker, wait for the result.
+2. **The parent's job is exactly:** intake, classify, spawn, brief, wait, relay outcomes, teardown. Nothing else.
+3. **"It's small enough to do here" is the trap.** Spawn anyway. The cost of a worker is negligible; the cost of polluting orchestrator context is not.
+4. **The parent may read only:** muxa state files, worker mail, `git status`/`git log` for preflight. Never source code, docs, APIs, or investigation targets.
+5. **Exception:** confirming a worker's reported result (e.g. checking a PR URL exists) is allowed. Doing the work that produces the result is not.
+
 ## Do not
 
 - Do the worker's job in this pane
+- Do research or investigation in this pane — that is worker-scoped regardless of job size
+- Read source code, fetch URLs, or explore APIs from this pane
 - Add MCP tools for muxa
 - Poll a worker, or restart one without being asked
