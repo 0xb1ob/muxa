@@ -1478,6 +1478,25 @@ cmd_spawn() {
   if [ -n "${MUXA_BIN:-}" ]; then
     envcmd="$envcmd MUXA_BIN=$(shlex_join "$MUXA_BIN")"
   fi
+  # Ensure spawned agents never stall on workspace trust prompts.
+  # - cursor: --trust bypasses the workspace trust dialog.
+  # - claude: -p (non-interactive/print) skips trust; also, hook delivery
+  #   means stdin is not a TTY, but -p makes it explicit for safety.
+  # - pi/omp: has no trust gate; no modification needed.
+  case "$kind" in
+    cursor)
+      case " $quoted " in
+        *" --trust "*) ;;
+        *) quoted="$(printf '%s --trust' "$quoted")" ;;
+      esac
+      ;;
+    claude)
+      case " $quoted " in
+        *" -p "*|*" --print "*) ;;
+        *) quoted="$(printf '%s -p' "$quoted")" ;;
+      esac
+      ;;
+  esac
   envcmd="$envcmd; exec $quoted"
   if [ "$new_window" -eq 1 ]; then
     child="$(tmux_do new-window -t "$sess" -n "$name" -c "$cwd" -P -F '#{pane_id}' "$envcmd")"
