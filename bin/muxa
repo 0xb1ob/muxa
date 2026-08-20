@@ -430,7 +430,15 @@ pane_command_line() {
   local pane="$1" pid line
   pid="$(pane_fmt "$pane" '#{pane_pid}')"
   [ -n "$pid" ] || return 1
-  line="$(ps -p "$pid" -o command= 2>/dev/null | head -1)" || return 1
+  if [ -r "/proc/$pid/cmdline" ]; then
+    line="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/[[:space:]]*$//')"
+    if [ -n "$line" ]; then
+      printf '%s' "$line"
+      return 0
+    fi
+  fi
+  line="$(ps -p "$pid" -o args= 2>/dev/null | head -1)" || \
+    line="$(ps -p "$pid" -o command= 2>/dev/null | head -1)" || return 1
   line="${line#"${line%%[![:space:]]*}"}"
   [ -n "$line" ] && printf '%s' "$line"
 }

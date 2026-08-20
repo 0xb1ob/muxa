@@ -1010,7 +1010,8 @@ kind_fakebin="$tmpdir/kind-fakebin"
 mkdir -p "$kind_fakebin/cursor-agent"
 cat > "$kind_fakebin/cursor-agent/node" <<'EOF'
 #!/bin/sh
-exec sleep 3600
+# Keep this shell (and its script path) in argv; exec sleep drops cursor-agent on Linux.
+while sleep 3600; do :; done
 EOF
 chmod +x "$kind_fakebin/cursor-agent/node"
 
@@ -1118,7 +1119,7 @@ kindomp_kind="$(tmux -L "$SOCK" display-message -t "$kindomp_pane" -p '#{@muxa_k
 mkdir -p "$kind_fakebin/claude-projects/cursor-agent"
 cat > "$kind_fakebin/claude-projects/cursor-agent/node" <<'EOF'
 #!/bin/sh
-exec sleep 3600
+while sleep 3600; do :; done
 EOF
 chmod +x "$kind_fakebin/claude-projects/cursor-agent/node"
 
