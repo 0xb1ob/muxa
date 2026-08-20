@@ -88,6 +88,24 @@ muxa_as() {
   TMUX_PANE="$pane" muxa "$@"
 }
 
+# Write a composer fixture to the pane tty so capture-pane -e sees it.
+# Does not go through the pane process (cat), so alice.out stays clean.
+paint_composer() {
+  local pane="$1" fixture="$2"
+  local tty
+  tty="$(tmux -L "$SOCK" display-message -t "$pane" -p '#{pane_tty}')"
+  printf '\033[H\033[2J' > "$tty"
+  cat "$ROOT/tests/fixtures/composer/$fixture" > "$tty"
+  sleep 0.05
+}
+
+muxa_runtime() {
+  local pid base
+  pid="$(tmux -L "$SOCK" list-sessions -F '#{pid}' | head -1)"
+  base="${XDG_RUNTIME_DIR:-/tmp/muxa-${UID:-$(id -u)}}"
+  printf '%s/muxa/%s' "$base" "$pid"
+}
+
 # --- register + who ---
 reg_b="$(muxa_as "$bob_pane" register --name bob --kind generic --deliver inject)"
 assert_contains "$reg_b" "registered bob" "register bob"
@@ -408,6 +426,8 @@ muxa_as "$alice_pane" register --name alice --kind claude --deliver hook --paren
 tmux -L "$SOCK" set-option -p -t "$alice_pane" -u @muxa_hook_ok 2>/dev/null || true
 muxa_as "$alice_pane" state idle
 : >"$alice_out"
+# hook_ok unset: skip composer so splash/typed input cannot deadlock spawn.
+paint_composer "$alice_pane" cursor-typed.ansi
 boot="$(muxa_as "$bob_pane" send alice 'BOOTSTRAP_BRIEF')"
 assert_contains "$boot" "delivered bob → alice" "idle hook pane injects before hook_ok"
 sleep 0.3
@@ -435,6 +455,7 @@ PY
 muxa_as "$alice_pane" hook stop --format claude >/dev/null
 muxa_as "$alice_pane" state idle
 : >"$alice_out"
+paint_composer "$alice_pane" claude-idle.ansi
 idle_inj="$(muxa_as "$bob_pane" send alice 'HOOK_IDLE_INJECT')"
 assert_contains "$idle_inj" "delivered bob → alice" "idle hook pane injects after hook_ok"
 sleep 0.3
@@ -464,6 +485,62 @@ muxa_as "$alice_pane" hook stop --format claude >/dev/null
 unread3="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_unread}')"
 [ -z "$unread3" ] && ok "@muxa_unread cleared after sweep" \
   || bad "@muxa_unread cleared after sweep" "got: $unread3"
+
+# --- hook_ok + idle + non-empty composer: no paste, queue + kick_wait ---
+muxa_as "$alice_pane" state idle
+: >"$alice_out"
+paint_composer "$alice_pane" cursor-typed.ansi
+typed_sent="$(muxa_as "$bob_pane" send alice 'HOOK_TYPED_COMPOSER' 2>&1)"
+assert_contains "$typed_sent" "queued bob → alice" "typed composer hook send queues"
+assert_contains "$typed_sent" "waiting for idle" "typed composer hook send spawns kick_wait"
+assert_contains "$typed_sent" "not ready to receive" "typed composer hook send names the verdict"
+sleep 0.2
+got="$(cat "$alice_out" 2>/dev/null || true)"
+case "$got" in
+  *HOOK_TYPED_COMPOSER*) bad "typed composer hook send does not paste" "got: $got" ;;
+  *) ok "typed composer hook send does not paste" ;;
+esac
+peek_typed="$(muxa_as "$bob_pane" peek alice)"
+assert_contains "$peek_typed" "HOOK_TYPED_COMPOSER" "peek still shows typed-composer mail"
+case "$peek_typed" in
+  *claimed\ but\ unconfirmed*) bad "typed composer hook send unclaims (not stuck in cur/)" "$peek_typed" ;;
+  *) ok "typed composer hook send unclaims (not stuck in cur/)" ;;
+esac
+typed_new="$(find "$(muxa_box alice)/new" -type f 2>/dev/null | awk 'END { print NR }')"
+typed_cur="$(find "$(muxa_box alice)/cur" -type f 2>/dev/null | awk 'END { print NR }')"
+[ "$typed_new" -ge 1 ] && [ "$typed_cur" -eq 0 ] && ok "typed composer hook send left mail in new/" \
+  || bad "typed composer hook send left mail in new/" "new=$typed_new cur=$typed_cur"
+typed_pidfile="$(muxa_runtime)/kick-wait-${alice_pane}.pid"
+if [ -f "$typed_pidfile" ] && kill -0 "$(cat "$typed_pidfile" 2>/dev/null)" 2>/dev/null; then
+  ok "typed composer hook send left a live kick_wait"
+else
+  bad "typed composer hook send left a live kick_wait" "pidfile=$typed_pidfile"
+fi
+# Composer empty: waiter should paste. Copy-mode inject failure unclaim is
+# covered separately below.
+: >"$alice_out"
+paint_composer "$alice_pane" claude-idle.ansi
+sleep 1.5
+got="$(cat "$alice_out" 2>/dev/null || true)"
+assert_contains "$got" "HOOK_TYPED_COMPOSER" "kick_wait pastes once composer is empty"
+if [ -f "$typed_pidfile" ] && kill -0 "$(cat "$typed_pidfile" 2>/dev/null)" 2>/dev/null; then
+  kill "$(cat "$typed_pidfile")" 2>/dev/null || true
+  rm -f "$typed_pidfile"
+fi
+python3 - "$(muxa_box alice)/cur" <<'PY'
+import os, sys, time
+d = sys.argv[1]
+if not os.path.isdir(d):
+    raise SystemExit(0)
+now = time.time()
+for name in os.listdir(d):
+    p = os.path.join(d, name)
+    if os.path.isfile(p):
+        os.utime(p, (now - 5, now - 5))
+PY
+muxa_as "$alice_pane" hook stop --format claude >/dev/null
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
 
 # --- busy hook pane queues for Stop ---
 muxa_as "$alice_pane" state busy

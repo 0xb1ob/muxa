@@ -173,7 +173,10 @@ send(name, body):
           mark unread; return queued        # Stop-hook drain
       spawn waiter (inject panes only); return queued
   if not pane_ready(pane):              # dead | copy-mode | generic alt-screen | composer
-      mark unread; return queued
+      mark unread
+      if hook + hook_ok and composer is pending|unknown:
+          spawn kick_wait                   # deliver when composer is empty
+      return queued
   claim + inject; verify; on failure unclaim
 ```
 
@@ -182,8 +185,11 @@ captures ~250 ms apart that both verdict `empty`. Known strings
 (`ctrl+c to stop`, `esc to interrupt`, braille spinners) may only raise
 caution (`pending`); an unrecognised layout is `unknown`. `kind=generic`
 skips composer parsing and relies on the cheap tmux facts so plain-shell
-injection keeps working. Hook panes skip composer so splash/unknown
-cannot deadlock idle inject (the first brief and later idle sends).
+injection keeps working. Hook panes skip composer until `@muxa_hook_ok`
+so splash/unknown cannot deadlock the first brief. After `@muxa_hook_ok`,
+idle hook inject uses the same composer-empty gate as inject-kind panes.
+If the composer is pending or unknown, send does not paste: mail stays in
+`new/` and `kick_wait` delivers when two captures agree `empty`.
 Busy/blocked hook panes never reach `pane_ready` — they queue for Stop.
 
 `muxa deliver NAME` runs the same prechecks and exits 1 if the pane is
@@ -192,10 +198,12 @@ prints a warning.
 
 Idle hook panes are injected with the same paste-buffer + Enter path as
 the first brief to a freshly spawned pane (`cmd_spawn` marks
-`deliver=hook` and `state=idle` before the CLI boots). After
-`@muxa_hook_ok` is set, idle sends still inject — queueing until the
-next Stop would leave mail unread while a standalone Cursor CLI parent
-sits idle. Busy and blocked hook panes stay on the Stop-hook drain.
+`deliver=hook` and `state=idle` before the CLI boots). That first brief
+skips composer parsing. After `@muxa_hook_ok`, idle inject must see an
+empty composer (two agreeing captures); pasting over a human typing at
+an idle CLI prompt is forbidden. Queueing every idle send until the next
+Stop would leave mail unread while a standalone Cursor CLI parent sits
+idle. Busy and blocked hook panes stay on the Stop-hook drain.
 Inject prechecks (dead pane, copy-mode, generic alt-screen, size limit,
 ENTER_DELAY lock) still apply; on inject failure the claim is reversed
 and mail remains in `new/`.

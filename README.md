@@ -47,17 +47,23 @@ muxa uses surfaces the CLIs already pay for:
 ```
 busy / permission prompt  →  write maildir, do not touch the TUI
                              Claude/Cursor/Pi Stop hook claims mail and continues
-idle hook pane            →  paste-buffer + Enter (same as the first brief),
-                             except never into copy-mode or a dead pane
+idle hook pane            →  first brief (hook_ok unset): paste-buffer + Enter,
+                             skipping composer so splash cannot deadlock spawn
+                             after hook_ok: same paste, but only if the composer
+                             is empty (two captures); otherwise queue + kick_wait
+                             never into copy-mode, a dead pane, or a busy TUI
 idle inject pane          →  paste-buffer, except never into copy-mode, a dead
                              pane, or a generic pane on the alternate screen
 ```
 
 The first brief to a freshly spawned hook pane is injected: spawn marks
 `hook+idle` before the CLI boots, and no Stop hook exists until a turn
-has run. After the first successful `muxa hook stop`, idle hook sends
-still inject — the parent may already have Stopped, so queueing until
-the next turn would sit unread until a human types. Busy/blocked hook
+has run — composer is skipped so splash cannot deadlock that send. After
+the first successful `muxa hook stop`, idle hook sends still inject, but
+only into an empty composer (the same two-capture gate as inject-kind
+panes). A prompt with typed text queues; `kick_wait` pastes when it
+clears. The parent may already have Stopped, so queueing every idle send
+until the next turn would sit unread until a human types. Busy/blocked hook
 panes still queue; Stop drains that queue when the turn ends —
 including for an IDE-hosted Cursor root whose pane is only a tmux
 registration, not the agent process. Claimed mail stays visible in
@@ -86,7 +92,8 @@ set -g pane-border-format \
 
 `muxa who` has an `UNREAD` column counted from the maildir. There is no
 bell: ringing another pane's tty would be typing at it. Idle inject is
-paste-buffer + Enter; queueing is for a busy TUI and for failed injects.
+paste-buffer + Enter; queueing is for a busy TUI, a non-empty composer
+after hook_ok, and for failed injects.
 
 ## Install
 
