@@ -1069,6 +1069,72 @@ who_kind="$(muxa_as "$bob_pane" who)"
   || bad "who KIND matches cursor foreground after stray hook" \
      "got=$(who_kind_for "$who_kind" "kind-agent")"
 
+mkdir -p "$kind_fakebin/has-component" "$kind_fakebin/docker-compose"
+cat > "$kind_fakebin/has-component/run" <<'EOF'
+#!/bin/sh
+exec sleep 3600
+EOF
+cat > "$kind_fakebin/docker-compose/run" <<'EOF'
+#!/bin/sh
+exec sleep 3600
+EOF
+chmod +x "$kind_fakebin/has-component/run" "$kind_fakebin/docker-compose/run"
+
+tmux -L "$SOCK" new-window -t muxa -n kindcomp \
+  "$kind_fakebin/has-component/run"
+sleep 0.2
+kindcomp_pane="$(tmux -L "$SOCK" list-panes -t muxa:kindcomp -F '#{pane_id}' | head -1)"
+printf '%s' '{"session_id":"comp-1"}' \
+  | muxa_as "$kindcomp_pane" hook session-start --kind generic >/dev/null
+kindcomp_kind="$(tmux -L "$SOCK" display-message -t "$kindcomp_pane" -p '#{@muxa_kind}')"
+[ "$kindcomp_kind" = "generic" ] && ok "component path does not classify as pi" \
+  || bad "component path does not classify as pi" "got=$kindcomp_kind"
+
+tmux -L "$SOCK" new-window -t muxa -n kindcompose \
+  "$kind_fakebin/docker-compose/run"
+sleep 0.2
+kindcompose_pane="$(tmux -L "$SOCK" list-panes -t muxa:kindcompose -F '#{pane_id}' | head -1)"
+printf '%s' '{"session_id":"compose-1"}' \
+  | muxa_as "$kindcompose_pane" hook session-start --kind generic >/dev/null
+kindcompose_kind="$(tmux -L "$SOCK" display-message -t "$kindcompose_pane" -p '#{@muxa_kind}')"
+[ "$kindcompose_kind" = "generic" ] && ok "compose path does not classify as pi" \
+  || bad "compose path does not classify as pi" "got=$kindcompose_kind"
+
+cat > "$kind_fakebin/omp" <<'EOF'
+#!/bin/sh
+exec sleep 3600
+EOF
+chmod +x "$kind_fakebin/omp"
+tmux -L "$SOCK" new-window -t muxa -n kindomp \
+  "$kind_fakebin/omp"
+sleep 0.2
+kindomp_pane="$(tmux -L "$SOCK" list-panes -t muxa:kindomp -F '#{pane_id}' | head -1)"
+printf '%s' '{"session_id":"omp-1"}' \
+  | muxa_as "$kindomp_pane" hook session-start --kind pi >/dev/null
+kindomp_kind="$(tmux -L "$SOCK" display-message -t "$kindomp_pane" -p '#{@muxa_kind}')"
+[ "$kindomp_kind" = "pi" ] && ok "omp executable still classifies as pi" \
+  || bad "omp executable still classifies as pi" "got=$kindomp_kind"
+
+mkdir -p "$kind_fakebin/claude-projects/cursor-agent"
+cat > "$kind_fakebin/claude-projects/cursor-agent/node" <<'EOF'
+#!/bin/sh
+exec sleep 3600
+EOF
+chmod +x "$kind_fakebin/claude-projects/cursor-agent/node"
+tmux -L "$SOCK" new-window -t muxa -n kindclaudeproj \
+  "$kind_fakebin/claude-projects/cursor-agent/node"
+sleep 0.2
+kindclaudeproj_pane="$(tmux -L "$SOCK" list-panes -t muxa:kindclaudeproj -F '#{pane_id}' | head -1)"
+tmux -L "$SOCK" set-option -p -t "$kindclaudeproj_pane" @muxa_kind cursor
+tmux -L "$SOCK" set-option -p -t "$kindclaudeproj_pane" @muxa_name kind-claudeproj
+printf '%s' '{"session_id":"claudeproj-1"}' \
+  | muxa_as "$kindclaudeproj_pane" hook session-start --kind claude >/dev/null
+kindclaudeproj_kind="$(tmux -L "$SOCK" display-message -t "$kindclaudeproj_pane" -p '#{@muxa_kind}')"
+[ "$kindclaudeproj_kind" = "cursor" ] \
+  && ok "claude-projects cursor path is not misclassified as claude" \
+  || bad "claude-projects cursor path is not misclassified as claude" \
+     "got=$kindclaudeproj_kind"
+
 # --- CLI session id mapping ---
 printf '%s' '{"session_id":"cli-sess-123"}' | muxa_as "$alice_pane" hook session-start --kind generic
 sid="$(tmux -L "$SOCK" display-message -p -t "$alice_pane" '#{@muxa_session}')"
