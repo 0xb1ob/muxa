@@ -542,13 +542,10 @@ if [ "$splash_on" = "1" ]; then
   splash_cur="$(find "$(muxa_box splash)/cur" -type f 2>/dev/null | awk 'END { print NR }')"
   [ "$splash_new" -ge 1 ] && [ "$splash_cur" -eq 0 ] && ok "first brief on alt-screen left mail in new/" \
     || bad "first brief on alt-screen left mail in new/" "new=$splash_new cur=$splash_cur"
-  tmux -L "$SOCK" send-keys -t "$splash_pane" -X cancel 2>/dev/null || true
-  printf '\033[?1049l' >"$(tmux -L "$SOCK" display-message -t "$splash_pane" -p '#{pane_tty}')"
-  sleep 0.2
   paint_composer "$splash_pane" cursor-idle.ansi
   sleep 1.5
   got="$(cat "$splash_out" 2>/dev/null || true)"
-  assert_contains "$got" "SPLASH_FIRST_BRIEF" "kick_wait delivers first brief once TUI is live"
+  assert_contains "$got" "SPLASH_FIRST_BRIEF" "kick_wait delivers first brief on drawn alt-screen"
   splash_pidfile="$(muxa_runtime)/kick-wait-${splash_pane}.pid"
   if [ -f "$splash_pidfile" ] && kill -0 "$(cat "$splash_pidfile" 2>/dev/null)" 2>/dev/null; then
     kill "$(cat "$splash_pidfile")" 2>/dev/null || true
@@ -563,9 +560,46 @@ else
   ok "peek shows queued first brief (skip)"
   ok "first brief on alt-screen is not stuck in cur/ (skip)"
   ok "first brief on alt-screen left mail in new/ (skip)"
-  ok "kick_wait delivers first brief once TUI is live (skip)"
+  ok "kick_wait delivers first brief on drawn alt-screen (skip)"
 fi
 tmux -L "$SOCK" kill-window -t "muxa:splash" 2>/dev/null || true
+
+# --- first brief: kick_wait survives boot busy (nested S7) ---
+nested_out="$tmpdir/nested.out"
+tmux -L "$SOCK" split-window -h -t "$bob_pane" "exec cat > '$nested_out'"
+sleep 0.2
+nested_pane="$(tmux -L "$SOCK" list-panes -t muxa:alice -F '#{pane_id} #{pane_current_command}' \
+  | awk -v skip="$alice_pane" '$2=="cat" && $1!=skip { print $1; exit }')"
+[ -n "$nested_pane" ] || { bad "nested first-brief pane created" "missing pane"; nested_pane="$alice_pane"; }
+muxa_as "$nested_pane" register --name nested --kind claude --deliver hook --parent bob >/dev/null
+tmux -L "$SOCK" set-option -p -t "$nested_pane" -u @muxa_hook_ok 2>/dev/null || true
+muxa_as "$nested_pane" state idle
+: >"$nested_out"
+nested_sent="$(muxa_as "$bob_pane" send nested 'NESTED_FIRST_BRIEF' 2>&1)"
+assert_contains "$nested_sent" "queued bob → nested" "nested first brief queues on blank capture"
+assert_contains "$nested_sent" "waiting for idle" "nested first brief spawns kick_wait"
+muxa_as "$nested_pane" state busy
+sleep 0.3
+nested_pidfile="$(muxa_runtime)/kick-wait-${nested_pane}.pid"
+if [ -f "$nested_pidfile" ] && kill -0 "$(cat "$nested_pidfile" 2>/dev/null)" 2>/dev/null; then
+  ok "first brief kick_wait survives boot busy"
+else
+  bad "first brief kick_wait survives boot busy" "pidfile=$nested_pidfile"
+fi
+nested_new="$(find "$(muxa_box nested)/new" -type f 2>/dev/null | awk 'END { print NR }')"
+[ "${nested_new:-0}" -ge 1 ] && ok "first brief mail stays in new/ through boot busy" \
+  || bad "first brief mail stays in new/ through boot busy" "new=$nested_new"
+muxa_as "$nested_pane" state idle
+paint_composer "$nested_pane" claude-idle.ansi
+sleep 1.5
+got="$(cat "$nested_out" 2>/dev/null || true)"
+assert_contains "$got" "NESTED_FIRST_BRIEF" "kick_wait delivers nested first brief after boot busy"
+if [ -f "$nested_pidfile" ] && kill -0 "$(cat "$nested_pidfile" 2>/dev/null)" 2>/dev/null; then
+  kill "$(cat "$nested_pidfile")" 2>/dev/null || true
+  rm -f "$nested_pidfile"
+fi
+find "$(muxa_box nested)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box nested)/cur" -type f -exec rm -f {} + 2>/dev/null || true
 
 empty_stop="$(muxa_as "$alice_pane" hook stop --format claude)"
 [ -z "$empty_stop" ] && ok "first hook stop with empty mailbox is silent" \

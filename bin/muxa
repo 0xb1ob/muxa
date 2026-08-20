@@ -1114,7 +1114,9 @@ pane_composer_state() {
 # paste that would leave the only copy stuck in cur/.
 pane_capture_blank() {
   local pane="$1" n
-  n="$(tmux_do capture-pane -p -t "$pane" 2>/dev/null \
+  # Match composer capture (-e): a drawn CLI TUI is mostly ANSI styling;
+  # plain capture-pane looks empty even when the prompt is on screen.
+  n="$(tmux_do capture-pane -e -p -t "$pane" 2>/dev/null \
     | tr -cd '[:alnum:]' | wc -c | tr -d '[:space:]')"
   [ "${n:-0}" -lt 8 ]
 }
@@ -1145,14 +1147,12 @@ pane_inject_verdict() {
     claude|cursor|pi)
       if [ "${MUXA_COMPOSER_CHECK:-1}" != "0" ]; then
         # First brief only: skip composer parsing so splash cannot deadlock
-        # spawn, but still honour dead/copy-mode/alt-screen and a blank
-        # capture (silent-loss paste would leave mail stuck in cur/).
+        # spawn, but still honour dead/copy-mode and a blank capture (silent-loss
+        # paste would leave mail stuck in cur/). A non-blank capture means the
+        # TUI is drawn — inject even on alt-screen so kick_wait can land the
+        # bootstrap brief while the CLI is still booting.
         if [ "$(pane_fmt "$pane" '#{@muxa_deliver}')" = "hook" ] \
            && [ "$(pane_fmt "$pane" '#{@muxa_hook_ok}')" != "1" ]; then
-          if [ "$(pane_fmt "$pane" '#{alternate_on}')" = "1" ]; then
-            printf 'unknown'
-            return
-          fi
           if pane_capture_blank "$pane"; then
             printf 'unknown'
             return
@@ -1574,7 +1574,10 @@ kick_wait() {
     state="$(pane_fmt "$pane" '#{@muxa_state}')"
     case "$state" in
       busy|blocked)
-        if [ "$deliver" = "hook" ]; then
+        # Before the first hook stop, mail in new/ is the bootstrap brief — the
+        # Stop drain cannot run work the pane never received. Keep waiting.
+        if [ "$deliver" = "hook" ] \
+           && [ "$(pane_fmt "$pane" '#{@muxa_hook_ok}')" = "1" ]; then
           rm -f "$list"
           kick_wait_note "$name went $state; the Stop-hook drain owns this mail"
           kick_wait_state "$pane" ""
