@@ -426,25 +426,104 @@ can_send() {
   return 1
 }
 
-detect_kind() {
-  local cmd
-  cmd="$(pane_fmt "$1" '#{pane_current_command}')"
-  case "$cmd" in
-    claude*) printf 'claude' ;;
-    agent|cursor-agent) printf 'cursor' ;;
-    omp|pi) printf 'pi' ;;
-    *) printf 'generic' ;;
-  esac
+pane_command_line() {
+  local pane="$1" pid line
+  pid="$(pane_fmt "$pane" '#{pane_pid}')"
+  [ -n "$pid" ] || return 1
+  if [ -r "/proc/$pid/cmdline" ]; then
+    line="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/[[:space:]]*$//')"
+    if [ -n "$line" ]; then
+      printf '%s' "$line"
+      return 0
+    fi
+  fi
+  line="$(ps -p "$pid" -o args= 2>/dev/null | head -1)" || \
+    line="$(ps -p "$pid" -o command= 2>/dev/null | head -1)" || return 1
+  line="${line#"${line%%[![:space:]]*}"}"
+  [ -n "$line" ] && printf '%s' "$line"
 }
 
+# Classify a CLI from a spawn argument (muxa spawn -- CMD …).
 kind_from_command() {
-  case "$1" in
-    *claude*) printf 'claude' ;;
-    *cursor-agent*) printf 'cursor' ;;
-    */agent|*agent) printf 'cursor' ;;
-    *omp*) printf 'pi' ;;
-    *) printf 'generic' ;;
+  kind_from_argv "$1"
+}
+
+# Classify from a full process command line (ps). Match executable basenames
+# and anchored path segments — not bare substrings like "omp" in compose
+# or "claude" in claude-projects.
+kind_from_argv() {
+  local line="$1" tok base rest
+  case "$line" in
+    *cursor-agent*) printf 'cursor'; return ;;
   esac
+  tok="${line%% *}"
+  base="${tok##*/}"
+  case "$base" in
+    claude*) printf 'claude'; return ;;
+    agent|cursor-agent) printf 'cursor'; return ;;
+    omp|pi) printf 'pi'; return ;;
+  esac
+  rest="${line#"$tok"}"
+  rest="${rest#"${rest%%[![:space:]]*}"}"
+  case "$rest" in
+    *cursor-agent*) printf 'cursor'; return ;;
+    *"/claude/"*|*"/claude-code"*|*"/claude-code/"*) printf 'claude'; return ;;
+  esac
+  case "$line" in
+    *"/agent "*|*" agent "*|*" agent"|agent\ *) printf 'cursor'; return ;;
+  esac
+  printf 'generic'
+}
+
+detect_kind() {
+  local pane="$1" cmd args
+  cmd="$(pane_fmt "$pane" '#{pane_current_command}')"
+  case "$cmd" in
+    claude*) printf 'claude'; return ;;
+    agent|cursor-agent) printf 'cursor'; return ;;
+    omp|pi) printf 'pi'; return ;;
+  esac
+  args="$(pane_command_line "$pane" 2>/dev/null || true)"
+  if [ -n "$args" ]; then
+    kind_from_argv "$args"
+    return
+  fi
+  printf 'generic'
+}
+
+# Pick @muxa_kind for a hook. Process argv wins over a conflicting --kind
+# flag; a live registration is kept when the hook would flip CLI family
+# without evidence (e.g. claude SessionStart on a cursor-agent pane).
+resolve_hook_kind() {
+  local pane="$1" hook_kind="${2:-}" existing detected
+  detected="$(detect_kind "$pane")"
+  existing="$(pane_fmt "$pane" '#{@muxa_kind}')"
+  if [ -n "$hook_kind" ] && [ "$detected" != "generic" ] && [ "$hook_kind" != "$detected" ]; then
+    printf '%s' "$detected"
+    return
+  fi
+  # Keep a live CLI-family registration when the hook would flip families
+  # without process evidence (e.g. claude SessionStart on a cursor pane).
+  if [ -n "$existing" ] && [ "$existing" != "generic" ] \
+     && [ -n "$hook_kind" ] && [ "$hook_kind" != "$existing" ]; then
+    if [ "$detected" = "generic" ] || [ "$detected" = "$existing" ]; then
+      printf '%s' "$existing"
+      return
+    fi
+  fi
+  if [ -n "$hook_kind" ]; then
+    printf '%s' "$hook_kind"
+    return
+  fi
+  if [ "$detected" != "generic" ]; then
+    printf '%s' "$detected"
+    return
+  fi
+  if [ -n "$existing" ]; then
+    printf '%s' "$existing"
+    return
+  fi
+  printf 'generic'
 }
 
 default_deliver() {
@@ -1930,7 +2009,7 @@ cmd_hook() {
   case "$event" in
     session-start)
       [ -n "$pane" ] || return 0
-      [ -n "$kind" ] || kind="$(detect_kind "$pane")"
+      kind="$(resolve_hook_kind "$pane" "$kind")"
       hook_register_pane "$pane" "$kind"
       if [ -n "$session_id" ]; then
         apply_cli_session "$pane" "$session_id"
@@ -1964,7 +2043,7 @@ cmd_hook() {
       [ -n "$pane" ] || return 0
       name="$(pane_fmt "$pane" '#{@muxa_name}')"
       if [ -z "$name" ]; then
-        [ -n "$kind" ] || kind="$(detect_kind "$pane")"
+        kind="$(resolve_hook_kind "$pane" "$kind")"
         hook_register_pane "$pane" "$kind"
         name="$(pane_fmt "$pane" '#{@muxa_name}')"
       fi
