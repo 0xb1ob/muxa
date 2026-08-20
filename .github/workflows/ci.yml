@@ -21,4 +21,4 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh | bash -s -- --skip-skills --no-gum
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Run tests
-        run: tests/run.sh && tests/tmux-facts.sh && tests/composer.sh
+        run: tests/run.sh && tests/tmux-facts.sh && tests/composer.sh && tests/install.sh

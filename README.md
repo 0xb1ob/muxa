@@ -106,13 +106,14 @@ curl -fsSL https://raw.githubusercontent.com/0xb1ob/muxa/main/install.sh | bash
 That clones this repo into `~/.muxa`, symlinks `muxa` onto `~/.local/bin`,
 merges user-level hooks, and copies the **muxa-parent** and **muxa-worker**
 skills to `~/.cursor/skills`, `~/.claude/skills`, and `~/.agents/skills`.
-Re-run the same curl to `git pull` `~/.muxa` and refresh skills/hooks.
+Re-run the same curl to refresh `~/.muxa` from `origin/main` and update skills/hooks.
 
 From a git checkout (development):
 
 ```bash
 ./install.sh          # install from this tree; does not clone
 tests/run.sh          # maildir / inject unit tests
+tests/install.sh      # ~/.muxa cache update after a squash / shallow fetch
 tests/e2e.sh          # real Claude Code + Cursor Agent + Oh My Pi in tmux
 ```
 
