@@ -1108,7 +1108,7 @@ inject_text() {
 }
 
 deliver_list() {
-  local pane="$1" list="$2"
+  local pane="$1" list="$2" keep_cur_on_fail="${3:-0}"
   local text kind name verdict nbytes nfiles
   kind="$(pane_fmt "$pane" '#{@muxa_kind}')"
   name="$(pane_fmt "$pane" '#{@muxa_name}')"
@@ -1116,12 +1116,16 @@ deliver_list() {
     verdict="$(pane_inject_ready "$pane" "$kind")" || {
       printf 'muxa: %s not ready to receive (%s); left queued\n' \
         "${name:-$pane}" "$verdict" >&2
-      unclaim_list "$list"
+      [ "$keep_cur_on_fail" -eq 1 ] || unclaim_list "$list"
       refresh_unread "$pane" "$name"
       return 1
     }
   fi
-  text="$(payload_from_claimed "$list")" || { unclaim_list "$list"; refresh_unread "$pane" "$name"; return 1; }
+  text="$(payload_from_claimed "$list")" || {
+    [ "$keep_cur_on_fail" -eq 1 ] || unclaim_list "$list"
+    refresh_unread "$pane" "$name"
+    return 1
+  }
   nbytes="$(printf '%s' "$text" | wc -c)"
   nbytes="${nbytes#"${nbytes%%[![:space:]]*}"}"
   nbytes="${nbytes%"${nbytes##*[![:space:]]}"}"
@@ -1132,13 +1136,13 @@ deliver_list() {
     if [ "$nfiles" -eq 1 ]; then
       park_list_dead "$list" "exceeds inject limit"
     else
-      unclaim_list "$list"
+      [ "$keep_cur_on_fail" -eq 1 ] || unclaim_list "$list"
     fi
     refresh_unread "$pane" "$name"
     return 1
   fi
   if ! inject_text "$pane" "$text"; then
-    unclaim_list "$list"
+    [ "$keep_cur_on_fail" -eq 1 ] || unclaim_list "$list"
     refresh_unread "$pane" "$name"
     return 1
   fi
@@ -1648,7 +1652,7 @@ EOF
 
 cmd_deliver() {
   need_tmux
-  local name="" pane list from lock force=0
+  local name="" pane list from lock force=0 from_cur=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --force) force=1; shift ;;
@@ -1678,8 +1682,10 @@ cmd_deliver() {
   fi
   reap_stale_claims "$name"
   claim_new "$name" >"$list" || true
+  from_cur=0
   if [ ! -s "$list" ]; then
     claim_cur "$name" >"$list" || true
+    [ -s "$list" ] && from_cur=1
   fi
   if [ ! -s "$list" ]; then
     lock_release "$lock"
@@ -1687,7 +1693,7 @@ cmd_deliver() {
     printf 'no mail\n'
     return 0
   fi
-  if deliver_list "$pane" "$list"; then
+  if deliver_list "$pane" "$list" "$from_cur"; then
     printf 'injected into %s\n' "$name"
     lock_release "$lock"
     rm -f "$list"
