@@ -1,7 +1,8 @@
 # muxa
 
 Messaging between AI agent CLIs that already share a **tmux** server.
-No MCP server. No daemon. No extra tools in the model context.
+No MCP server. No extra tools in the model context. A small user-level
+Go broker owns pane paste (`muxa broker` / `bin/muxa-broker`).
 
 ```
 muxa who
@@ -9,6 +10,8 @@ muxa send reviewer "auth.ts is ready for review"
 ```
 
 The other agent sees a normal user turn tagged `[muxa]`. That is the protocol.
+`muxa send` enqueues on the broker and does **not** also run Stop-hook drain
+or `kick_wait` for that message.
 
 **Scope:** muxa is tmux agent spawn, mail, preflight, and a runtime jobs map
 (`muxa jobs`). It is not a job orchestrator. For worktree leasing, dispatch
@@ -27,7 +30,7 @@ capabilities, every agent lives in tmux.**
 | Blind `tmux send-keys` | tmux-agent-comms, amux, ad-hoc orchestrators | Receive is a user turn (good) | Yes | Right wire, wrong timing. Inject while the TUI is in a tool call or a permission prompt and you corrupt the turn. |
 | Google A2A / IBM ACP | HTTP + Agent Cards | HTTP stack, cards, task state machines | No | Right for networked enterprise agents. Absurd for two panes on one laptop. |
 | Vendor teams | Claude Code Agent Teams | In-family only | No | Use it when everyone is Claude. It will not talk to Cursor or Pi. |
-| **muxa** | this repo | Send = one Bash call. Receive = one user turn, only when there is mail. | **Required** | Roster in tmux options, queue in maildir, drain via Stop / `followup_message` / `session_stop`. |
+| **muxa** | this repo | Send = one Bash call. Receive = one user turn. | **Required** | Roster in tmux options, broker queue + paste, leftover hook drain still in-tree. |
 
 ### The token budget that actually matters
 
@@ -44,44 +47,27 @@ muxa uses surfaces the CLIs already pay for:
 
 ### Delivery (the part everyone gets wrong)
 
-```
-busy / permission prompt  →  write maildir, do not touch the TUI
-                             Claude/Cursor/Pi Stop hook claims mail and continues
-idle hook pane            →  first brief (hook_ok unset): paste-buffer + Enter,
-                             skipping composer so splash cannot deadlock spawn
-                             after hook_ok: same paste, but only if the composer
-                             is empty (two captures); otherwise queue + kick_wait
-                             never into copy-mode, a dead pane, or a busy TUI
-idle inject pane          →  paste-buffer, except never into copy-mode, a dead
-                             pane, or a generic pane on the alternate screen
-```
+`muxa send` talks to **muxa-broker** (unix socket, file-backed queue). The
+broker pastes with load-buffer + Enter when the target pane looks free
+(tmux `capture-pane` only: prompt-ish last line, empty input). If the pane
+is mid-typing, the broker retries until `MUXA_BROKER_DEADLINE` (default 10
+minutes), then pastes once. If the broker is down, `muxa send` pastes once
+immediately. That paste path is last-resort fallback — not the primary
+loop. Send must not also fire hook/`kick_wait` inject for the same
+message.
 
-The first brief to a freshly spawned hook pane is injected: spawn marks
-`hook+idle` before the CLI boots, and no Stop hook exists until a turn
-has run — composer is skipped so splash cannot deadlock that send. After
-the first successful `muxa hook stop`, idle hook sends still inject, but
-only into an empty composer (the same two-capture gate as inject-kind
-panes). A prompt with typed text queues; `kick_wait` pastes when it
-clears. That waiter lives as long as mail sits in `new/` — a human types
-for longer than any poll cap — and stops only when the inject lands, the
-mail is claimed elsewhere, the pane goes busy/blocked (Stop drains it),
-the pane dies, or `MUXA_KICK_WAIT_DEADLINE` (default 1h) expires. It is
-not silent: `muxa send` prints the waiter pid, `muxa who` shows a `WAIT`
-column (`waiting:NNs`, `expired:NNNNs`, `gone`), and every waiter logs to
-`$XDG_RUNTIME_DIR/muxa/<tmux-pid>/kick-wait-<pane>.log`. The parent may already have Stopped, so queueing every idle send
-until the next turn would sit unread until a human types. Busy/blocked hook
-panes still queue; Stop drains that queue when the turn ends —
-including for an IDE-hosted Cursor root whose pane is only a tmux
-registration, not the agent process. Claimed mail stays visible in
-`muxa peek` / `muxa who` UNREAD until a later Stop proves it was
-consumed. If inject fails (copy-mode, dead pane, size limit), the claim
-is reversed and mail stays queued.
+Heuristic (documented in [SPEC.md](SPEC.md)): strip ANSI; last non-empty
+line; empty → free; prompt marker (`$%#>❯`) with text after it → typing
+(not free); prompt marker at end of line → free; anything else → wait.
+
+Hook / `kick_wait` / composer JSON stay in the tree (`MUXA_BROKER=0`
+restores that send path for leftover tests). Broker mode does not need
+them.
 
 tmux user options are the roster (`@muxa_name`, `@muxa_kind`, `@muxa_state`,
-`@muxa_deliver`, `@muxa_session`, `@muxa_hook_ok`, `@muxa_unread`). `tmux list-panes` is service discovery. Maildir (`tmp/new/cur/done/dead`
-+ atomic `mv`) is the queue — the same trick mail servers used before anyone
-invented SQLite-as-a-bus. `cur/` is claimed, not consumed; `muxa peek` shows
-stuck claimed mail. Pane titles are CLI-owned; do not put unread there.
+`@muxa_deliver`, `@muxa_session`, `@muxa_hook_ok`, `@muxa_unread`). `tmux list-panes` is service discovery. The broker's file queue is the send
+path. Maildir remains for hook-drain leftovers and `muxa peek`. Pane
+titles are CLI-owned; do not put unread there.
 
 Spec: [SPEC.md](SPEC.md).
 
@@ -170,8 +156,9 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 | `muxa unregister NAME\|ID` | Clear muxa registration; leave pane running |
 | `muxa session` | This pane's CLI session/conversation id |
 | `muxa children` | Direct children of this pane |
-| `muxa send NAME TEXT` | Queue + deliver if parent↔child |
+| `muxa send NAME TEXT` | Enqueue on the broker (parent↔child). Auto-starts the daemon if the socket is dead |
 | `muxa send --all TEXT` | Every parent/child pane (not siblings or other roots) |
+| `muxa broker [start\|status\|stop]` | User-level paste broker (unix socket + file queue) |
 | `muxa peek [NAME]` | Unread (humans/scripts, not the model loop) |
 | `muxa deliver [--force] [NAME]` | Claim + inject now (escape hatch). Prechecks by default; `--force` skips them |
 | `muxa hook stop --format claude\|cursor\|pi` | Native continue payload |
@@ -181,12 +168,13 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 ## Tests
 
 ```bash
-tests/run.sh          # maildir / inject unit tests
+tests/run.sh          # maildir / inject unit tests (MUXA_BROKER=0)
+tests/broker.sh       # broker integration (isolated tmux + dummy prompts)
 tests/tmux-facts.sh   # version-sensitive tmux behaviour muxa depends on
 tests/composer.sh     # composer-verdict fixtures (no tmux)
 ```
 
-Needs `tmux` and `python3`. Uses a private tmux socket, not your session.
+Needs `tmux`, `python3`, and (for the broker) Go 1.21+. Uses a private tmux socket, not your session.
 `muxa jobs` tests also need [`br`](https://github.com/Dicklesworthstone/beads_rust) on `PATH`.
 
 ## Environment
@@ -202,6 +190,13 @@ Needs `tmux` and `python3`. Uses a private tmux socket, not your session.
 | `MUXA_KICK_WAIT_MAX` | `120` | `kick_wait` polls (0.5s each) between progress log lines |
 | `MUXA_KICK_WAIT_DEADLINE` | `3600` | Seconds before a `kick_wait` waiter gives up (logged + `WAIT=expired`) |
 | `MUXA_FORCE_INJECT` | `0` | `1` skips readiness prechecks (tests / `muxa deliver --force`) |
+| `MUXA_BROKER` | `1` | `0` uses the leftover hook/`kick_wait` send path |
+| `MUXA_BROKER_DIR` | `<runtime>/broker` | File-backed queue + pidfile + log |
+| `MUXA_BROKER_SOCK` | `$MUXA_BROKER_DIR/broker.sock` | Unix socket |
+| `MUXA_BROKER_PID` | `$MUXA_BROKER_DIR/broker.pid` | Pidfile |
+| `MUXA_BROKER_BIN` | `bin/muxa-broker` next to `muxa` | Daemon binary |
+| `MUXA_BROKER_DEADLINE` | `600` | Seconds to wait for a free pane before fallback paste |
+| `MUXA_BROKER_POLL_MS` | `250` | Broker retry interval |
 | `MUXA_COMPOSER_CHECK` | `1` | `0` disables styled-content composer parsing for CLI kinds |
 | `MUXA_COMPOSER_SETTLE` | `0.25` | Seconds between the two composer-empty reads |
 | `MUXA_TMUX_SOCKET` | unset | Private tmux socket name (`tmux -L`) |

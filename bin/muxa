@@ -3,7 +3,7 @@
 # bash 3.2+ (macOS / Linux). Requires tmux. python3 used for JSON and spawn quoting.
 set -euo pipefail
 
-VERSION=0.2.3
+VERSION=0.3.0
 TMUX_BIN="${MUXA_TMUX_BIN:-tmux}"
 ENTER_DELAY="${MUXA_ENTER_DELAY:-0.15}"
 INJECT_MAX="${MUXA_INJECT_MAX:-8192}"
@@ -37,8 +37,9 @@ muxa — message other AI CLIs in this tmux server
   muxa session                      this pane's CLI session/conversation id (empty until reported)
   muxa parent                       this pane's parent alias (empty if root)
   muxa children                     direct children of this pane
-  muxa send [--no-reply] NAME TEXT  queue + deliver (parent↔child only)
+  muxa send [--no-reply] NAME TEXT  enqueue on the pane-mail broker (parent↔child only)
   muxa send --all TEXT              every parent/child pane (not siblings or other roots)
+  muxa broker [start|status|stop]   user-level paste broker (unix socket + file queue)
   muxa peek [NAME]                  unread mail (new/) and claimed-but-unconfirmed (cur/)
   muxa deliver [--force] [NAME]     claim + inject now (escape hatch; --force skips prechecks)
   muxa state idle|busy|blocked      presence (hooks call this)
@@ -1608,6 +1609,166 @@ spawn_kick_wait() {
   printf '%s' "$pid"
 }
 
+broker_enabled() {
+  [ "${MUXA_BROKER:-1}" != "0" ]
+}
+
+broker_bin_path() {
+  if [ -n "${MUXA_BROKER_BIN:-}" ]; then
+    printf '%s' "$MUXA_BROKER_BIN"
+    return
+  fi
+  python3 -c 'import os,sys; print(os.path.join(os.path.dirname(os.path.realpath(sys.argv[1])), "muxa-broker"))' "${BASH_SOURCE[0]}"
+}
+
+broker_setup_paths() {
+  local rt
+  rt="$(runtime_root)"
+  BROKER_DIR="${MUXA_BROKER_DIR:-$rt/broker}"
+  BROKER_SOCK="${MUXA_BROKER_SOCK:-$BROKER_DIR/broker.sock}"
+  BROKER_PID="${MUXA_BROKER_PID:-$BROKER_DIR/broker.pid}"
+}
+
+broker_ping() {
+  [ -n "${BROKER_SOCK:-}" ] || broker_setup_paths
+  [ -S "$BROKER_SOCK" ] || return 1
+  python3 -c '
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(0.5)
+try:
+    s.connect(sys.argv[1])
+    s.sendall(b"{\"op\":\"ping\"}\n")
+    s.shutdown(socket.SHUT_WR)
+    data = s.recv(4096)
+except Exception:
+    sys.exit(1)
+try:
+    resp = json.loads(data.decode() or "{}")
+except Exception:
+    sys.exit(1)
+sys.exit(0 if resp.get("ok") else 1)
+' "$BROKER_SOCK"
+}
+
+# Auto-start a user-level broker if the socket is dead. Pidfile + socket only;
+# keep this small. The child is disowned so muxa send cannot take it down.
+ensure_broker() {
+  local bin pid i lock runbin
+  broker_setup_paths
+  mkdir -p "$BROKER_DIR" || return 1
+  broker_ping && return 0
+  bin="$(broker_bin_path)"
+  [ -x "$bin" ] || return 1
+  lock="$BROKER_DIR/start.lock"
+  if mkdir "$lock" 2>/dev/null; then
+    runbin="$BROKER_DIR/muxa-broker"
+    if ! cp "$bin" "$runbin"; then
+      rmdir "$lock" 2>/dev/null || true
+      return 1
+    fi
+    chmod +x "$runbin"
+    # darwin 25+ SIGKILLs provenance-tagged worktree binaries; sign the copy.
+    if [ "$(uname -s)" = Darwin ]; then
+      xattr -c "$runbin" 2>/dev/null || true
+      codesign -s - --force --timestamp=none "$runbin" 2>/dev/null || true
+    fi
+    rm -f "$BROKER_SOCK"
+    MUXA_BROKER_DIR="$BROKER_DIR" \
+    MUXA_BROKER_SOCK="$BROKER_SOCK" \
+    MUXA_BROKER_PID="$BROKER_PID" \
+      nohup "$runbin" >>"$BROKER_DIR/broker.log" 2>&1 &
+    pid=$!
+    printf '%s\n' "$pid" >"$BROKER_PID"
+    disown "$pid" 2>/dev/null || true
+    rmdir "$lock" 2>/dev/null || true
+  fi
+  i=0
+  while [ "$i" -lt 40 ]; do
+    broker_ping && return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
+broker_enqueue() {
+  local id="$1" pane="$2" from="$3" to="$4" text="$5"
+  [ -n "${BROKER_SOCK:-}" ] || broker_setup_paths
+  python3 - "$BROKER_SOCK" "$id" "$pane" "$from" "$to" "$text" <<'PY'
+import json, socket, sys
+sockpath, mid, pane, frm, to, text = sys.argv[1:7]
+req = {"op": "enqueue", "id": mid, "pane": pane, "from": frm, "to": to, "text": text}
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(3)
+s.connect(sockpath)
+s.sendall(json.dumps(req).encode() + b"\n")
+s.shutdown(socket.SHUT_WR)
+data = b""
+while True:
+    chunk = s.recv(65536)
+    if not chunk:
+        break
+    data += chunk
+try:
+    resp = json.loads(data.decode() or "{}")
+except Exception:
+    sys.stderr.write("muxa: broker: bad response\n")
+    sys.exit(1)
+if not resp.get("ok"):
+    sys.stderr.write("muxa: broker: %s\n" % (resp.get("error") or "enqueue failed"))
+    sys.exit(1)
+PY
+}
+
+cmd_broker() {
+  local sub="${1:-start}" pid
+  shift || true
+  need_tmux
+  broker_setup_paths
+  case "$sub" in
+    start)
+      if ensure_broker; then
+        pid="$(cat "$BROKER_PID" 2>/dev/null || printf '?')"
+        printf 'broker pid=%s sock=%s dir=%s\n' "$pid" "$BROKER_SOCK" "$BROKER_DIR"
+      else
+        die "could not start broker (build bin/muxa-broker)"
+      fi
+      ;;
+    status)
+      if broker_ping; then
+        python3 -c '
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(2)
+s.connect(sys.argv[1])
+s.sendall(b"{\"op\":\"status\"}\n")
+s.shutdown(socket.SHUT_WR)
+data = b""
+while True:
+    chunk = s.recv(65536)
+    if not chunk:
+        break
+    data += chunk
+sys.stdout.write(data.decode())
+' "$BROKER_SOCK"
+      else
+        printf 'broker down sock=%s\n' "$BROKER_SOCK"
+        return 1
+      fi
+      ;;
+    stop)
+      pid="$(cat "$BROKER_PID" 2>/dev/null || true)"
+      if [ -n "$pid" ]; then
+        kill "$pid" 2>/dev/null || true
+      fi
+      rm -f "$BROKER_PID" "$BROKER_SOCK"
+      printf 'stopped broker pid=%s\n' "${pid:-none}"
+      ;;
+    *) die "broker: start|status|stop" ;;
+  esac
+}
+
 # Retry until the mail is in. A human typing routinely outlasts any short poll
 # cap, so the waiter lives as long as mail sits in new/ for this pane; it stops
 # when the inject succeeds, new/ drains (someone else claimed it), the pane goes
@@ -1615,6 +1776,7 @@ spawn_kick_wait() {
 # seconds elapse. MUXA_KICK_WAIT_MAX now only sets how often (in 0.5s polls) the
 # waiter writes a progress line. Every exit is logged and reflected in
 # @muxa_kick_wait — nothing is discarded (E27).
+# Legacy path: muxa send no longer calls this when the broker is enabled.
 kick_wait() {
   local pane="$1" name="$2"
   local i=0 limit note_every state prev kind deliver list lock verdict left
@@ -1702,12 +1864,30 @@ kick_wait() {
 
 send_one() {
   local from="$1" to="$2" flags="$3" body="$4"
-  local pane state deliver id list lock kind cwd cmd wait_composer verdict wpid
+  local pane state deliver id list lock kind cwd cmd wait_composer verdict wpid text
   if [ "$to" = "$from" ]; then
     return 0
   fi
   pane="$(find_pane_by_name "$to")" || die "unknown agent '$to' — muxa who"
   can_send "$from" "$to" || forbid "forbidden $from → $to (only parent↔child)"
+  if broker_enabled; then
+    # Broker owns paste. Do not write maildir (hook drain would double-deliver)
+    # and do not spawn kick_wait / watcher inject for this message.
+    text="$(format_one "$from" "$flags" "$body" "")"
+    id="$(date +%s)-$$-$(printf '%05d' "$RANDOM")"
+    if ensure_broker && broker_enqueue "$id" "$pane" "$from" "$to" "$text"; then
+      printf 'queued %s → %s id=%s (broker)\n' "$from" "$to" "$id"
+      return 0
+    fi
+    printf 'muxa: broker unreachable; falling back to paste-buffer\n' >&2
+    if inject_text "$pane" "$text"; then
+      printf 'delivered %s → %s id=%s (fallback paste)\n' "$from" "$to" "$id"
+      return 0
+    fi
+    id="$(write_mail "$from" "$to" "$flags" "$body")"
+    printf 'queued %s → %s id=%s\n' "$from" "$to" "$id"
+    return 0
+  fi
   id="$(write_mail "$from" "$to" "$flags" "$body")"
   reap_stale_claims "$to"
   kind="$(pane_fmt "$pane" '#{@muxa_kind}')"
@@ -2955,6 +3135,7 @@ main() {
     parent) cmd_parent "$@" ;;
     children) cmd_children "$@" ;;
     send) cmd_send "$@" ;;
+    broker) cmd_broker "$@" ;;
     peek) cmd_peek "$@" ;;
     deliver) cmd_deliver "$@" ;;
     state) cmd_state "$@" ;;

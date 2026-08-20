@@ -80,6 +80,35 @@ mkdir -p "$BIN"
 ln -sfn "$ROOT/bin/muxa" "$BIN/muxa"
 chmod +x "$ROOT/bin/muxa" "$ROOT/install.sh" "$ROOT/tests/run.sh"
 
+# Optional Go broker. Darwin 25+ needs the external linker for LC_UUID.
+if [ -d "$ROOT/broker" ]; then
+  _go="${MUXA_GO:-}"
+  if [ -z "$_go" ]; then
+    if [ -x /usr/local/go/bin/go ]; then
+      _go=/usr/local/go/bin/go
+    else
+      _go="$(command -v go || true)"
+    fi
+  fi
+  if [ -n "$_go" ] && [ -x "$_go" ]; then
+    _flags=()
+    case "$(uname -s)" in
+      Darwin) _flags=(-ldflags=-linkmode=external) ;;
+    esac
+    if "$_go" build "${_flags[@]}" -o "$ROOT/bin/muxa-broker" "$ROOT/broker"; then
+      chmod +x "$ROOT/bin/muxa-broker"
+      if [ "$(uname -s)" = Darwin ]; then
+        xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true
+        codesign -s - --force --timestamp=none "$ROOT/bin/muxa-broker" 2>/dev/null || true
+      fi
+      ln -sfn "$ROOT/bin/muxa-broker" "$BIN/muxa-broker"
+    else
+      printf 'muxa-install: muxa-broker build failed; muxa send will paste-fallback\n' >&2
+    fi
+  fi
+  unset _go _flags
+fi
+
 # Skills: on-demand, not MCP. Progressive disclosure = fewer tokens.
 # Global so any project can load muxa-parent / muxa-worker.
 rm -rf "$HOME/.cursor/skills/muxa" "$HOME/.claude/skills/muxa" "$HOME/.agents/skills/muxa"

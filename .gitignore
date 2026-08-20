@@ -4,4 +4,6 @@ node_modules/
 .lavish/
 .muxa-e2e-artifacts/
 .beads/
+bin/muxa-broker
+
 

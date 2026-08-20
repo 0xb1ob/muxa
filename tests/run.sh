@@ -13,6 +13,8 @@ SOCK="muxatest-$$"
 export MUXA_TMUX_SOCKET="$SOCK"
 export MUXA_ENTER_DELAY=0.05
 unset TMUX MUXA_NAME MUXA_PARENT MUXA_ID MUXA_BIN || true
+# Legacy hook/kick_wait send path. Broker coverage is tests/broker.sh.
+export MUXA_BROKER=0
 
 pass=0
 fail=0

@@ -1,9 +1,9 @@
 # muxa — tmux-native agent messaging
 
 muxa is a messaging protocol for AI agent CLIs that already share a tmux
-server. It has no MCP server, no daemon, and no extra tools in the model
-context. Agents send with the Bash they already have. Agents receive as a
-normal user turn, using each CLI's idle/stop hook when the peer is busy.
+server. It has no MCP server and no extra tools in the model context.
+A small user-level Go broker owns pane paste. Agents send with the Bash
+they already have. Incoming mail arrives as a normal user turn.
 
 ## Why this shape
 
@@ -19,9 +19,12 @@ muxa pays for the body once, as a user message, and nothing else.
 ## Actors
 
 - **tmux** is the process manager, roster, and presence store
-- **maildir** is the durable queue (atomic `mv`, no lock server)
-- **CLI hooks** drain the queue when the agent finishes a turn
-- **tmux paste-buffer** delivers when the agent is already idle at a prompt
+- **muxa-broker** is the delivery daemon: unix socket, file-backed queue,
+  paste-buffer + Enter when the pane looks free
+- **maildir** remains for hook-drain leftovers and `muxa peek` (not the
+  send path when the broker is up)
+- **CLI hooks** are kept in-tree as a leftover drain; `muxa send` must
+  not require them and must not race them
 
 ## Identity
 
@@ -156,13 +159,56 @@ claimed-and-lost file to `new/`.
 
 ## Delivery
 
+`muxa send` talks to **muxa-broker** over a unix socket and MUST NOT also
+run hook / `kick_wait` / watcher inject for that message (double delivery
+is a bug). The broker owns paste.
+
+```
+send(name, body):
+  resolve name -> pane
+  format inject payload
+  ensure broker (pidfile + socket; auto-start if dead)
+  enqueue JSON {pane, from, to, text} on the unix socket
+  return queued
+  if socket unreachable after start:
+      paste-buffer + Enter once (last-resort fallback)
+```
+
+The broker keeps each enqueue as a JSON file under
+`$MUXA_BROKER_DIR/pending/` so a restart does not drop messages. Default
+socket is `<runtime>/broker/broker.sock`. `muxa send` auto-starts
+`bin/muxa-broker` when the socket does not answer `{"op":"ping"}`.
+
+For each queued message the broker captures the target pane (`tmux
+capture-pane -p`) and pastes only when input looks **free**:
+
+1. `#{pane_dead}` or `#{pane_in_mode}` → not free (copy-mode paste is
+   silent-loss).
+2. Strip ANSI/OSC from the capture. Take the last non-empty line.
+3. Empty line → free (blank pane / empty input).
+4. A prompt marker (`$`, `%`, `#`, `>`, `❯`) followed by whitespace and
+   then non-space → not free (typing after the prompt).
+5. Line ends with a prompt marker → free (idle prompt).
+6. Anything else → not free (output, spinner, busy TUI).
+
+This heuristic is tmux-only and CLI-agnostic. It does not parse composer
+JSON, Stop hooks, or SessionStart. Retry until
+`MUXA_BROKER_DEADLINE` seconds (default 600) is the reliability layer —
+do not special-case Claude/Cursor/Pi layouts. When the deadline expires
+the broker pastes once anyway (timeout fallback). When the broker is
+down or the binary is missing, `muxa send` pastes once immediately.
+
+`MUXA_BROKER=0` restores the legacy send path (maildir + hook drain +
+`kick_wait`) for tests of leftover code. Production default is broker on.
+
 An implementation MUST NOT paste into a pane that is dead, that is in
-copy-mode (`#{pane_in_mode}`), or (for `generic` panes) that is on the
-alternate screen (`#{alternate_on}`). Copy-mode is a silent-loss mode:
-`paste-buffer` and `send-keys Enter` both exit 0, the text never reaches
-the application, and tmux later flushes the held paste **without its
-Enter**, concatenated onto the next paste. `#{pane_dead}` / in-mode /
-alternate-screen are exact tmux facts; they are not optional polish.
+copy-mode (`#{pane_in_mode}`), or (for `generic` panes on the legacy
+path) that is on the alternate screen (`#{alternate_on}`). Copy-mode is a
+silent-loss mode: `paste-buffer` and `send-keys Enter` both exit 0, the
+text never reaches the application, and tmux later flushes the held paste
+**without its Enter**, concatenated onto the next paste.
+
+### Legacy hook / kick_wait path (not used by muxa send when broker is on)
 
 ```
 send(name, body):
@@ -309,7 +355,8 @@ muxa session
 muxa parent
 muxa children
 muxa spawn [--name worker] [--cwd DIR] [--window] -- command…
-muxa deliver [--force] [name]
+  muxa broker [start|status|stop]   user-level paste broker
+  muxa deliver [--force] [name]
 ```
 
 Exit 0 on queued or delivered. Exit 2 if the name is unknown (including
