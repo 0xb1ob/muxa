@@ -549,6 +549,15 @@ resolve_hook_kind() {
   printf 'generic'
 }
 
+# Cursor stop may paste into the tmux pane when the composer is idle. Test
+# panes register --kind cursor on cat(1); detect_kind stays generic unless
+# MUXA_STOP_INJECT=1. Live Agent panes run agent/cursor-agent.
+cursor_stop_may_inject() {
+  local pane="$1"
+  [ "${MUXA_STOP_INJECT:-0}" = "1" ] && return 0
+  [ "$(detect_kind "$pane")" = "cursor" ]
+}
+
 default_deliver() {
   case "$1" in
     claude|cursor|pi) printf 'hook' ;;
@@ -2178,8 +2187,20 @@ cmd_hook() {
       if [ "$from_new" -eq 1 ]; then
         pending_batch="$(stop_pending_batch_from_list "$list")"
       fi
-      rm -f "$list"
       refresh_unread "$pane" "$name"
+      # Live Cursor Agent in tmux often ignores stop followup_message; when the
+      # composer is idle, paste so busy mail lands in the TUI (E2E S6). Dual
+      # hooks may run a second Stop with empty stdout — inject here avoids that
+      # hiding the drain. When paste cannot run, fall back to followup_message.
+      kind="$(pane_fmt "$pane" '#{@muxa_kind}')"
+      if [ "$format" = "cursor" ] && cursor_stop_may_inject "$pane" \
+         && [ "$(pane_inject_ready "$pane" "$kind")" = "empty" ]; then
+        if deliver_list "$pane" "$list" 1; then
+          rm -f "$list"
+          clear_stop_pending "$pane"
+          return 0
+        fi
+      fi
       if [ "$from_new" -eq 1 ] && [ "$format" = "cursor" ]; then
         set_pane_opt "$pane" @muxa_stop_pending 1
         if [ -n "$pending_batch" ]; then
@@ -2190,6 +2211,7 @@ cmd_hook() {
       else
         clear_stop_pending "$pane"
       fi
+      rm -f "$list"
       printf '%s' "$payload" | json_out "$format"
       ;;
     *)

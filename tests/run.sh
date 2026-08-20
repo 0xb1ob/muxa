@@ -849,6 +849,51 @@ find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
 tmux -L "$SOCK" set-option -p -t "$alice_pane" -u @muxa_unread 2>/dev/null || true
 muxa_as "$alice_pane" state idle
 
+# --- cursor busy Stop injects when composer idle (live S6 / Agent TUI) ---
+muxa_as "$alice_pane" register --name alice --kind cursor --deliver hook --parent bob >/dev/null
+tmux -L "$SOCK" set-option -p -t "$alice_pane" @muxa_hook_ok 1 2>/dev/null || true
+paint_composer "$alice_pane" cursor-idle.ansi
+muxa_as "$alice_pane" state busy
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
+: >"$alice_out"
+muxa_as "$bob_pane" send alice 'CURSOR_BUSY_STOP_INJECT' >/dev/null
+sleep 0.2
+inject_drain="$(MUXA_STOP_INJECT=1 muxa_as "$alice_pane" hook stop --format cursor)"
+got="$(cat "$alice_out" 2>/dev/null || true)"
+assert_contains "$got" "CURSOR_BUSY_STOP_INJECT" "cursor stop injects into idle composer (live S6 path)"
+case "$inject_drain" in
+  *followup_message*) bad "cursor stop inject path is silent on stdout" "got: $inject_drain" ;;
+  *) ok "cursor stop inject path is silent on stdout" ;;
+esac
+cur_n="$(find "$(muxa_box alice)/cur" -type f 2>/dev/null | awk 'END { print NR }')"
+[ "$cur_n" -ge 1 ] && ok "cursor stop inject leaves hook mail in cur/ until sweep" \
+  || bad "cursor stop inject leaves hook mail in cur/ until sweep" "cur=$cur_n"
+# Fail-closed: must not leave cur/ claimed with no stdout followup and no TUI inject.
+case "$inject_drain" in
+  *followup_message*) ;;
+  *)
+    case "$got" in
+      *CURSOR_BUSY_STOP_INJECT*) ok "cursor stop drain fail-closed: inject or followup" ;;
+      *) bad "cursor stop drain fail-closed: inject or followup" "stdout=$inject_drain tui=$got" ;;
+    esac
+    ;;
+esac
+python3 - "$(muxa_box alice)/cur" <<'PY'
+import os, sys, time
+d = sys.argv[1]
+now = time.time()
+for name in os.listdir(d):
+    p = os.path.join(d, name)
+    if os.path.isfile(p):
+        os.utime(p, (now - 5, now - 5))
+PY
+muxa_as "$alice_pane" hook stop --format cursor >/dev/null
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
+tmux -L "$SOCK" set-option -p -t "$alice_pane" -u @muxa_unread 2>/dev/null || true
+muxa_as "$alice_pane" state idle
+
 # --- hook inject failure unclaims ---
 muxa_as "$alice_pane" state idle
 : >"$alice_out"
