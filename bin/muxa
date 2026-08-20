@@ -1923,10 +1923,15 @@ cmd_spawn() {
   if [ -n "${MUXA_BIN:-}" ]; then
     envcmd="$envcmd MUXA_BIN=$(shlex_join "$MUXA_BIN")"
   fi
+  local spawn_tmux="tmux"
+  if [ -n "${MUXA_TMUX_SOCKET:-}" ]; then
+    envcmd="$envcmd MUXA_TMUX_SOCKET=$(shlex_join "$MUXA_TMUX_SOCKET")"
+    spawn_tmux="tmux -L $(shlex_join "$MUXA_TMUX_SOCKET")"
+  fi
   # Ensure spawned agents never stall on workspace trust prompts.
   # - cursor: --trust bypasses the workspace trust dialog.
-  # - claude: -p (non-interactive/print) skips trust; also, hook delivery
-  #   means stdin is not a TTY, but -p makes it explicit for safety.
+  # - claude: do not append -p/--print; in Claude Code 2.1.x that is
+  #   non-interactive print mode and exits without a prompt (muxa#29).
   # - pi/omp: has no trust gate; no modification needed.
   case "$kind" in
     cursor)
@@ -1935,14 +1940,8 @@ cmd_spawn() {
         *) quoted="$(printf '%s --trust' "$quoted")" ;;
       esac
       ;;
-    claude)
-      case " $quoted " in
-        *" -p "*|*" --print "*) ;;
-        *) quoted="$(printf '%s -p' "$quoted")" ;;
-      esac
-      ;;
   esac
-  envcmd="$envcmd; exec $quoted"
+  envcmd="$envcmd; $spawn_tmux set-window-option remain-on-exit on 2>/dev/null || true; exec $quoted"
   if [ "$new_window" -eq 1 ]; then
     child="$(tmux_do new-window -t "$sess" -n "$name" -c "$cwd" -P -F '#{pane_id}' "$envcmd")"
   else
@@ -1962,6 +1961,8 @@ cmd_spawn() {
     tmux_do select-layout -t "$winid" tiled
   fi
   [ -n "$child" ] || die "spawn: tmux did not return a pane id"
+  child_win="$(pane_fmt "$child" '#{session_name}:#{window_index}')"
+  tmux_do set-window-option -t "$child_win" remain-on-exit on 2>/dev/null || true
   set_pane_opt "$child" @muxa_name "$name"
   set_pane_opt "$child" @muxa_id "$id"
   set_pane_opt "$child" @muxa_parent "$parent"
