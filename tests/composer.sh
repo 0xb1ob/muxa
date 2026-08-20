@@ -31,6 +31,7 @@ expect cursor-busy-revcursor.ansi cursor pending
 expect cursor-revcursor-idle.ansi cursor empty
 expect cursor-typed.ansi cursor pending
 expect claude-idle.ansi claude empty
+expect claude-idle-233.ansi claude empty
 expect claude-busy.ansi claude pending
 expect pi-idle.ansi pi empty
 expect pi-busy.ansi pi pending
