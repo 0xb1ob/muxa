@@ -228,6 +228,7 @@ clear_muxa_registration() {
   unset_pane_opt "$pane" @muxa_hook_ok
   unset_pane_opt "$pane" @muxa_unread
   unset_pane_opt "$pane" @muxa_kick_wait
+  unset_pane_opt "$pane" @muxa_stop_pending
   set_pane_title "$pane" ""
 }
 
@@ -833,6 +834,39 @@ claim_cur() {
   done <<EOF
 $(maildir_sorted_cur "$box")
 EOF
+}
+
+# cur/ files claimed this turn (younger than SWEEP_MIN_AGE). A same-turn
+# second Stop hook (user + project hooks.json) finds new/ empty; Cursor
+# uses the last hook stdout, so re-emit the young claim.
+claim_cur_young() {
+  local name="$1"
+  local box f base age n=0
+  box="$(ensure_box "$name")"
+  while IFS= read -r base; do
+    [ -n "$base" ] || continue
+    [ "$n" -ge "$BATCH_MAX" ] && break
+    f="$box/cur/$base"
+    [ -f "$f" ] || continue
+    age="$(file_age_s "$f")"
+    [ "$age" -lt "$SWEEP_MIN_AGE" ] || continue
+    printf '%s\n' "$f"
+    n=$((n + 1))
+  done <<EOF
+$(maildir_sorted_cur "$box")
+EOF
+}
+
+young_cur_count() {
+  local name="$1" box f base age n=0
+  box="$(ensure_box "$name")"
+  for f in "$box/cur"/*; do
+    [ -f "$f" ] || continue
+    age="$(file_age_s "$f")"
+    [ "$age" -lt "$SWEEP_MIN_AGE" ] || continue
+    n=$((n + 1))
+  done
+  printf '%s' "$n"
 }
 
 claim_new() {
@@ -2054,9 +2088,10 @@ cmd_hook() {
     idle)
       [ -n "$pane" ] || return 0
       set_pane_opt "$pane" @muxa_state idle
+      unset_pane_opt "$pane" @muxa_stop_pending
       ;;
     stop)
-      local name list payload lock
+      local name list payload lock from_new=0
       [ -n "$pane" ] || return 0
       name="$(pane_fmt "$pane" '#{@muxa_name}')"
       if [ -z "$name" ]; then
@@ -2068,6 +2103,7 @@ cmd_hook() {
       case "$status" in
         aborted|error)
           set_pane_opt "$pane" @muxa_state idle
+          unset_pane_opt "$pane" @muxa_stop_pending
           refresh_unread "$pane" "$name"
           return 0
           ;;
@@ -2078,12 +2114,23 @@ cmd_hook() {
       if lock_acquire "$lock" 100; then
         set_pane_opt "$pane" @muxa_hook_ok 1
         sweep_consumed "$name"
+        if [ "$(young_cur_count "$name")" -eq 0 ]; then
+          unset_pane_opt "$pane" @muxa_stop_pending
+        fi
         claim_new "$name" >"$list" || true
         lock_release "$lock"
       else
         set_pane_opt "$pane" @muxa_hook_ok 1
         sweep_consumed "$name"
+        if [ "$(young_cur_count "$name")" -eq 0 ]; then
+          unset_pane_opt "$pane" @muxa_stop_pending
+        fi
         claim_new "$name" >"$list" || true
+      fi
+      if [ -s "$list" ]; then
+        from_new=1
+      elif [ "$(pane_fmt "$pane" '#{@muxa_stop_pending}')" = "1" ]; then
+        claim_cur_young "$name" >"$list" || true
       fi
       if [ ! -s "$list" ]; then
         rm -f "$list"
@@ -2097,6 +2144,11 @@ cmd_hook() {
       payload="$(payload_from_claimed "$list")"
       rm -f "$list"
       refresh_unread "$pane" "$name"
+      if [ "$from_new" -eq 1 ]; then
+        set_pane_opt "$pane" @muxa_stop_pending 1
+      else
+        unset_pane_opt "$pane" @muxa_stop_pending
+      fi
       printf '%s' "$payload" | json_out "$format"
       ;;
     *)

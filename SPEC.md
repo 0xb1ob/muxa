@@ -262,8 +262,10 @@ hook stop:
                                       # the same turn (user + project hooks)
                                       # cannot hide the first hook's claim
   claim all new mail for this pane's name
-  if empty: set state=idle; print nothing
-  else: set state=busy; print native continue payload; leave in cur/
+  if empty: when @muxa_stop_pending, re-emit young cur/ for dual Stop
+  if still empty: set state=idle; print nothing
+  else: set state=busy; print native continue payload; leave in cur/;
+        set @muxa_stop_pending when draining new/ (cleared on re-emit or idle hook)
 ```
 
 Native continue payloads (stdout of `muxa hook stop --format …`):

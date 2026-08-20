@@ -761,6 +761,38 @@ muxa_as "$alice_pane" hook stop --format claude >/dev/null
 find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
 find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
 
+# --- cursor busy hook pane queues for Stop (S6) ---
+muxa_as "$alice_pane" register --name alice --kind cursor --deliver hook --parent bob >/dev/null
+tmux -L "$SOCK" set-option -p -t "$alice_pane" @muxa_hook_ok 1 2>/dev/null || true
+muxa_as "$alice_pane" state busy
+: >"$alice_out"
+qcurbusy="$(muxa_as "$bob_pane" send alice 'CURSOR_BUSY_STOP')"
+assert_contains "$qcurbusy" "queued bob → alice id=" "cursor busy hook pane queues"
+assert_contains "$qcurbusy" "hook will drain" "cursor busy hook queue reason"
+sleep 0.2
+got="$(cat "$alice_out" 2>/dev/null || true)"
+case "$got" in
+  *CURSOR_BUSY_STOP*) bad "cursor busy hook pane is not pasted" "got: $got" ;;
+  *) ok "cursor busy hook pane is not pasted" ;;
+esac
+drain_curbusy="$(muxa_as "$alice_pane" hook stop --format cursor)"
+assert_contains "$drain_curbusy" "followup_message" "cursor stop JSON on busy drain"
+assert_contains "$drain_curbusy" "CURSOR_BUSY_STOP" "cursor stop drains queued busy mail"
+python3 - "$(muxa_box alice)/cur" <<'PY'
+import os, sys, time
+d = sys.argv[1]
+now = time.time()
+for name in os.listdir(d):
+    p = os.path.join(d, name)
+    if os.path.isfile(p):
+        os.utime(p, (now - 5, now - 5))
+PY
+muxa_as "$alice_pane" hook stop --format cursor >/dev/null
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
+tmux -L "$SOCK" set-option -p -t "$alice_pane" -u @muxa_unread 2>/dev/null || true
+muxa_as "$alice_pane" state idle
+
 # --- hook inject failure unclaims ---
 muxa_as "$alice_pane" state idle
 : >"$alice_out"
@@ -1435,15 +1467,52 @@ aar_st="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_state}')"
 [ "$aar_st" = "idle" ] && ok "afterAgentResponse sets idle" \
   || bad "afterAgentResponse sets idle" "state=$aar_st"
 
-# --- same-turn second Stop does not hide claimed mail ---
+# --- same-turn second Stop re-emits young cur/ (Cursor uses last hook stdout) ---
+muxa_as "$alice_pane" register --name alice --kind cursor --deliver hook --parent bob >/dev/null
 muxa_as "$alice_pane" state busy
 muxa_as "$bob_pane" send alice 'DUAL_STOP_BODY' >/dev/null
 muxa_as "$alice_pane" hook stop --format cursor >/dev/null
 second_stop="$(MUXA_SWEEP_MIN_AGE=60 muxa_as "$alice_pane" hook stop --format cursor)"
-[ -z "$second_stop" ] && ok "same-turn second stop is silent" \
-  || bad "same-turn second stop is silent" "got: $second_stop"
+assert_contains "$second_stop" "followup_message" "same-turn second stop re-emits cursor JSON"
+assert_contains "$second_stop" "DUAL_STOP_BODY" "same-turn second stop re-emits young cur/"
 dual_peek="$(muxa_as "$bob_pane" peek alice)"
 assert_contains "$dual_peek" "DUAL_STOP_BODY" "same-turn second stop does not sweep claim"
+pending_cleared="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_stop_pending}')"
+[ -z "$pending_cleared" ] && ok "same-turn second stop clears stop_pending" \
+  || bad "same-turn second stop clears stop_pending" "got: $pending_cleared"
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
+
+# --- empty stop must not re-emit idle-injected young cur/ ---
+muxa_as "$alice_pane" register --name alice --kind cursor --deliver hook --parent bob >/dev/null
+tmux -L "$SOCK" set-option -p -t "$alice_pane" @muxa_hook_ok 1 2>/dev/null || true
+tmux -L "$SOCK" set-option -p -t "$alice_pane" -u @muxa_stop_pending 2>/dev/null || true
+muxa_as "$alice_pane" state busy
+noreemit_box="$(muxa_box alice)"
+find "$noreemit_box/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$noreemit_box/cur" -type f -exec rm -f {} + 2>/dev/null || true
+{
+  printf 'From: bob\nTo: alice\nId: inject-young\nTime: 2026-01-01T00:00:00Z\nFlags: \n\nIDLE_INJECT_NO_REEMIT\n'
+} >"$noreemit_box/cur/inject-young"
+noreemit_stop="$(MUXA_SWEEP_MIN_AGE=60 muxa_as "$alice_pane" hook stop --format cursor)"
+[ -z "$noreemit_stop" ] && ok "empty stop does not re-emit idle-injected cur/" \
+  || bad "empty stop does not re-emit idle-injected cur/" "got: $noreemit_stop"
+pending="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_stop_pending}')"
+[ -z "$pending" ] && ok "idle-injected cur/ does not set stop_pending" \
+  || bad "idle-injected cur/ does not set stop_pending" "got: $pending"
+muxa_as "$alice_pane" hook idle >/dev/null
+python3 - "$(muxa_box alice)/cur" <<'PY'
+import os, sys, time
+d = sys.argv[1]
+if not os.path.isdir(d):
+    raise SystemExit(0)
+now = time.time()
+for name in os.listdir(d):
+    p = os.path.join(d, name)
+    if os.path.isfile(p):
+        os.utime(p, (now - 5, now - 5))
+PY
+muxa_as "$alice_pane" hook stop --format cursor >/dev/null
 find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
 find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
 
