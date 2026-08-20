@@ -970,10 +970,11 @@ pane_inject_verdict() {
   case "$kind" in
     claude|cursor|pi)
       if [ "${MUXA_COMPOSER_CHECK:-1}" != "0" ]; then
-        # Bootstrap inject (hook pane, drain path not yet proven) must not
-        # wait for a recognised composer — splash/unknown would deadlock E4.
-        if [ "$(pane_fmt "$pane" '#{@muxa_deliver}')" = "hook" ] && \
-           [ "$(pane_fmt "$pane" '#{@muxa_hook_ok}')" != "1" ]; then
+        # First brief only: splash/unknown must not deadlock spawn. After
+        # @muxa_hook_ok, idle hook inject uses the same composer-empty gate
+        # as inject-kind panes (do not paste over typed input).
+        if [ "$(pane_fmt "$pane" '#{@muxa_deliver}')" = "hook" ] \
+           && [ "$(pane_fmt "$pane" '#{@muxa_hook_ok}')" != "1" ]; then
           printf 'empty'
           return
         fi
@@ -988,7 +989,8 @@ pane_inject_verdict() {
 }
 
 # Two agreeing reads, COMPOSER_SETTLE apart, both empty — only when composer
-# parsing is in play. Generic panes skip the settle delay (Q2).
+# parsing is in play. Generic panes skip the settle delay (Q2). Hook panes
+# skip it too until @muxa_hook_ok (same first-brief exception as verdict).
 pane_inject_ready() {
   local pane="$1" kind="$2" a b deliver hook_ok
   a="$(pane_inject_verdict "$pane" "$kind")"
@@ -1371,7 +1373,7 @@ kick_wait() {
 
 send_one() {
   local from="$1" to="$2" flags="$3" body="$4"
-  local pane state deliver id list lock kind cwd cmd
+  local pane state deliver id list lock kind cwd cmd wait_composer verdict
   if [ "$to" = "$from" ]; then
     return 0
   fi
@@ -1398,32 +1400,44 @@ send_one() {
       fi
       ;;
     *)
-      # An idle hook pane is still a hook pane. Do not type at it —
-      # unless we have never seen its Stop hook fire, in which case queueing
-      # would deadlock the very first brief.
-      if [ "$deliver" = "hook" ] && [ "$(pane_fmt "$pane" '#{@muxa_hook_ok}')" = "1" ]; then
-        refresh_unread "$pane" "$to"
-        printf 'queued %s → %s id=%s (idle; next turn will drain)\n' "$from" "$to" "$id"
-      else
-        # Per-pane lock around claim→inject, held across ENTER_DELAY (E13/E22).
-        list="$(runtime_root)/send-$$-$RANDOM.list"
-        lock="$(kick_wait_lock "$pane")"
-        mkdir -p "$(runtime_root)"
-        if lock_acquire "$lock" 100; then
-          claim_new "$to" >"$list" || true
-          if [ -s "$list" ] && deliver_list "$pane" "$list"; then
-            printf 'delivered %s → %s id=%s\n' "$from" "$to" "$id"
-          else
-            refresh_unread "$pane" "$to"
-            printf 'queued %s → %s id=%s\n' "$from" "$to" "$id"
-          fi
+      # Idle panes inject via paste-buffer + Enter. After @muxa_hook_ok,
+      # that includes hook panes — but only when the composer is empty;
+      # otherwise queue and spawn kick_wait. Busy/blocked hook mail stays
+      # on the Stop-hook drain. Per-pane lock around claim→inject, held
+      # across ENTER_DELAY (E13/E22).
+      list="$(runtime_root)/send-$$-$RANDOM.list"
+      lock="$(kick_wait_lock "$pane")"
+      wait_composer=0
+      mkdir -p "$(runtime_root)"
+      if lock_acquire "$lock" 100; then
+        claim_new "$to" >"$list" || true
+        if [ -s "$list" ] && deliver_list "$pane" "$list"; then
+          printf 'delivered %s → %s id=%s\n' "$from" "$to" "$id"
           lock_release "$lock"
         else
           refresh_unread "$pane" "$to"
-          printf 'queued %s → %s id=%s\n' "$from" "$to" "$id"
+          lock_release "$lock"
+          if [ -s "$list" ] && [ "$deliver" = "hook" ] \
+             && [ "$(pane_fmt "$pane" '#{@muxa_hook_ok}')" = "1" ] \
+             && [ "$(pane_fmt "$pane" '#{pane_dead}')" != "1" ] \
+             && [ "$(pane_fmt "$pane" '#{pane_in_mode}')" != "1" ]; then
+            verdict="$(pane_inject_verdict "$pane" "$kind")"
+            if [ "$verdict" != "empty" ]; then
+              spawn_kick_wait "$pane" "$to"
+              wait_composer=1
+            fi
+          fi
+          if [ "$wait_composer" -eq 1 ]; then
+            printf 'queued %s → %s id=%s (waiting for idle)\n' "$from" "$to" "$id"
+          else
+            printf 'queued %s → %s id=%s\n' "$from" "$to" "$id"
+          fi
         fi
-        rm -f "$list"
+      else
+        refresh_unread "$pane" "$to"
+        printf 'queued %s → %s id=%s\n' "$from" "$to" "$id"
       fi
+      rm -f "$list"
       ;;
   esac
 }
