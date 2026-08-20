@@ -48,17 +48,23 @@ Repo helpers (git only, no tmux):
                                 checkout sits on BRANCH (default: origin/HEAD,
                                 else main) and each WORKTREE is a linked worktree
                                 of this repo. exit 0 all ok, 1 any failure
-  muxa jobs add JOB kind=ship|research delivery=pr|local|pipeline [worker=..]
-                [worktree=..] [branch=..] [note=..]
+  muxa jobs add JOB [kind=ship|research] [delivery=pr|local|pipeline]
+                [worker=..] [worktree=..] [branch=..] [note=..]
+                                attach runtime worker/worktree/branch to an
+                                existing br issue (does not create issues).
+                                JOB is a br id, unique title, or unique slug.
+                                No whitespace — titles like 'command-post: foo'
+                                are addressed by br id
   muxa jobs set JOB key=value...    keys: kind delivery worker worktree branch
                                     status pr note
   muxa jobs done JOB [pr=URL]       mark done (PR URL is the br close reason)
-  muxa jobs list                    backlog table (status: open running blocked
-                                    done dropped)
-                                durable store is br (.beads/). worker/worktree/
-                                branch are runtime-only under
-                                $XDG_STATE_HOME/muxa/jobs. br is required;
-                                muxa auto-inits .beads/ on first use
+  muxa jobs list                    runtime map (status: open running blocked
+                                    done dropped). JOB column is the br id
+                                durable kind/delivery/status live on br
+                                (.beads/). worker/worktree/branch are
+                                runtime-only under $XDG_STATE_HOME/muxa/jobs.
+                                br is required; muxa auto-inits .beads/ on
+                                first use
 
 Reachability: a parent may message its children; a child may message its
 parent. Children cannot message each other. Roots (no parent) cannot
@@ -1921,8 +1927,9 @@ cmd_preflight() {
   [ "$PREFLIGHT_FAIL" -eq 0 ] || return 1
 }
 
-# --- jobs: br is the durable backlog; TSV holds runtime-only fields ----------
-# Runtime TSV: job worker worktree branch
+# --- jobs: runtime map (worker/worktree/branch) keyed by existing br id ------
+# Durable kind/delivery/status live on br. TSV never creates br issues.
+# Runtime TSV: job(id) worker worktree branch
 JOBS_RUNTIME_HEADER=$'#job\tworker\tworktree\tbranch'
 JOBS_LEGACY_HEADER=$'#job\tkind\tdelivery\tworker\tworktree\tbranch\tstatus\tpr\tnote\tupdated'
 JOBS_BR_INSTALL='cargo install --git https://github.com/Dicklesworthstone/beads_rust.git beads_rust --locked  (https://github.com/Dicklesworthstone/beads_rust)'
@@ -1956,7 +1963,7 @@ jobs_clean() {
 jobs_check_name() {
   case "$1" in
     "" | '#'*) die "jobs: bad job name '$1'" ;;
-    *[[:space:]]*) die "jobs: job name must not contain whitespace: '$1'" ;;
+    *[[:space:]]*) die "jobs: job name must not contain whitespace: '$1' (use the br id)" ;;
   esac
 }
 
@@ -1984,6 +1991,15 @@ jobs_replace_row() {
   tmp="$file.tmp.$$"
   MUXA_JOB_KEY="$2" MUXA_JOB_ROW="$3" \
     awk -F '\t' '$1 == ENVIRON["MUXA_JOB_KEY"] { print ENVIRON["MUXA_JOB_ROW"]; next } { print }' \
+    "$file" >"$tmp"
+  mv "$tmp" "$file"
+}
+
+jobs_drop_row() {
+  local file="$1" tmp
+  [ -n "$2" ] || return 0
+  tmp="$file.tmp.$$"
+  MUXA_JOB_KEY="$2" awk -F '\t' '$1 == ENVIRON["MUXA_JOB_KEY"] { next } { print }' \
     "$file" >"$tmp"
   mv "$tmp" "$file"
 }
@@ -2035,12 +2051,22 @@ def as_issues(data):
     return []
 
 def find_issue(iss, job):
+    if not job:
+        return None
     hit = [i for i in iss if i.get("id") == job]
     if hit:
         return hit[0]
     hit = [i for i in iss if i.get("title") == job]
     if len(hit) > 1:
         sys.stderr.write("muxa: jobs: multiple issues titled '%s'\n" % job)
+        sys.exit(2)
+    if len(hit) == 1:
+        return hit[0]
+    # br --slug X embeds as {prefix}-{slug}-{hash}
+    slug_re = re.compile(r"(?:^|-)%s-[a-z0-9]+$" % re.escape(job))
+    hit = [i for i in iss if slug_re.search(i.get("id") or "")]
+    if len(hit) > 1:
+        sys.stderr.write("muxa: jobs: multiple issues match '%s'\n" % job)
         sys.exit(2)
     return hit[0] if hit else None
 
@@ -2085,24 +2111,23 @@ def pr_of(issue):
         return "-"
     return cell(ext)
 
-def load_runtime(path):
-    out = {}
+def load_runtime_rows(path):
+    rows = []
     if not path or not os.path.isfile(path):
-        return out
+        return rows
     with open(path) as fh:
         for line in fh:
             line = line.rstrip("\n")
             if not line or line.startswith("#"):
                 continue
             parts = line.split("\t")
-            if parts:
-                out[parts[0]] = parts
-    return out
+            if parts and parts[0]:
+                rows.append(parts)
+    return rows
 
-def rt(runtime, title, idx):
-    row = runtime.get(title) or []
-    if len(row) > idx:
-        return cell(row[idx])
+def cell_at(parts, idx):
+    if len(parts) > idx:
+        return cell(parts[idx])
     return "-"
 
 op = sys.argv[1]
@@ -2150,25 +2175,50 @@ elif op == "labels":
     print(",".join(labs))
 elif op == "list":
     runtime_path = rest[0] if rest else ""
-    runtime = load_runtime(runtime_path)
-    print("%-16s %-8s %-9s %-9s %-14s %-22s %-28s %-21s %-32s %s" % (
-        "JOB", "STATUS", "KIND", "DELIVERY", "WORKER", "BRANCH", "WORKTREE",
-        "UPDATED", "PR", "NOTE"))
+    rows = load_runtime_rows(runtime_path)
+    issues = as_issues(data)
+    by_id = {i.get("id"): i for i in issues if i.get("id")}
+    by_title = {}
+    for i in issues:
+        t = i.get("title")
+        if t:
+            by_title.setdefault(t, []).append(i)
+    print("%-24s %-24s %-8s %-9s %-9s %-14s %-22s %-28s %-21s %-32s %s" % (
+        "JOB", "TITLE", "STATUS", "KIND", "DELIVERY", "WORKER", "BRANCH",
+        "WORKTREE", "UPDATED", "PR", "NOTE"))
     n = 0
-    for issue in as_issues(data):
+    for parts in rows:
+        key = parts[0]
+        issue = by_id.get(key)
+        if issue is None:
+            hits = by_title.get(key) or []
+            if len(hits) == 1:
+                issue = hits[0]
         n += 1
-        title = issue.get("title") or issue.get("id") or "-"
-        print("%-16s %-8s %-9s %-9s %-14s %-22s %-28s %-21s %-32s %s" % (
+        if issue:
+            job_id = issue.get("id") or key
+            title = issue.get("title") or "-"
+            status = muxa_status(issue)
+            kind = label_val(issue, "kind")
+            delivery = label_val(issue, "delivery")
+            updated = ts(issue)
+            pr = pr_of(issue)
+            note = cell(issue.get("description"))
+        else:
+            job_id = key
+            title = status = kind = delivery = updated = pr = note = "-"
+        print("%-24s %-24s %-8s %-9s %-9s %-14s %-22s %-28s %-21s %-32s %s" % (
+            job_id,
             title,
-            muxa_status(issue),
-            label_val(issue, "kind"),
-            label_val(issue, "delivery"),
-            rt(runtime, title, 1),
-            rt(runtime, title, 3),
-            rt(runtime, title, 2),
-            ts(issue),
-            pr_of(issue),
-            cell(issue.get("description")),
+            status,
+            kind,
+            delivery,
+            cell_at(parts, 1),
+            cell_at(parts, 3),
+            cell_at(parts, 2),
+            updated,
+            pr,
+            note,
         ))
     if n == 0:
         print("(no jobs)")
@@ -2206,9 +2256,7 @@ jobs_br() {
 }
 
 jobs_br_list() {
-  local prefix
-  prefix="$(jobs_br_prefix)"
-  jobs_br list --all --deferred -l "project:$prefix"
+  jobs_br list --all --deferred
 }
 
 jobs_legacy_has_open() {
@@ -2241,7 +2289,7 @@ jobs_runtime_prepare() {
   fi
   if [ "$first" = "$JOBS_LEGACY_HEADER" ]; then
     if jobs_legacy_has_open "$file"; then
-      die "jobs: leftover open jobs in $file; br is now the durable store. Recreate them with muxa jobs add, then delete that file"
+      die "jobs: leftover open jobs in $file; br is now the durable store. Recreate them in br, muxa jobs add <id>, then delete that file"
     fi
     tmp="$file.tmp.$$"
     jobs_legacy_to_runtime "$file" >"$tmp"
@@ -2271,6 +2319,21 @@ EOF
 
 jobs_issue_status() {
   python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("status",""))' "$1"
+}
+
+jobs_issue_title() {
+  python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("title") or "")' "$1"
+}
+
+# Drop leftover TSV keys (title/slug) now that the row is keyed by br id.
+jobs_runtime_rekey() {
+  local file="$1" id="$2" job="$3" title="$4"
+  if [ "$job" != "$id" ]; then
+    jobs_drop_row "$file" "$job"
+  fi
+  if [ -n "$title" ] && [ "$title" != "$id" ] && [ "$title" != "$job" ]; then
+    jobs_drop_row "$file" "$title"
+  fi
 }
 
 jobs_close() {
@@ -2312,13 +2375,11 @@ jobs_apply() {
   jobs_lock "$lock"
   trap 'lock_release "'"$lock"'.lock"' EXIT
   json="$(jobs_br_list)"
-  if ! issue="$(jobs_py issue "$job" "$json")"; then
-    die "jobs: unknown job '$job' — muxa jobs list"
-  fi
   id="$(jobs_py find-id "$job" "$json")"
   if [ -z "$id" ]; then
-    die "jobs: unknown job '$job' — muxa jobs list"
+    die "jobs: unknown job '$job'"
   fi
+  issue="$(jobs_py issue "$job" "$json")"
   labs=""
   if [ "$kind_set" -eq 1 ] || [ "$delivery_set" -eq 1 ]; then
     labs="$(jobs_py labels "$kind" "$delivery" "$issue")"
@@ -2368,7 +2429,8 @@ jobs_apply() {
     esac
   fi
   if [ "$runtime_set" -eq 1 ]; then
-    jobs_runtime_upsert "$file" "$job" "$worker" "$worktree" "$branch"
+    jobs_runtime_upsert "$file" "$id" "$worker" "$worktree" "$branch"
+    jobs_runtime_rekey "$file" "$id" "$job" "$(jobs_issue_title "$issue")"
   fi
   lock_release "$lock.lock"
   trap - EXIT
@@ -2377,45 +2439,57 @@ jobs_apply() {
 cmd_jobs_add() {
   local file="$1" job="$2"
   shift 2
-  local pair key val lock json prefix
+  local pair key val lock json issue id labs
   local kind="" delivery="" worker="" worktree="" branch="" note=""
+  local kind_set=0 delivery_set=0 note_set=0
   for pair in "$@"; do
     case "$pair" in *=*) ;; *) die "jobs add: expected key=value, got '$pair'" ;; esac
     key="${pair%%=*}"
     val="${pair#*=}"
     case "$key" in
-      kind) kind="$val" ;;
-      delivery) delivery="$val" ;;
+      kind) kind="$val"; kind_set=1 ;;
+      delivery) delivery="$val"; delivery_set=1 ;;
       worker) worker="$val" ;;
       worktree) worktree="$val" ;;
       branch) branch="$val" ;;
-      note) note="$val" ;;
+      note) note="$val"; note_set=1 ;;
       status|pr) die "jobs add: '$key' is set later (muxa jobs set|done)" ;;
       *) die "jobs add: unknown key '$key'" ;;
     esac
   done
-  [ -n "$kind" ] || die "jobs add: kind=ship|research required"
-  [ -n "$delivery" ] || die "jobs add: delivery=pr|local|pipeline required"
-  jobs_check_kind "$kind"
-  jobs_check_delivery "$delivery"
+  [ "$kind_set" -eq 1 ] && jobs_check_kind "$kind"
+  [ "$delivery_set" -eq 1 ] && jobs_check_delivery "$delivery"
   lock="$file"
   jobs_lock "$lock"
   trap 'lock_release "'"$lock"'.lock"' EXIT
   json="$(jobs_br_list)"
-  if [ -n "$(jobs_py find-id "$job" "$json")" ]; then
-    die "jobs add: job '$job' already exists"
+  id="$(jobs_py find-id "$job" "$json")"
+  if [ -z "$id" ]; then
+    die "jobs add: unknown job '$job' — pass an existing br id"
   fi
-  prefix="$(jobs_br_prefix)"
-  set -- create --title "$job" --slug "$job" -t task \
-    -l "kind:$kind,delivery:$delivery,project:$prefix"
-  if [ -n "$note" ]; then
-    set -- "$@" -d "$note"
+  issue="$(jobs_py issue "$job" "$json")"
+  if [ -n "$(jobs_row "$file" "$id")" ]; then
+    die "jobs add: job '$id' already exists"
   fi
-  jobs_br "$@" >/dev/null
-  jobs_runtime_upsert "$file" "$job" "$worker" "$worktree" "$branch"
+  labs=""
+  if [ "$kind_set" -eq 1 ] || [ "$delivery_set" -eq 1 ]; then
+    labs="$(jobs_py labels "$kind" "$delivery" "$issue")"
+  fi
+  set --
+  if [ -n "$labs" ]; then
+    set -- "$@" --set-labels "$labs"
+  fi
+  if [ "$note_set" -eq 1 ]; then
+    set -- "$@" --description "$note"
+  fi
+  if [ $# -gt 0 ]; then
+    jobs_br update "$id" "$@" >/dev/null
+  fi
+  jobs_runtime_upsert "$file" "$id" "$worker" "$worktree" "$branch"
+  jobs_runtime_rekey "$file" "$id" "$job" "$(jobs_issue_title "$issue")"
   lock_release "$lock.lock"
   trap - EXIT
-  printf 'added %s kind=%s delivery=%s status=open\n' "$job" "$kind" "$delivery"
+  printf 'added %s\n' "$id"
 }
 
 cmd_jobs_list() {

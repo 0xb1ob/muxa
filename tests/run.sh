@@ -1176,7 +1176,7 @@ set -e
 [ "$pf_code" -eq 2 ] && ok "preflight unknown flag exits 2" \
   || bad "preflight unknown flag exits 2" "exit=$pf_code"
 
-# --- jobs backlog (br durable store; no tmux) ---
+# --- jobs runtime map (br durable fields; TSV worker/worktree/branch; no tmux) ---
 jobs_state="$tmpdir/state"
 jobs_cli() {
   (cd "$pf_repo" && XDG_STATE_HOME="$jobs_state" "$ROOT/bin/muxa" jobs "$@")
@@ -1186,6 +1186,24 @@ jobs_code() {
   jobs_cli "$@" >/dev/null 2>&1
   jobs_status=$?
   set -e
+}
+br_json() {
+  (cd "$pf_repo" && br --actor testdriver --json --no-color "$@")
+}
+br_create() {
+  br_json create "$@" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])'
+}
+br_total() {
+  br_json list --all | python3 -c 'import json,sys; d=json.load(sys.stdin); print(int(d.get("total") or 0))'
+}
+muxa_created_titles() {
+  br_json list --all | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+for i in d.get("issues") or []:
+    if i.get("created_by") == "muxa":
+        print(i.get("title") or "")
+'
 }
 
 nobr_path=""
@@ -1213,17 +1231,25 @@ assert_contains "$jobs_nobr_err" "Dicklesworthstone/beads_rust" "missing br incl
   || bad "missing br does not init .beads" "unexpected .beads under $pf_repo"
 
 jobs_out="$(jobs_cli list)"
-assert_contains "$jobs_out" "(no jobs)" "empty backlog lists nothing"
+assert_contains "$jobs_out" "(no jobs)" "empty runtime map lists nothing"
 assert_contains "$jobs_out" "UPDATED" "jobs list header has UPDATED"
+assert_contains "$jobs_out" "TITLE" "jobs list header has TITLE"
 [ -d "$pf_repo/.beads" ] && ok "jobs list auto-inits .beads" \
   || bad "jobs list auto-inits .beads" "no .beads under $pf_repo after muxa jobs list"
 
-jobs_out="$(jobs_cli add api kind=ship delivery=pr worker=bob branch=feat/api note='wire the endpoint')"
-assert_contains "$jobs_out" "added api" "jobs add confirms"
-jobs_cli add notes kind=research delivery=local >/dev/null
+api_id="$(br_create --title api -t task -l "kind:ship,delivery:pr" -d "wire the endpoint")"
+br_create --title notes -t task -l "kind:research,delivery:local" >/dev/null
+jobs_before="$(br_total)"
+jobs_out="$(jobs_cli add api worker=bob branch=feat/api)"
+assert_contains "$jobs_out" "added $api_id" "jobs add confirms the br id"
+jobs_cli add notes >/dev/null
+jobs_after="$(br_total)"
+[ "$jobs_before" = "$jobs_after" ] && ok "jobs add does not create a br issue" \
+  || bad "jobs add does not create a br issue" "before=$jobs_before after=$jobs_after"
 
 jobs_out="$(jobs_cli list)"
-assert_contains "$jobs_out" "api" "jobs list shows added job"
+assert_contains "$jobs_out" "$api_id" "jobs list JOB column is the br id"
+assert_contains "$jobs_out" "api" "jobs list shows the title"
 assert_contains "$jobs_out" "open" "jobs add starts at open"
 assert_contains "$jobs_out" "wire the endpoint" "jobs list shows the note"
 assert_contains "$jobs_out" "notes" "jobs list shows the second job"
@@ -1262,7 +1288,21 @@ if [ -n "$tsv" ]; then
   else
     ok "runtime TSV does not duplicate durable fields"
   fi
+  if grep -q "^${api_id}"$'\t' "$tsv"; then
+    ok "runtime TSV is keyed by br id"
+  else
+    bad "runtime TSV is keyed by br id" "tsv=$(cat "$tsv")"
+  fi
+  if grep -q "^api"$'\t' "$tsv"; then
+    bad "runtime TSV is not keyed by title" "tsv=$(cat "$tsv")"
+  else
+    ok "runtime TSV is not keyed by title"
+  fi
 fi
+
+muxa_stubs="$(muxa_created_titles)"
+[ -z "$muxa_stubs" ] && ok "jobs add leaves no created_by=muxa stub issues" \
+  || bad "jobs add leaves no created_by=muxa stub issues" "titles=$muxa_stubs"
 
 jobs_code set nope status=open
 [ "$jobs_status" -eq 2 ] && ok "jobs set unknown job exits 2" \
@@ -1270,30 +1310,68 @@ jobs_code set nope status=open
 jobs_code done nope
 [ "$jobs_status" -eq 2 ] && ok "jobs done unknown job exits 2" \
   || bad "jobs done unknown job exits 2" "exit=$jobs_status"
-jobs_code add api kind=ship delivery=pr
+jobs_code add api worker=bob
 [ "$jobs_status" -eq 2 ] && ok "duplicate jobs add exits 2" \
   || bad "duplicate jobs add exits 2" "exit=$jobs_status"
+jobs_before="$(br_total)"
+jobs_code add missing-job worker=bob
+[ "$jobs_status" -eq 2 ] && ok "jobs add unknown br id exits 2" \
+  || bad "jobs add unknown br id exits 2" "exit=$jobs_status"
+jobs_after="$(br_total)"
+[ "$jobs_before" = "$jobs_after" ] && ok "unknown jobs add does not create a stub issue" \
+  || bad "unknown jobs add does not create a stub issue" "before=$jobs_before after=$jobs_after"
 jobs_code add other kind=nope delivery=pr
 [ "$jobs_status" -eq 2 ] && ok "jobs add bad kind exits 2" \
   || bad "jobs add bad kind exits 2" "exit=$jobs_status"
-jobs_code add other kind=ship
-[ "$jobs_status" -eq 2 ] && ok "jobs add without delivery exits 2" \
-  || bad "jobs add without delivery exits 2" "exit=$jobs_status"
 jobs_code set api bogus=1
 [ "$jobs_status" -eq 2 ] && ok "jobs set unknown key exits 2" \
   || bad "jobs set unknown key exits 2" "exit=$jobs_status"
 
-(cd "$pf_repo" && br create --title "stray-bead" -t task -d "not a muxa job" >/dev/null)
+(cd "$pf_repo" && br --actor testdriver create --title "stray-bead" -t task -d "not a muxa job" >/dev/null)
 jobs_out="$(jobs_cli list)"
 case "$jobs_out" in
-  *stray-bead*) bad "jobs list excludes non-muxa br issues" "out=$jobs_out" ;;
-  *) ok "jobs list excludes non-muxa br issues" ;;
+  *stray-bead*) bad "jobs list is the runtime map, not the br backlog" "out=$jobs_out" ;;
+  *) ok "jobs list is the runtime map, not the br backlog" ;;
 esac
 
-(cd "$pf_repo" && br create --title "shared-title" -t task >/dev/null)
-jobs_cli add shared-title kind=research delivery=local >/dev/null
+shared_id="$(br_create --title "shared-title" -t task -l "kind:research,delivery:local")"
+jobs_before="$(br_total)"
+jobs_cli add shared-title worker=pat >/dev/null
+jobs_after="$(br_total)"
+[ "$jobs_before" = "$jobs_after" ] && ok "jobs add attaches to an existing title without a duplicate issue" \
+  || bad "jobs add attaches to an existing title without a duplicate issue" "before=$jobs_before after=$jobs_after"
 jobs_out="$(jobs_cli list)"
-assert_contains "$jobs_out" "shared-title" "jobs add succeeds when non-muxa issue shares title"
+assert_contains "$jobs_out" "$shared_id" "jobs add by unique title records the br id"
+assert_contains "$jobs_out" "pat" "jobs add by title stores the worker"
+
+ws_id="$(br_create --title "command-post: foo" -t task -l "kind:ship,delivery:pr")"
+jobs_before="$(br_total)"
+jobs_out="$(jobs_cli add "$ws_id" worker=alice worktree="$pf_wt")"
+jobs_after="$(br_total)"
+[ "$jobs_before" = "$jobs_after" ] && ok "jobs add by id does not create a stub for a whitespace title" \
+  || bad "jobs add by id does not create a stub for a whitespace title" "before=$jobs_before after=$jobs_after"
+assert_contains "$jobs_out" "added $ws_id" "jobs add by id confirms"
+jobs_code set "command-post: foo" worker=x
+[ "$jobs_status" -eq 2 ] && ok "jobs set rejects a whitespace title" \
+  || bad "jobs set rejects a whitespace title" "exit=$jobs_status"
+jobs_cli set "$ws_id" worker=carol >/dev/null
+jobs_out="$(jobs_cli list)"
+assert_contains "$jobs_out" "$ws_id" "jobs list shows the br id for a whitespace title"
+assert_contains "$jobs_out" "command-post: foo" "jobs list shows the human title"
+assert_contains "$jobs_out" "carol" "jobs set by br id updates runtime fields"
+
+slug_id="$(br_create --title "ship the widget" --slug widget -t task -l "kind:ship,delivery:pr")"
+jobs_cli add widget worker=slugger >/dev/null
+jobs_out="$(jobs_cli list)"
+assert_contains "$jobs_out" "$slug_id" "jobs add by slug attaches the br id"
+assert_contains "$jobs_out" "slugger" "jobs add by slug stores the worker"
+
+bare_id="$(br_create --title bare -t task)"
+jobs_cli add "$bare_id" kind=research delivery=local worker=kim >/dev/null
+jobs_out="$(jobs_cli list)"
+assert_contains "$jobs_out" "research" "jobs add can stamp kind on an existing issue"
+assert_contains "$jobs_out" "local" "jobs add can stamp delivery on an existing issue"
+assert_contains "$jobs_out" "kim" "jobs add without prior kind still stores the worker"
 
 jobs_cli set api status=open >/dev/null
 jobs_out="$(jobs_cli list)"

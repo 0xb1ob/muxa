@@ -309,6 +309,28 @@ claimed-and-lost timeout. Do nothing new: treat it as the same job.
 
 Role instructions live in the **muxa-parent** and **muxa-worker** skills.
 
+## Jobs (runtime map)
+
+`muxa jobs` is a per-repo **runtime map**: which worker, worktree, and
+branch are attached to an existing **br** issue. It is not the backlog,
+not an orchestrator, and not a TUI.
+
+Durable fields (kind, delivery, status, PR URL, note) live on the br
+issue. Runtime fields (worker, worktree, branch) live only in
+`$XDG_STATE_HOME/muxa/jobs/<repo>-<hash>.tsv`, keyed by br issue id.
+
+`muxa jobs add JOB …` attaches runtime fields to an issue that already
+exists in br. It MUST NOT create a br issue. `JOB` is a br issue id, a
+unique title, or a unique `--slug` token embedded in the id. Job keys
+MUST NOT contain whitespace. Human titles may (`command-post: foo`);
+those jobs are addressed by br id. Do not invent a third ledger (no
+`note=<br-id>` join).
+
+`muxa jobs list` prints the runtime map joined to br, not every issue in
+`.beads/`. `muxa jobs set` / `done` update runtime rows and/or durable
+br fields. Unknown keys exit 2. `br` is required; muxa auto-inits
+`.beads/` on first use.
+
 ## Trust
 
 Every pane on the tmux server is fully trusted. Injecting into a pane is

@@ -169,7 +169,7 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 | `muxa deliver [--force] [NAME]` | Claim + inject now (escape hatch). Prechecks by default; `--force` skips them |
 | `muxa hook stop --format claude\|cursor\|pi` | Native continue payload |
 | `muxa preflight [--base BRANCH] [WORKTREE...]` | Repo checks before handing out jobs (git only, no tmux) |
-| `muxa jobs add\|set\|done\|list` | Job backlog map. Durable fields live in **br** (`.beads/`); worker/worktree/branch are runtime-only. `br` is required; muxa auto-inits `.beads/` on first use |
+| `muxa jobs add\|set\|done\|list` | Runtime map (worker/worktree/branch) for **existing** br issues. Does not create br issues or act as the backlog. Address jobs by br id (titles may contain whitespace). Durable kind/delivery/status stay on br. `br` is required; muxa auto-inits `.beads/` on first use |
 
 ## Tests
 
