@@ -903,6 +903,9 @@ assert_contains "$flag_ok" "cwd=$fromflag_abs" "spawn -- before command honors -
 flag_child="$(muxa_as "$bob_pane" spawn --name flag-child-flags -- sh -c 'exec sleep 3600' -- --cwd "$spawn_flag")"
 assert_contains "$flag_child" "spawned flag-child-flags" "child flags after -- are allowed"
 
+flag_child_sep="$(muxa_as "$bob_pane" spawn --name flag-child-sep sh -c 'exec sleep 3600' -- --cwd "$spawn_flag")"
+assert_contains "$flag_child_sep" "spawned flag-child-sep" "child -- separator allows later muxa-like flags"
+
 # --- spawn cwd occupancy: warn on stderr, still create the pane ---
 occ_dir="$tmpdir/occ-cwd"
 occ_git="$tmpdir/occ-git"

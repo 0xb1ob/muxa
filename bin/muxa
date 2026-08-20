@@ -1719,6 +1719,7 @@ cmd_spawn() {
     shift
     for arg in "$@"; do
       case "$arg" in
+        --) break ;;
         --name|--kind|--cwd|--split|--window)
           die "spawn: $arg must precede the command (use: muxa spawn --name NAME --cwd DIR -- COMMAND…)"
           ;;
