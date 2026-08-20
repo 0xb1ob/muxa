@@ -47,19 +47,23 @@ muxa uses surfaces the CLIs already pay for:
 ```
 busy / permission prompt  →  write maildir, do not touch the TUI
                              Claude/Cursor/Pi Stop hook claims mail and continues
-idle hook pane            →  write maildir + @muxa_unread badge
-                             (an idle Cursor is still a TUI, not a shell prompt)
+idle hook pane            →  paste-buffer + Enter (same as the first brief),
+                             except never into copy-mode or a dead pane
 idle inject pane          →  paste-buffer, except never into copy-mode, a dead
                              pane, or a generic pane on the alternate screen
 ```
 
-The first brief to a freshly spawned hook pane is still injected: spawn
-marks `hook+idle` before the CLI boots, and no Stop hook exists until a
-turn has run. After the first successful `muxa hook stop`, further idle
-sends queue. Stop drains that queue when the turn ends — including for
-an IDE-hosted Cursor root whose pane is only a tmux registration, not
-the agent process. Claimed mail stays visible in `muxa peek` / `muxa who`
-UNREAD until a later Stop proves it was consumed.
+The first brief to a freshly spawned hook pane is injected: spawn marks
+`hook+idle` before the CLI boots, and no Stop hook exists until a turn
+has run. After the first successful `muxa hook stop`, idle hook sends
+still inject — the parent may already have Stopped, so queueing until
+the next turn would sit unread until a human types. Busy/blocked hook
+panes still queue; Stop drains that queue when the turn ends —
+including for an IDE-hosted Cursor root whose pane is only a tmux
+registration, not the agent process. Claimed mail stays visible in
+`muxa peek` / `muxa who` UNREAD until a later Stop proves it was
+consumed. If inject fails (copy-mode, dead pane, size limit), the claim
+is reversed and mail stays queued.
 
 tmux user options are the roster (`@muxa_name`, `@muxa_kind`, `@muxa_state`,
 `@muxa_deliver`, `@muxa_session`, `@muxa_hook_ok`, `@muxa_unread`). `tmux list-panes` is service discovery. Maildir (`tmp/new/cur/done/dead`
@@ -81,8 +85,8 @@ set -g pane-border-format \
 ```
 
 `muxa who` has an `UNREAD` column counted from the maildir. There is no
-bell: ringing another pane's tty would be typing at it, which is the
-thing hook-pane queueing exists to avoid.
+bell: ringing another pane's tty would be typing at it. Idle inject is
+paste-buffer + Enter; queueing is for a busy TUI and for failed injects.
 
 ## Install
 

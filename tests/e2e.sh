@@ -271,32 +271,22 @@ printf '%s\n' "$sent" | grep -Eq 'delivered|queued' && ok "parent → pi send ($
 wait_pane_has "$cursor_pane" "$inject_u" 20 && ok "cursor TUI shows parent inject" || bad "cursor TUI shows parent inject" "$(pane_text "$cursor_pane" | tail -n 40)"
 wait_pane_has "$pi_pane" "$inject_p" 20 && ok "pi TUI shows parent inject" || bad "pi TUI shows parent inject" "$(pane_text "$pi_pane" | tail -n 40)"
 
-# A-path: once Stop has proven the drain, idle hook panes must not be pasted.
+# A-path: idle hook panes are injected even after Stop has proven the drain.
 wait_state cursor idle 30 || true
 cursor_hook_ok="$(tmux_e display-message -t "$cursor_pane" -p '#{@muxa_hook_ok}' 2>/dev/null || true)"
 a_path="MUXA_A_PATH_$TOKEN"
 if [ "$cursor_hook_ok" = "1" ]; then
   sent="$(muxa_as "$claude_pane" send --no-reply cursor "$a_path" 2>&1 || true)"
-  if printf '%s\n' "$sent" | grep -q 'next turn will drain'; then
-    ok "A-path: idle hook cursor queues"
+  if printf '%s\n' "$sent" | grep -q delivered; then
+    ok "A-path: idle hook cursor injects after hook_ok"
   else
-    bad "A-path: idle hook cursor queues" "$sent"
+    bad "A-path: idle hook cursor injects after hook_ok" "$sent"
   fi
-  unread="$(tmux_e display-message -t "$cursor_pane" -p '#{@muxa_unread}' 2>/dev/null || true)"
-  [ "$unread" = "1" ] && ok "A-path: @muxa_unread becomes 1" \
-    || bad "A-path: @muxa_unread becomes 1" "unread=$unread"
-  sleep 1
-  if pane_text "$cursor_pane" | grep -Fq "$a_path"; then
-    bad "A-path: body is not pasted immediately" "$(pane_text "$cursor_pane" | tail -n 20)"
-  else
-    ok "A-path: body is not pasted immediately"
-  fi
-  # Escape hatch so later hop tests are not blocked by leftover queued mail.
-  muxa_as "$claude_pane" deliver cursor >/dev/null 2>&1 || true
+  wait_pane_has "$cursor_pane" "$a_path" 15 && ok "A-path: body is pasted immediately" \
+    || bad "A-path: body is pasted immediately" "$(pane_text "$cursor_pane" | tail -n 20)"
 else
   ok "A-path skipped (cursor @muxa_hook_ok not yet 1)"
-  ok "A-path unread skipped"
-  ok "A-path no-paste skipped"
+  ok "A-path paste skipped"
 fi
 
 # B-live: copy-mode must queue, must not ghost-flush, deliver after cancel.
@@ -339,7 +329,7 @@ printf 'hop typed into claude pane\n'
 if wait_pane_has "$cursor_pane" "$hop" 20; then
   ok "cursor child received parent hop"
 else
-  # Fix A: an idle hook child queues until Stop; deliver is the escape hatch.
+  # Inject may have deferred (copy-mode / not ready); deliver is the escape hatch.
   muxa_as "$claude_pane" deliver cursor >/dev/null 2>&1 || true
   if wait_pane_has "$cursor_pane" "$hop" "$HOP_S"; then
     ok "cursor child received parent hop"

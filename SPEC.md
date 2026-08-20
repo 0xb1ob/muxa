@@ -168,9 +168,9 @@ alternate-screen are exact tmux facts; they are not optional polish.
 send(name, body):
   resolve name -> pane
   write maildir new/
-  if pane.deliver == hook and pane.hook_ok:
-      mark unread; return queued        # any state, including idle
   if pane.state in (busy, blocked):
+      if pane.deliver == hook:
+          mark unread; return queued        # Stop-hook drain
       spawn waiter (inject panes only); return queued
   if not pane_ready(pane):              # dead | copy-mode | generic alt-screen | composer
       mark unread; return queued
@@ -182,19 +182,23 @@ captures ~250 ms apart that both verdict `empty`. Known strings
 (`ctrl+c to stop`, `esc to interrupt`, braille spinners) may only raise
 caution (`pending`); an unrecognised layout is `unknown`. `kind=generic`
 skips composer parsing and relies on the cheap tmux facts so plain-shell
-injection keeps working. A hook pane whose `@muxa_hook_ok` is not yet
-set also skips composer so splash/unknown cannot deadlock the first brief.
+injection keeps working. Hook panes skip composer so splash/unknown
+cannot deadlock idle inject (the first brief and later idle sends).
+Busy/blocked hook panes never reach `pane_ready` — they queue for Stop.
 
 `muxa deliver NAME` runs the same prechecks and exits 1 if the pane is
 not ready. `muxa deliver --force NAME` skips them (human override) and
 prints a warning.
 
-The first message to a freshly spawned hook pane is still injected.
-That is intentional: `cmd_spawn` marks `deliver=hook` and `state=idle`
-before the CLI boots, and no Stop hook will run until a turn starts.
-`@muxa_hook_ok` is set only by `hook stop`, so queueing cannot deadlock
-the brief. After that proof, idle hook panes are never pasted — the
-Stop hook drains `new/` when the turn ends.
+Idle hook panes are injected with the same paste-buffer + Enter path as
+the first brief to a freshly spawned pane (`cmd_spawn` marks
+`deliver=hook` and `state=idle` before the CLI boots). After
+`@muxa_hook_ok` is set, idle sends still inject — queueing until the
+next Stop would leave mail unread while a standalone Cursor CLI parent
+sits idle. Busy and blocked hook panes stay on the Stop-hook drain.
+Inject prechecks (dead pane, copy-mode, generic alt-screen, size limit,
+ENTER_DELAY lock) still apply; on inject failure the claim is reversed
+and mail remains in `new/`.
 
 IDE-hosted Cursor sessions are not a process in the registered pane.
 Their hooks often inherit `TMUX` but not `TMUX_PANE`, so `display-message`

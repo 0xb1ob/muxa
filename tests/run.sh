@@ -403,7 +403,7 @@ i1, i2, i3 = text.find("ORDER_FIRST"), text.find("ORDER_SECOND"), text.find("ORD
 sys.exit(0 if -1 not in (i1, i2, i3) and i1 < i2 < i3 else 1)
 PY
 
-# --- @muxa_hook_ok gate (Fix A) ---
+# --- idle hook inject after Stop (CLI parent sitting idle) ---
 muxa_as "$alice_pane" register --name alice --kind claude --deliver hook --parent bob >/dev/null
 tmux -L "$SOCK" set-option -p -t "$alice_pane" -u @muxa_hook_ok 2>/dev/null || true
 muxa_as "$alice_pane" state idle
@@ -420,7 +420,7 @@ hook_ok="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_hook_ok}
 [ "$hook_ok" = "1" ] && ok "@muxa_hook_ok set on first hook stop" \
   || bad "@muxa_hook_ok set on first hook stop" "got: $hook_ok"
 # Bootstrap inject left a young cur/ claim; sweep it so UNREAD below is
-# only the queued idle send (Stop skips claims younger than 1s).
+# only the idle inject (Stop skips claims younger than 1s).
 python3 - "$(muxa_box alice)/cur" <<'PY'
 import os, sys, time
 d = sys.argv[1]
@@ -435,18 +435,14 @@ PY
 muxa_as "$alice_pane" hook stop --format claude >/dev/null
 muxa_as "$alice_pane" state idle
 : >"$alice_out"
-qidle="$(muxa_as "$bob_pane" send alice 'HOOK_QUEUE_BODY')"
-assert_contains "$qidle" "queued bob → alice id=" "idle hook pane queues after hook_ok"
-assert_contains "$qidle" "idle; next turn will drain" "idle hook queue reason"
-sleep 0.2
+idle_inj="$(muxa_as "$bob_pane" send alice 'HOOK_IDLE_INJECT')"
+assert_contains "$idle_inj" "delivered bob → alice" "idle hook pane injects after hook_ok"
+sleep 0.3
 got="$(cat "$alice_out" 2>/dev/null || true)"
-case "$got" in
-  *HOOK_QUEUE_BODY*) bad "idle hook pane is not pasted after hook_ok" "got: $got" ;;
-  *) ok "idle hook pane is not pasted after hook_ok" ;;
-esac
+assert_contains "$got" "HOOK_IDLE_INJECT" "idle hook pane is pasted after hook_ok"
 unread="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_unread}')"
-[ "$unread" = "1" ] && ok "@muxa_unread=1 after queued idle send" \
-  || bad "@muxa_unread=1 after queued idle send" "got: $unread"
+[ "$unread" = "1" ] && ok "@muxa_unread=1 after idle hook inject (cur/ until Stop)" \
+  || bad "@muxa_unread=1 after idle hook inject (cur/ until Stop)" "got: $unread"
 who="$(muxa_as "$bob_pane" who)"
 assert_contains "$who" "UNREAD" "who header has UNREAD"
 # UNREAD column is 8 chars starting at 114 (after STATUS)
@@ -455,17 +451,6 @@ who_unread="${who_unread#"${who_unread%%[![:space:]]*}"}"
 who_unread="${who_unread%"${who_unread##*[![:space:]]}"}"
 [ "$who_unread" = "1" ] && ok "who shows UNREAD=1" \
   || bad "who shows UNREAD=1" "got='$who_unread' line=$(printf '%s\n' "$who" | awk '$1=="alice"')"
-drain_q="$(muxa_as "$alice_pane" hook stop --format claude)"
-assert_contains "$drain_q" "HOOK_QUEUE_BODY" "hook stop drains queued idle mail"
-unread2="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_unread}')"
-[ "$unread2" = "1" ] && ok "@muxa_unread stays until claimed mail is swept" \
-  || bad "@muxa_unread stays until claimed mail is swept" "got: $unread2"
-who2="$(muxa_as "$bob_pane" who)"
-who_unread2="$(printf '%s\n' "$who2" | awk '$1=="alice" { print substr($0, 114, 8); exit }')"
-who_unread2="${who_unread2#"${who_unread2%%[![:space:]]*}"}"
-who_unread2="${who_unread2%"${who_unread2##*[![:space:]]}"}"
-[ "$who_unread2" = "1" ] && ok "who shows UNREAD=1 while claimed" \
-  || bad "who shows UNREAD=1 while claimed" "got='$who_unread2'"
 python3 - "$(muxa_box alice)/cur" <<'PY'
 import os, sys, time
 d = sys.argv[1]
@@ -479,6 +464,59 @@ muxa_as "$alice_pane" hook stop --format claude >/dev/null
 unread3="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_unread}')"
 [ -z "$unread3" ] && ok "@muxa_unread cleared after sweep" \
   || bad "@muxa_unread cleared after sweep" "got: $unread3"
+
+# --- busy hook pane queues for Stop ---
+muxa_as "$alice_pane" state busy
+: >"$alice_out"
+qbusy="$(muxa_as "$bob_pane" send alice 'HOOK_BUSY_QUEUE')"
+assert_contains "$qbusy" "queued bob → alice id=" "busy hook pane queues after hook_ok"
+assert_contains "$qbusy" "hook will drain" "busy hook queue reason"
+sleep 0.2
+got="$(cat "$alice_out" 2>/dev/null || true)"
+case "$got" in
+  *HOOK_BUSY_QUEUE*) bad "busy hook pane is not pasted" "got: $got" ;;
+  *) ok "busy hook pane is not pasted" ;;
+esac
+drain_busy="$(muxa_as "$alice_pane" hook stop --format claude)"
+assert_contains "$drain_busy" "HOOK_BUSY_QUEUE" "hook stop drains queued busy mail"
+python3 - "$(muxa_box alice)/cur" <<'PY'
+import os, sys, time
+d = sys.argv[1]
+now = time.time()
+for name in os.listdir(d):
+    p = os.path.join(d, name)
+    if os.path.isfile(p):
+        os.utime(p, (now - 5, now - 5))
+PY
+muxa_as "$alice_pane" hook stop --format claude >/dev/null
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
+
+# --- hook inject failure unclaims ---
+muxa_as "$alice_pane" state idle
+: >"$alice_out"
+tmux -L "$SOCK" copy-mode -t "$alice_pane"
+fail_sent="$(muxa_as "$bob_pane" send alice 'HOOK_FAIL_UNCLAIM' 2>&1)"
+assert_contains "$fail_sent" "queued bob → alice" "copy-mode hook send queues"
+sleep 0.2
+got="$(cat "$alice_out" 2>/dev/null || true)"
+case "$got" in
+  *HOOK_FAIL_UNCLAIM*) bad "copy-mode hook send does not paste" "got: $got" ;;
+  *) ok "copy-mode hook send does not paste" ;;
+esac
+peek_fail="$(muxa_as "$bob_pane" peek alice)"
+assert_contains "$peek_fail" "HOOK_FAIL_UNCLAIM" "peek still shows failed hook inject"
+case "$peek_fail" in
+  *claimed\ but\ unconfirmed*) bad "failed hook inject unclaims (not stuck in cur/)" "$peek_fail" ;;
+  *) ok "failed hook inject unclaims (not stuck in cur/)" ;;
+esac
+new_n="$(find "$(muxa_box alice)/new" -type f 2>/dev/null | awk 'END { print NR }')"
+cur_n="$(find "$(muxa_box alice)/cur" -type f 2>/dev/null | awk 'END { print NR }')"
+[ "$new_n" -ge 1 ] && [ "$cur_n" -eq 0 ] && ok "failed hook inject left mail in new/" \
+  || bad "failed hook inject left mail in new/" "new=$new_n cur=$cur_n"
+tmux -L "$SOCK" send-keys -t "$alice_pane" -X cancel 2>/dev/null || true
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
 
 # --- unread recompute under concurrency ---
 muxa_as "$alice_pane" state busy
@@ -859,7 +897,8 @@ find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
 find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
 
 # --- IDE Stop with no TMUX_PANE (GUI hook) ---
-muxa_as "$alice_pane" state idle
+# Busy so send queues for Stop; idle hook panes inject (tested above).
+muxa_as "$alice_pane" state busy
 muxa_as "$bob_pane" send alice 'NO_TMUX_PANE_DRAIN' >/dev/null
 no_pane_drain="$(printf '%s' '{"conversation_id":"ide-conv-9","status":"completed"}' | muxa hook stop --format cursor)"
 assert_contains "$no_pane_drain" "NO_TMUX_PANE_DRAIN" "stop without TMUX_PANE drains by conversation_id"
