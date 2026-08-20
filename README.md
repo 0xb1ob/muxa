@@ -62,7 +62,13 @@ has run — composer is skipped so splash cannot deadlock that send. After
 the first successful `muxa hook stop`, idle hook sends still inject, but
 only into an empty composer (the same two-capture gate as inject-kind
 panes). A prompt with typed text queues; `kick_wait` pastes when it
-clears. The parent may already have Stopped, so queueing every idle send
+clears. That waiter lives as long as mail sits in `new/` — a human types
+for longer than any poll cap — and stops only when the inject lands, the
+mail is claimed elsewhere, the pane goes busy/blocked (Stop drains it),
+the pane dies, or `MUXA_KICK_WAIT_DEADLINE` (default 1h) expires. It is
+not silent: `muxa send` prints the waiter pid, `muxa who` shows a `WAIT`
+column (`waiting:NNs`, `expired:NNNNs`, `gone`), and every waiter logs to
+`$XDG_RUNTIME_DIR/muxa/<tmux-pid>/kick-wait-<pane>.log`. The parent may already have Stopped, so queueing every idle send
 until the next turn would sit unread until a human types. Busy/blocked hook
 panes still queue; Stop drains that queue when the turn ends —
 including for an IDE-hosted Cursor root whose pane is only a tmux
@@ -193,7 +199,8 @@ Needs `tmux` and `python3`. Uses a private tmux socket, not your session.
 | `MUXA_SWEEP_MIN_AGE` | `1` | Seconds a `cur/` file must age before Stop moves it to `done/` |
 | `MUXA_REDELIVER_MAX` | `3` | Redeliveries before parking in `dead/` |
 | `MUXA_BATCH_MAX` | `8` | Max messages claimed per inject attempt |
-| `MUXA_KICK_WAIT_MAX` | `120` | `kick_wait` poll iterations (0.5s each) |
+| `MUXA_KICK_WAIT_MAX` | `120` | `kick_wait` polls (0.5s each) between progress log lines |
+| `MUXA_KICK_WAIT_DEADLINE` | `3600` | Seconds before a `kick_wait` waiter gives up (logged + `WAIT=expired`) |
 | `MUXA_FORCE_INJECT` | `0` | `1` skips readiness prechecks (tests / `muxa deliver --force`) |
 | `MUXA_COMPOSER_CHECK` | `1` | `0` disables styled-content composer parsing for CLI kinds |
 | `MUXA_COMPOSER_SETTLE` | `0.25` | Seconds between the two composer-empty reads |

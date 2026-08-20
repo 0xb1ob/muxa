@@ -11,6 +11,9 @@ CLAIM_TTL="${MUXA_CLAIM_TTL:-120}"
 REDELIVER_MAX="${MUXA_REDELIVER_MAX:-3}"
 BATCH_MAX="${MUXA_BATCH_MAX:-8}"
 KICK_WAIT_MAX="${MUXA_KICK_WAIT_MAX:-120}"
+# Hard bound on a kick_wait waiter, in seconds. Reaching it is reported, not
+# swallowed: the log line, stderr and @muxa_kick_wait=expired all say so.
+KICK_WAIT_DEADLINE="${MUXA_KICK_WAIT_DEADLINE:-3600}"
 COMPOSER_SETTLE="${MUXA_COMPOSER_SETTLE:-0.25}"
 # Same-turn dual Stop hooks (user + project hooks.json) must not sweep
 # each other's just-claimed cur/ files. Next turn is always >= 1s later.
@@ -26,7 +29,7 @@ muxa — message other AI CLIs in this tmux server
                                 default: split into a tiled grid in this window (--window for a new window)
                                 child cwd: --cwd, else process PWD, else this pane's path
                                 warns on stderr if a live registered worker already has that cwd
-  muxa who                          roster (tmux pane options, CLI session id, cwd, STATUS)
+  muxa who                          roster (tmux pane options, CLI session id, cwd, STATUS, WAIT)
   muxa whoami                       this pane's alias
   muxa unregister NAME|ID           clear muxa registration; leave pane running
   muxa id                           this pane's unique muxa id
@@ -182,7 +185,7 @@ new_muxa_id() {
 # tab-delimited parsing on some platforms (e.g. Ubuntu CI runners). "||"
 # survives unmodified and won't appear in any of these fields in practice.
 roster_lines() {
-  tmux_do list-panes -a -F '#{pane_id}||#{@muxa_name}||#{@muxa_id}||#{@muxa_parent}||#{@muxa_kind}||#{@muxa_state}||#{@muxa_deliver}||#{session_name}:#{window_index}.#{pane_index}||#{@muxa_session}||#{pane_current_path}||#{pane_current_command}' 2>/dev/null \
+  tmux_do list-panes -a -F '#{pane_id}||#{@muxa_name}||#{@muxa_id}||#{@muxa_parent}||#{@muxa_kind}||#{@muxa_state}||#{@muxa_deliver}||#{session_name}:#{window_index}.#{pane_index}||#{@muxa_session}||#{pane_current_path}||#{pane_current_command}||#{@muxa_kick_wait}' 2>/dev/null \
     | awk -F '\\|\\|' '$2 != "" { print }'
 }
 
@@ -223,6 +226,7 @@ clear_muxa_registration() {
   unset_pane_opt "$pane" @muxa_session
   unset_pane_opt "$pane" @muxa_hook_ok
   unset_pane_opt "$pane" @muxa_unread
+  unset_pane_opt "$pane" @muxa_kick_wait
   set_pane_title "$pane" ""
 }
 
@@ -777,6 +781,17 @@ list_count() {
   printf '%s' "$n"
 }
 
+# Unclaimed only — what a kick_wait waiter still owes the pane.
+mailbox_new_count() {
+  local box f n=0
+  box="$(ensure_box "$1")"
+  for f in "$box/new"/*; do
+    [ -f "$f" ] || continue
+    n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
+
 mailbox_unread_count() {
   local box f n=0
   box="$(ensure_box "$1")"
@@ -1154,9 +1169,9 @@ cmd_register() {
 
 cmd_who() {
   need_tmux
-  printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-8s %-8s %-16s %s\n' \
-    NAME ID SESSION PARENT KIND STATE STATUS UNREAD DELIVER PANE WHERE CWD
-  local line kind cwd cmd status name unread
+  printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-8s %-14s %-8s %-16s %s\n' \
+    NAME ID SESSION PARENT KIND STATE STATUS UNREAD DELIVER WAIT PANE WHERE CWD
+  local line kind cwd cmd status name unread wait
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     kind="$(printf '%s\n' "$line" | field 5)"
@@ -1166,7 +1181,9 @@ cmd_who() {
     name="$(printf '%s\n' "$line" | field 2)"
     unread="$(mailbox_unread_count "$name")"
     [ "$unread" -gt 0 ] 2>/dev/null || unread="-"
-    printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-8s %-8s %-16s %s\n' \
+    wait="$(printf '%s\n' "$line" | field 12)"
+    [ -n "$wait" ] || wait="-"
+    printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-8s %-14s %-8s %-16s %s\n' \
       "$name" \
       "$(printf '%s\n' "$line" | field 3)" \
       "$(printf '%s\n' "$line" | field 9)" \
@@ -1176,6 +1193,7 @@ cmd_who() {
       "$status" \
       "$unread" \
       "$(printf '%s\n' "$line" | field 7)" \
+      "$wait" \
       "$(printf '%s\n' "$line" | field 1)" \
       "$(printf '%s\n' "$line" | field 8)" \
       "$cwd"
@@ -1302,84 +1320,149 @@ kick_wait_lock() {
   printf '%s/kick-wait-deliver-%s.lock' "$(runtime_root)" "$1"
 }
 
+kick_wait_log() {
+  printf '%s/kick-wait-%s.log' "$(runtime_root)" "$1"
+}
+
+# One line per state change, to stdout — which spawn_kick_wait points at the
+# per-pane log. Never /dev/null: a waiter that dies must leave a trace (E27).
+kick_wait_note() {
+  printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*"
+}
+
+# Waiter state lives on the pane so `muxa who` can prove a waiter is running.
+kick_wait_state() {
+  local pane="$1" v="${2:-}"
+  if [ -n "$v" ]; then
+    set_pane_opt "$pane" @muxa_kick_wait "$v"
+  else
+    unset_pane_opt "$pane" @muxa_kick_wait
+  fi
+}
+
+# Prints the waiter pid and returns 0 when a waiter is (or already was) live
+# for this pane; returns 1 when no waiter exists, so send_one can say so
+# instead of promising a delivery nobody is waiting for.
 spawn_kick_wait() {
   local pane="$1" name="$2"
-  local runtime lock pidfile
+  local runtime lock pidfile pid
   runtime="$(runtime_root)"
   mkdir -p "$runtime"
   lock="$runtime/kick-wait-spawn-${pane}.lock"
   pidfile="$runtime/kick-wait-${pane}.pid"
   if ! lock_acquire "$lock" 10; then
-    return 0
+    return 1
   fi
   if [ -f "$pidfile" ]; then
-    if kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null; then
+    pid="$(cat "$pidfile" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       lock_release "$lock"
+      printf '%s' "$pid"                 # a live waiter already covers this pane
       return 0
     fi
   fi
   (
     kick_wait "$pane" "$name"
     rm -f "$pidfile"
-  ) >/dev/null 2>&1 &
-  printf '%s' "$!" >"$pidfile"
+  ) >>"$(kick_wait_log "$pane")" 2>&1 &
+  pid="$!"
+  printf '%s' "$pid" >"$pidfile"
   lock_release "$lock"
+  printf '%s' "$pid"
 }
 
+# Retry until the mail is in. A human typing routinely outlasts any short poll
+# cap, so the waiter lives as long as mail sits in new/ for this pane; it stops
+# when the inject succeeds, new/ drains (someone else claimed it), the pane goes
+# busy/blocked on a hook drain, the pane dies, or MUXA_KICK_WAIT_DEADLINE
+# seconds elapse. MUXA_KICK_WAIT_MAX now only sets how often (in 0.5s polls) the
+# waiter writes a progress line. Every exit is logged and reflected in
+# @muxa_kick_wait — nothing is discarded (E27).
 kick_wait() {
   local pane="$1" name="$2"
-  local i=0 state prev kind list lock verdict
+  local i=0 limit note_every state prev kind deliver list lock verdict left
   list="$(runtime_root)/wait-$$-$RANDOM.list"
   lock="$(kick_wait_lock "$pane")"
   kind="$(pane_fmt "$pane" '#{@muxa_kind}')"
+  deliver="$(pane_fmt "$pane" '#{@muxa_deliver}')"
+  note_every="$KICK_WAIT_MAX"
+  [ "$note_every" -gt 0 ] 2>/dev/null || note_every=120
+  limit=$((KICK_WAIT_DEADLINE * 2))
   mkdir -p "$(runtime_root)"
-  while [ "$i" -lt "$KICK_WAIT_MAX" ]; do
+  kick_wait_state "$pane" waiting
+  kick_wait_note "waiting for $name (pane=$pane deliver=${deliver:-inject} deadline=${KICK_WAIT_DEADLINE}s)"
+  while [ "$i" -lt "$limit" ]; do
+    if [ "$(pane_fmt "$pane" '#{pane_dead}')" = "1" ] \
+       || [ -z "$(pane_fmt "$pane" '#{@muxa_name}')" ]; then
+      rm -f "$list"
+      kick_wait_note "$name pane is gone after $((i / 2))s; mail left queued"
+      kick_wait_state "$pane" gone
+      return 1
+    fi
+    if [ "$(mailbox_new_count "$name")" -eq 0 ]; then
+      rm -f "$list"
+      kick_wait_note "nothing left in $name new/ after $((i / 2))s; stopping"
+      kick_wait_state "$pane" ""
+      return 0
+    fi
     state="$(pane_fmt "$pane" '#{@muxa_state}')"
-    if [ "$state" = "idle" ] || [ -z "$state" ]; then
-      verdict="$(pane_inject_verdict "$pane" "$kind")"
-      if [ "$verdict" = "empty" ]; then
-        if lock_acquire "$lock" 100; then
+    case "$state" in
+      busy|blocked)
+        if [ "$deliver" = "hook" ]; then
+          rm -f "$list"
+          kick_wait_note "$name went $state; the Stop-hook drain owns this mail"
+          kick_wait_state "$pane" ""
+          return 0
+        fi
+        ;;
+      idle|"")
+        verdict="$(pane_inject_verdict "$pane" "$kind")"
+        if [ "$verdict" = "empty" ] && lock_acquire "$lock" 100; then
           prev="$(pane_fmt "$pane" '#{@muxa_state}')"
           if [ "$prev" = "idle" ] || [ -z "$prev" ]; then
             claim_new "$name" >"$list" || true
             if [ -s "$list" ]; then
               set_pane_opt "$pane" @muxa_state busy
-              if ! deliver_list "$pane" "$list"; then
-                # nothing was delivered: do not leave a false busy behind (E21)
-                if [ -z "$prev" ]; then
-                  unset_pane_opt "$pane" @muxa_state
-                else
-                  set_pane_opt "$pane" @muxa_state "$prev"
-                fi
+              if deliver_list "$pane" "$list"; then
                 lock_release "$lock"
                 rm -f "$list"
-                sleep 0.5
-                i=$((i + 1))
-                continue
+                kick_wait_note "delivered to $name after $((i / 2))s"
+                kick_wait_state "$pane" ""
+                return 0
               fi
-              lock_release "$lock"
-              rm -f "$list"
-              return 0
+              # nothing was delivered: do not leave a false busy behind (E21)
+              if [ -z "$prev" ]; then
+                unset_pane_opt "$pane" @muxa_state
+              else
+                set_pane_opt "$pane" @muxa_state "$prev"
+              fi
             fi
           fi
           lock_release "$lock"
+          rm -f "$list"
         fi
-        rm -f "$list"
-        return 0                       # idle, ready, nothing to send
-      fi
-    fi
+        ;;
+    esac
     sleep 0.5
     i=$((i + 1))
+    if [ $((i % note_every)) -eq 0 ]; then
+      kick_wait_note "$name still not ready after $((i / 2))s; $(mailbox_new_count "$name") queued"
+      kick_wait_state "$pane" "waiting:$((i / 2))s"
+    fi
   done
   rm -f "$list"
-  # 60s expired with mail still queued: make it visible instead of silent.
-  printf 'muxa: %s still not ready after 60s; mail left queued\n' "$name" >&2
+  left="$(mailbox_new_count "$name")"
+  kick_wait_note "gave up after ${KICK_WAIT_DEADLINE}s; $left mail left queued for $name"
+  printf 'muxa: %s still not ready after %ss; %s mail left queued\n' \
+    "$name" "$KICK_WAIT_DEADLINE" "$left" >&2
+  kick_wait_state "$pane" "expired:${KICK_WAIT_DEADLINE}s"
   refresh_unread "$pane" "$name"
+  return 1
 }
 
 send_one() {
   local from="$1" to="$2" flags="$3" body="$4"
-  local pane state deliver id list lock kind cwd cmd wait_composer verdict
+  local pane state deliver id list lock kind cwd cmd wait_composer verdict wpid
   if [ "$to" = "$from" ]; then
     return 0
   fi
@@ -1398,8 +1481,13 @@ send_one() {
   case "$state" in
     busy|blocked)
       if [ "$deliver" = "inject" ]; then
-        spawn_kick_wait "$pane" "$to"
-        printf 'queued %s → %s id=%s (waiting for idle)\n' "$from" "$to" "$id"
+        if wpid="$(spawn_kick_wait "$pane" "$to")"; then
+          printf 'queued %s → %s id=%s (waiting for idle; waiter pid=%s)\n' \
+            "$from" "$to" "$id" "$wpid"
+        else
+          printf 'muxa: no kick_wait waiter for %s (spawn lock busy); mail left queued\n' "$to" >&2
+          printf 'queued %s → %s id=%s\n' "$from" "$to" "$id"
+        fi
       else
         refresh_unread "$pane" "$to"
         printf 'queued %s → %s id=%s (hook will drain)\n' "$from" "$to" "$id"
@@ -1429,12 +1517,17 @@ send_one() {
              && [ "$(pane_fmt "$pane" '#{pane_in_mode}')" != "1" ]; then
             verdict="$(pane_inject_verdict "$pane" "$kind")"
             if [ "$verdict" != "empty" ]; then
-              spawn_kick_wait "$pane" "$to"
-              wait_composer=1
+              if wpid="$(spawn_kick_wait "$pane" "$to")"; then
+                wait_composer=1
+              else
+                printf 'muxa: no kick_wait waiter for %s (spawn lock busy); mail left queued\n' \
+                  "$to" >&2
+              fi
             fi
           fi
           if [ "$wait_composer" -eq 1 ]; then
-            printf 'queued %s → %s id=%s (waiting for idle)\n' "$from" "$to" "$id"
+            printf 'queued %s → %s id=%s (waiting for idle; waiter pid=%s)\n' \
+              "$from" "$to" "$id" "$wpid"
           else
             printf 'queued %s → %s id=%s\n' "$from" "$to" "$id"
           fi

@@ -236,6 +236,23 @@ defers, and MUST take the same per-pane lock as the idle `send_one`
 path (held across the paste/`ENTER_DELAY` window). Concurrent idle
 sends otherwise interleave two `[muxa]` blocks into one composer.
 
+A waiter MUST outlive `MUXA_KICK_WAIT_MAX` (that variable only sets how
+often it logs progress): a human typing routinely outlasts a 60s cap, and
+mail that stays in `new/` until someone runs `muxa peek` is a lost
+message. It MUST keep polling while mail remains in `new/` for that pane
+and MUST stop when the inject succeeds, `new/` drains, the pane goes
+busy/blocked on a hook drain, the pane dies, or `MUXA_KICK_WAIT_DEADLINE`
+seconds (default 3600) elapse.
+
+Waiters MUST be observable. Their output goes to
+`<runtime>/kick-wait-<pane>.log`, never `/dev/null`; the pane option
+`@muxa_kick_wait` carries the live state (`waiting`, `waiting:NNs`,
+`expired:NNs`, `gone`) and `muxa who` renders it as `WAIT`. The deadline
+MUST be reported on stderr and in the log, not discarded. `send_one` MUST
+print `(waiting for idle; waiter pid=N)` only when a waiter is actually
+live for that pane; when `spawn_kick_wait` cannot get the spawn lock it
+MUST say so on stderr and print the plain `queued` line.
+
 ```
 hook stop:
   if aborted|error: set state=idle; print nothing (leave new/)
