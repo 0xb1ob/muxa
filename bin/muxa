@@ -849,6 +849,17 @@ composer_verdict_from_stdin() {
 import os, re, sys
 
 SGR = re.compile(r"\x1b\[([0-9;]*)m")
+PROMPT_CHARS = "\u2192>❯$"
+BUSY_STRINGS = ("ctrl+c to stop", "esc to interrupt")
+PLACEHOLDER_RE = re.compile(
+    r"(?i)(?:"
+    r"image in clipboard(?:\s*[·•]\s*ctrl\+v to paste)?"
+    r"|ctrl\+v to paste"
+    r"|add a follow-up"
+    r"|type a message"
+    r"|ask claude"
+    r")"
+)
 
 def default_state():
     return {"dim": False, "rev": False, "bg": False, "fg": False}
@@ -913,15 +924,16 @@ def has_fg(st):
 def printable_len(s):
     return sum(1 for ch in s if ch.isprintable() and not ch.isspace())
 
+def has_braille(text):
+    return any(0x2800 <= ord(ch) <= 0x28FF for ch in text)
+
+def strip_input_chrome(body):
+    body = body.strip().lstrip(PROMPT_CHARS + " ").strip()
+    body = PLACEHOLDER_RE.sub("", body)
+    return body.strip()
+
 try:
     rows = sys.stdin.read().split("\n")
-    tail = "\n".join(rows[-8:])
-    if "ctrl+c to stop" in tail or "esc to interrupt" in tail:
-        print("pending")
-        raise SystemExit
-    if any(0x2800 <= ord(ch) <= 0x28FF for ch in tail):
-        print("pending")
-        raise SystemExit
 
     candidates = []
     for i in range(len(rows) - 1, -1, -1):
@@ -942,13 +954,25 @@ try:
         print("unknown")
         raise SystemExit
 
+    composer_line = rows[composer]
+    composer_lower = composer_line.lower()
+    # Busy/interrupt status belongs to the composer row, not pane recap above it.
+    if any(s in composer_lower for s in BUSY_STRINGS):
+        print("pending")
+        raise SystemExit
+
+    # Spinners usually sit on the composer row or the line or two above it.
+    for i in range(max(0, composer - 2), composer + 1):
+        if has_braille(rows[i]):
+            print("pending")
+            raise SystemExit
+
     typed = []
-    for st, text in runs(rows[composer]):
+    for st, text in runs(composer_line):
         if st.get("dim") or st.get("rev"):
             continue
         typed.append(text)
-    body = "".join(typed)
-    body = body.strip().lstrip("\u2192>❯$ ").strip()
+    body = strip_input_chrome("".join(typed))
     if printable_len(body) < 2:
         print("empty")
     else:
