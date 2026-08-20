@@ -331,6 +331,39 @@ assert_contains "$peek_cur" "age=" "peek shows claimed age"
 assert_contains "$peek_cur" "STUCK_CLAIMED" "peek shows claimed body"
 rm -f "$box/cur/claimed-1"
 
+# --- deliver re-injects unconfirmed cur/ when new/ is empty (S4) ---
+muxa_as "$alice_pane" register --name alice --kind generic --deliver inject >/dev/null
+muxa_as "$alice_pane" state idle
+: >"$alice_out"
+box="$(muxa_box alice)"
+find "$box/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$box/cur" -type f -exec rm -f {} + 2>/dev/null || true
+{
+  printf 'From: bob\nTo: alice\nId: cur-redeliver\nTime: 2026-01-01T00:00:00Z\nFlags: \n\nCUR_REDELIVER_BODY\n'
+} >"$box/cur/cur-redeliver"
+del_cur="$(muxa_as "$bob_pane" deliver alice 2>&1)"
+assert_contains "$del_cur" "injected into alice" "deliver re-injects from cur/"
+sleep 0.3
+got="$(cat "$alice_out" 2>/dev/null || true)"
+assert_contains "$got" "CUR_REDELIVER_BODY" "deliver from cur/ lands the body"
+find "$box/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$box/cur" -type f -exec rm -f {} + 2>/dev/null || true
+find "$box/done" -type f -exec rm -f {} + 2>/dev/null || true
+
+# --- peek runs reaper on stale cur/ ---
+muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
+box="$(muxa_box alice)"
+{
+  printf 'From: bob\nTo: alice\nId: peek-reap\nTime: 2026-01-01T00:00:00Z\nFlags: \n\nPEEK_REAP\n'
+} >"$box/cur/peek-reap"
+touch -t 202001010000 "$box/cur/peek-reap"
+muxa_as "$bob_pane" peek alice >/dev/null
+[ -f "$box/new/peek-reap" ] && ok "peek runs reaper on stale cur/" \
+  || bad "peek runs reaper on stale cur/" "$(ls -la "$box/cur" "$box/new" 2>&1)"
+assert_contains "$(cat "$box/new/peek-reap")" "Redelivered: 1" "peek reaper writes Redelivered: 1"
+find "$box/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$box/cur" -type f -exec rm -f {} + 2>/dev/null || true
+
 # --- reaper redelivers stale cur/ and resets mtime (E24) ---
 muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
 muxa_as "$alice_pane" state busy
@@ -433,6 +466,62 @@ assert_contains "$boot" "delivered bob → alice" "idle hook pane injects before
 sleep 0.3
 got="$(cat "$alice_out" 2>/dev/null || true)"
 assert_contains "$got" "BOOTSTRAP_BRIEF" "bootstrap brief reached the pane"
+
+# --- first brief: alt-screen / blank capture queues (not stuck in cur/) ---
+tmux -L "$SOCK" new-window -t muxa -n splash "printf '\\033[?1049h'; exec cat > '$tmpdir/splash.out'"
+sleep 0.3
+splash_pane="$(tmux -L "$SOCK" list-panes -t muxa:splash -F '#{pane_id}' | head -1)"
+splash_out="$tmpdir/splash.out"
+muxa_as "$splash_pane" register --name splash --kind cursor --deliver hook --parent bob >/dev/null
+tmux -L "$SOCK" set-option -p -t "$splash_pane" -u @muxa_hook_ok 2>/dev/null || true
+muxa_as "$splash_pane" state idle
+: >"$splash_out"
+splash_on="$(tmux -L "$SOCK" display-message -t "$splash_pane" -p '#{alternate_on}')"
+if [ "$splash_on" = "1" ]; then
+  splash_sent="$(muxa_as "$bob_pane" send splash 'SPLASH_FIRST_BRIEF' 2>&1)"
+  assert_contains "$splash_sent" "queued bob → splash" "first brief on alt-screen queues"
+  assert_contains "$splash_sent" "waiting for idle" "first brief on alt-screen spawns kick_wait"
+  sleep 0.2
+  got="$(cat "$splash_out" 2>/dev/null || true)"
+  case "$got" in
+    *SPLASH_FIRST_BRIEF*) bad "first brief on alt-screen does not paste" "got: $got" ;;
+    *) ok "first brief on alt-screen does not paste" ;;
+  esac
+  peek_splash="$(muxa_as "$bob_pane" peek splash)"
+  assert_contains "$peek_splash" "SPLASH_FIRST_BRIEF" "peek shows queued first brief"
+  case "$peek_splash" in
+    *claimed\ but\ unconfirmed*) bad "first brief on alt-screen is not stuck in cur/" "$peek_splash" ;;
+    *) ok "first brief on alt-screen is not stuck in cur/" ;;
+  esac
+  splash_new="$(find "$(muxa_box splash)/new" -type f 2>/dev/null | awk 'END { print NR }')"
+  splash_cur="$(find "$(muxa_box splash)/cur" -type f 2>/dev/null | awk 'END { print NR }')"
+  [ "$splash_new" -ge 1 ] && [ "$splash_cur" -eq 0 ] && ok "first brief on alt-screen left mail in new/" \
+    || bad "first brief on alt-screen left mail in new/" "new=$splash_new cur=$splash_cur"
+  tmux -L "$SOCK" send-keys -t "$splash_pane" -X cancel 2>/dev/null || true
+  printf '\033[?1049l' >"$(tmux -L "$SOCK" display-message -t "$splash_pane" -p '#{pane_tty}')"
+  sleep 0.2
+  paint_composer "$splash_pane" cursor-idle.ansi
+  sleep 1.5
+  got="$(cat "$splash_out" 2>/dev/null || true)"
+  assert_contains "$got" "SPLASH_FIRST_BRIEF" "kick_wait delivers first brief once TUI is live"
+  splash_pidfile="$(muxa_runtime)/kick-wait-${splash_pane}.pid"
+  if [ -f "$splash_pidfile" ] && kill -0 "$(cat "$splash_pidfile" 2>/dev/null)" 2>/dev/null; then
+    kill "$(cat "$splash_pidfile")" 2>/dev/null || true
+    rm -f "$splash_pidfile"
+  fi
+  find "$(muxa_box splash)/new" -type f -exec rm -f {} + 2>/dev/null || true
+  find "$(muxa_box splash)/cur" -type f -exec rm -f {} + 2>/dev/null || true
+else
+  ok "first brief on alt-screen queues (skip: alternate_on=$splash_on)"
+  ok "first brief on alt-screen spawns kick_wait (skip)"
+  ok "first brief on alt-screen does not paste (skip)"
+  ok "peek shows queued first brief (skip)"
+  ok "first brief on alt-screen is not stuck in cur/ (skip)"
+  ok "first brief on alt-screen left mail in new/ (skip)"
+  ok "kick_wait delivers first brief once TUI is live (skip)"
+fi
+tmux -L "$SOCK" kill-window -t "muxa:splash" 2>/dev/null || true
+
 empty_stop="$(muxa_as "$alice_pane" hook stop --format claude)"
 [ -z "$empty_stop" ] && ok "first hook stop with empty mailbox is silent" \
   || bad "first hook stop with empty mailbox is silent" "got: $empty_stop"

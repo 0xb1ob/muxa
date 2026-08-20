@@ -717,6 +717,44 @@ for _, name in files:
 PY
 }
 
+# Basenames in $1/cur, oldest mtime first (then name).
+maildir_sorted_cur() {
+  python3 - "$1" <<'PY'
+import os, sys
+d = os.path.join(sys.argv[1], "cur")
+try:
+    names = os.listdir(d)
+except OSError:
+    sys.exit(0)
+files = []
+for name in names:
+    p = os.path.join(d, name)
+    if os.path.isfile(p):
+        st = os.stat(p)
+        files.append((st.st_mtime, name))
+files.sort()
+for _, name in files:
+    print(name)
+PY
+}
+
+# Claimed-but-unconfirmed files in cur/, up to BATCH_MAX, oldest first.
+claim_cur() {
+  local name="$1"
+  local box f base n=0
+  box="$(ensure_box "$name")"
+  while IFS= read -r base; do
+    [ -n "$base" ] || continue
+    [ "$n" -ge "$BATCH_MAX" ] && break
+    f="$box/cur/$base"
+    [ -f "$f" ] || continue
+    printf '%s\n' "$f"
+    n=$((n + 1))
+  done <<EOF
+$(maildir_sorted_cur "$box")
+EOF
+}
+
 claim_new() {
   local name="$1"
   local box f base n=0
@@ -966,6 +1004,16 @@ pane_composer_state() {
     | composer_verdict_from_stdin "$kind"
 }
 
+# Splash / not-yet-drawn TUI: capture is empty or nearly so. Used only for
+# the first hook brief (hook_ok unset) so we queue instead of a silent-loss
+# paste that would leave the only copy stuck in cur/.
+pane_capture_blank() {
+  local pane="$1" n
+  n="$(tmux_do capture-pane -p -t "$pane" 2>/dev/null \
+    | tr -cd '[:alnum:]' | wc -c | tr -d '[:space:]')"
+  [ "${n:-0}" -lt 8 ]
+}
+
 cmd_composer_verdict() {
   local kind="generic"
   while [ $# -gt 0 ]; do
@@ -984,18 +1032,22 @@ pane_inject_verdict() {
   # A pane in copy-mode accepts paste-buffer with exit 0, never delivers it to
   # the app, and flushes it (minus the Enter) when the mode exits. Verified.
   [ "$(pane_fmt "$pane" '#{pane_in_mode}')" = "1" ] && { printf 'unknown'; return; }
-  if [ "$kind" = "generic" ] && [ "$(pane_fmt "$pane" '#{alternate_on}')" = "1" ]; then
+  if [ "$(pane_fmt "$pane" '#{alternate_on}')" = "1" ]; then
     printf 'unknown'; return
   fi
   # Q2: generic panes skip composer parsing and rely on the cheap prechecks.
   case "$kind" in
     claude|cursor|pi)
       if [ "${MUXA_COMPOSER_CHECK:-1}" != "0" ]; then
-        # First brief only: splash/unknown must not deadlock spawn. After
-        # @muxa_hook_ok, idle hook inject uses the same composer-empty gate
-        # as inject-kind panes (do not paste over typed input).
+        # First brief only: skip composer parsing so splash cannot deadlock
+        # spawn, but still honour dead/copy-mode/alt-screen and a blank
+        # capture (silent-loss paste would leave mail stuck in cur/).
         if [ "$(pane_fmt "$pane" '#{@muxa_deliver}')" = "hook" ] \
            && [ "$(pane_fmt "$pane" '#{@muxa_hook_ok}')" != "1" ]; then
+          if pane_capture_blank "$pane"; then
+            printf 'unknown'
+            return
+          fi
           printf 'empty'
           return
         fi
@@ -1274,6 +1326,7 @@ cmd_peek() {
     can_send "$from" "$name" || forbid "cannot peek '$name' (not parent/child)"
   fi
   box="$(ensure_box "$name")"
+  reap_stale_claims "$name"
   found=0
   for f in "$box/new"/*; do
     [ -f "$f" ] || continue
@@ -1512,7 +1565,6 @@ send_one() {
           refresh_unread "$pane" "$to"
           lock_release "$lock"
           if [ -s "$list" ] && [ "$deliver" = "hook" ] \
-             && [ "$(pane_fmt "$pane" '#{@muxa_hook_ok}')" = "1" ] \
              && [ "$(pane_fmt "$pane" '#{pane_dead}')" != "1" ] \
              && [ "$(pane_fmt "$pane" '#{pane_in_mode}')" != "1" ]; then
             verdict="$(pane_inject_verdict "$pane" "$kind")"
@@ -1624,7 +1676,11 @@ cmd_deliver() {
     rm -f "$list"
     die "could not lock pane for deliver"
   fi
+  reap_stale_claims "$name"
   claim_new "$name" >"$list" || true
+  if [ ! -s "$list" ]; then
+    claim_cur "$name" >"$list" || true
+  fi
   if [ ! -s "$list" ]; then
     lock_release "$lock"
     rm -f "$list"
