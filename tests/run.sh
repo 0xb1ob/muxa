@@ -542,6 +542,64 @@ muxa_as "$alice_pane" hook stop --format claude >/dev/null
 find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
 find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
 
+# --- kick_wait outlives MUXA_KICK_WAIT_MAX and is observable (E27) ---
+kw_pidfile="$(muxa_runtime)/kick-wait-${alice_pane}.pid"
+kw_log="$(muxa_runtime)/kick-wait-${alice_pane}.log"
+rm -f "$kw_log"
+muxa_as "$alice_pane" state idle
+: >"$alice_out"
+paint_composer "$alice_pane" cursor-typed.ansi
+long_sent="$(TMUX_PANE="$bob_pane" MUXA_KICK_WAIT_MAX=2 MUXA_KICK_WAIT_DEADLINE=60 \
+  muxa send alice 'KICK_WAIT_OUTLIVES_MAX' 2>&1)"
+assert_contains "$long_sent" "waiter pid=" "send names the kick_wait waiter pid"
+sleep 3   # 6 polls, three times the MUXA_KICK_WAIT_MAX=2 that used to end it
+if [ -f "$kw_pidfile" ] && kill -0 "$(cat "$kw_pidfile" 2>/dev/null)" 2>/dev/null; then
+  ok "kick_wait outlives MUXA_KICK_WAIT_MAX while mail is queued"
+else
+  bad "kick_wait outlives MUXA_KICK_WAIT_MAX while mail is queued" "pidfile=$kw_pidfile"
+fi
+kw_state="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_kick_wait}')"
+case "$kw_state" in
+  waiting*) ok "live waiter is visible in @muxa_kick_wait" ;;
+  *) bad "live waiter is visible in @muxa_kick_wait" "got: $kw_state" ;;
+esac
+who_wait="$(muxa_as "$bob_pane" who)"
+assert_contains "$who_wait" "WAIT" "who header has WAIT"
+assert_contains "$who_wait" "waiting" "who shows the live waiter"
+assert_contains "$(cat "$kw_log" 2>/dev/null || true)" "still not ready after" \
+  "kick_wait logs progress instead of discarding it"
+: >"$alice_out"
+paint_composer "$alice_pane" claude-idle.ansi
+sleep 1.5
+got="$(cat "$alice_out" 2>/dev/null || true)"
+assert_contains "$got" "KICK_WAIT_OUTLIVES_MAX" "long-lived kick_wait delivers once composer clears"
+kw_state="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_kick_wait}')"
+[ -z "$kw_state" ] && ok "waiter clears @muxa_kick_wait after delivering" \
+  || bad "waiter clears @muxa_kick_wait after delivering" "got: $kw_state"
+assert_contains "$(cat "$kw_log" 2>/dev/null || true)" "delivered to alice" \
+  "kick_wait logs the delivery"
+
+# --- the bounded deadline is reported, not swallowed (E27) ---
+rm -f "$kw_log"
+muxa_as "$alice_pane" state idle
+: >"$alice_out"
+paint_composer "$alice_pane" cursor-typed.ansi
+TMUX_PANE="$bob_pane" MUXA_KICK_WAIT_MAX=2 MUXA_KICK_WAIT_DEADLINE=1 \
+  muxa send alice 'KICK_WAIT_DEADLINE' >/dev/null 2>&1
+sleep 2.5
+kw_state="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_kick_wait}')"
+case "$kw_state" in
+  expired*) ok "expired waiter is visible in @muxa_kick_wait" ;;
+  *) bad "expired waiter is visible in @muxa_kick_wait" "got: $kw_state" ;;
+esac
+assert_contains "$(cat "$kw_log" 2>/dev/null || true)" "gave up after 1s" \
+  "kick_wait deadline is logged"
+tmux -L "$SOCK" set-option -p -t "$alice_pane" -u @muxa_kick_wait 2>/dev/null || true
+rm -f "$kw_pidfile" "$kw_log"
+paint_composer "$alice_pane" claude-idle.ansi
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
+
 # --- busy hook pane queues for Stop ---
 muxa_as "$alice_pane" state busy
 : >"$alice_out"
