@@ -50,8 +50,9 @@ ensure_muxa_home() {
   if is_muxa_tree "$MUXA_HOME" && [ -d "$MUXA_HOME/.git" ]; then
     printf 'muxa-install: updating %s (%s)\n' "$MUXA_HOME" "$MUXA_REF"
     git -C "$MUXA_HOME" fetch --depth 1 origin "$MUXA_REF"
-    git -C "$MUXA_HOME" checkout -q "$MUXA_REF"
-    git -C "$MUXA_HOME" merge --ff-only "origin/$MUXA_REF"
+    # Cache, not a checkout. Depth-1 fetch is not ff-mergeable after a squash.
+    git -C "$MUXA_HOME" checkout -q -B "$MUXA_REF" "origin/$MUXA_REF"
+    git -C "$MUXA_HOME" reset --hard "origin/$MUXA_REF"
     return 0
   fi
 
