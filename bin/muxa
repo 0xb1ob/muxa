@@ -1032,7 +1032,7 @@ pane_inject_verdict() {
   # A pane in copy-mode accepts paste-buffer with exit 0, never delivers it to
   # the app, and flushes it (minus the Enter) when the mode exits. Verified.
   [ "$(pane_fmt "$pane" '#{pane_in_mode}')" = "1" ] && { printf 'unknown'; return; }
-  if [ "$(pane_fmt "$pane" '#{alternate_on}')" = "1" ]; then
+  if [ "$kind" = "generic" ] && [ "$(pane_fmt "$pane" '#{alternate_on}')" = "1" ]; then
     printf 'unknown'; return
   fi
   # Q2: generic panes skip composer parsing and rely on the cheap prechecks.
@@ -1044,6 +1044,10 @@ pane_inject_verdict() {
         # capture (silent-loss paste would leave mail stuck in cur/).
         if [ "$(pane_fmt "$pane" '#{@muxa_deliver}')" = "hook" ] \
            && [ "$(pane_fmt "$pane" '#{@muxa_hook_ok}')" != "1" ]; then
+          if [ "$(pane_fmt "$pane" '#{alternate_on}')" = "1" ]; then
+            printf 'unknown'
+            return
+          fi
           if pane_capture_blank "$pane"; then
             printf 'unknown'
             return
@@ -1683,7 +1687,7 @@ cmd_deliver() {
   reap_stale_claims "$name"
   claim_new "$name" >"$list" || true
   from_cur=0
-  if [ ! -s "$list" ]; then
+  if [ ! -s "$list" ] && [ "$(pane_fmt "$pane" '#{@muxa_deliver}')" = "inject" ]; then
     claim_cur "$name" >"$list" || true
     [ -s "$list" ] && from_cur=1
   fi

@@ -350,7 +350,7 @@ find "$box/new" -type f -exec rm -f {} + 2>/dev/null || true
 find "$box/cur" -type f -exec rm -f {} + 2>/dev/null || true
 find "$box/done" -type f -exec rm -f {} + 2>/dev/null || true
 
-# --- deliver cur/ fallback must not unclaim hook mail awaiting Stop ---
+# --- deliver cur/ fallback must not touch hook mail awaiting Stop ---
 muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
 tmux -L "$SOCK" set-option -p -t "$alice_pane" @muxa_hook_ok 1 2>/dev/null || true
 muxa_as "$alice_pane" state busy
@@ -360,21 +360,40 @@ find "$box/cur" -type f -exec rm -f {} + 2>/dev/null || true
 {
   printf 'From: bob\nTo: alice\nId: hook-cur-wait\nTime: 2026-01-01T00:00:00Z\nFlags: \n\nHOOK_CUR_AWAIT_STOP\n'
 } >"$box/cur/hook-cur-wait"
-tmux -L "$SOCK" copy-mode -t "$alice_pane"
-set +e
 del_hook_cur="$(muxa_as "$bob_pane" deliver alice 2>&1)"
-del_hook_rc=$?
-set -e
-[ "$del_hook_rc" -ne 0 ] && ok "deliver cur/ hook mail defers when not ready" \
-  || bad "deliver cur/ hook mail defers when not ready" "exit=$del_hook_rc out=$del_hook_cur"
-[ -f "$box/cur/hook-cur-wait" ] && ok "failed deliver cur/ leaves hook mail in cur/" \
-  || bad "failed deliver cur/ leaves hook mail in cur/" "$(ls -la "$box/cur" "$box/new" 2>&1)"
+assert_contains "$del_hook_cur" "no mail" "deliver skips hook cur/ awaiting Stop"
+[ -f "$box/cur/hook-cur-wait" ] && ok "deliver leaves hook mail in cur/" \
+  || bad "deliver leaves hook mail in cur/" "$(ls -la "$box/cur" "$box/new" 2>&1)"
 hook_new_n="$(find "$box/new" -type f 2>/dev/null | awk 'END { print NR }')"
-[ "$hook_new_n" -eq 0 ] && ok "failed deliver cur/ does not resurrect hook mail to new/" \
-  || bad "failed deliver cur/ does not resurrect hook mail to new/" "new=$hook_new_n"
-tmux -L "$SOCK" send-keys -t "$alice_pane" -X cancel 2>/dev/null || true
+[ "$hook_new_n" -eq 0 ] && ok "deliver does not resurrect hook mail to new/" \
+  || bad "deliver does not resurrect hook mail to new/" "new=$hook_new_n"
 find "$box/cur" -type f -exec rm -f {} + 2>/dev/null || true
 muxa_as "$alice_pane" state idle
+
+# --- deliver cur/ inject fallback keeps claim on inject failure ---
+muxa_as "$alice_pane" register --name alice --kind generic --deliver inject >/dev/null
+muxa_as "$alice_pane" state idle
+box="$(muxa_box alice)"
+find "$box/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$box/cur" -type f -exec rm -f {} + 2>/dev/null || true
+{
+  printf 'From: bob\nTo: alice\nId: inject-cur-wait\nTime: 2026-01-01T00:00:00Z\nFlags: \n\nINJECT_CUR_KEEP\n'
+} >"$box/cur/inject-cur-wait"
+tmux -L "$SOCK" copy-mode -t "$alice_pane"
+set +e
+del_inj_cur="$(muxa_as "$bob_pane" deliver alice 2>&1)"
+del_inj_rc=$?
+set -e
+[ "$del_inj_rc" -ne 0 ] && ok "deliver inject cur/ defers when not ready" \
+  || bad "deliver inject cur/ defers when not ready" "exit=$del_inj_rc out=$del_inj_cur"
+[ -f "$box/cur/inject-cur-wait" ] && ok "failed deliver inject cur/ leaves mail in cur/" \
+  || bad "failed deliver inject cur/ leaves mail in cur/" "$(ls -la "$box/cur" "$box/new" 2>&1)"
+inj_new_n="$(find "$box/new" -type f 2>/dev/null | awk 'END { print NR }')"
+[ "$inj_new_n" -eq 0 ] && ok "failed deliver inject cur/ does not unclaim to new/" \
+  || bad "failed deliver inject cur/ does not unclaim to new/" "new=$inj_new_n"
+tmux -L "$SOCK" send-keys -t "$alice_pane" -X cancel 2>/dev/null || true
+find "$box/cur" -type f -exec rm -f {} + 2>/dev/null || true
+find "$box/new" -type f -exec rm -f {} + 2>/dev/null || true
 
 # --- peek runs reaper on stale cur/ ---
 muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
