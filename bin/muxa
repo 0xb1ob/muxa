@@ -228,7 +228,29 @@ clear_muxa_registration() {
   unset_pane_opt "$pane" @muxa_hook_ok
   unset_pane_opt "$pane" @muxa_unread
   unset_pane_opt "$pane" @muxa_kick_wait
+  clear_stop_pending "$pane"
   set_pane_title "$pane" ""
+}
+
+clear_stop_pending() {
+  local pane="$1"
+  unset_pane_opt "$pane" @muxa_stop_pending
+  unset_pane_opt "$pane" @muxa_stop_pending_batch
+}
+
+stop_pending_batch_from_list() {
+  local list="$1" f base out=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    base="$(basename "$f")"
+    [ -n "$base" ] || continue
+    if [ -n "$out" ]; then
+      out="$out,$base"
+    else
+      out="$base"
+    fi
+  done <"$list"
+  printf '%s' "$out"
 }
 
 find_pane_by_target() {
@@ -833,6 +855,46 @@ claim_cur() {
   done <<EOF
 $(maildir_sorted_cur "$box")
 EOF
+}
+
+# cur/ files claimed this turn (younger than SWEEP_MIN_AGE). A same-turn
+# second Stop hook (user + project hooks.json) finds new/ empty; Cursor
+# uses the last hook stdout, so re-emit the young claim. When $2 is set,
+# only basenames from the prior from_new drain are re-emitted so earlier
+# young cur/ from other turns does not leak on a later empty Stop.
+claim_cur_young() {
+  local name="$1" batch="${2:-}" box f base age n=0
+  box="$(ensure_box "$name")"
+  while IFS= read -r base; do
+    [ -n "$base" ] || continue
+    [ "$n" -ge "$BATCH_MAX" ] && break
+    if [ -n "$batch" ]; then
+      case ",$batch," in
+        *,"$base",*) ;;
+        *) continue ;;
+      esac
+    fi
+    f="$box/cur/$base"
+    [ -f "$f" ] || continue
+    age="$(file_age_s "$f")"
+    [ "$age" -lt "$SWEEP_MIN_AGE" ] || continue
+    printf '%s\n' "$f"
+    n=$((n + 1))
+  done <<EOF
+$(maildir_sorted_cur "$box")
+EOF
+}
+
+young_cur_count() {
+  local name="$1" box f base age n=0
+  box="$(ensure_box "$name")"
+  for f in "$box/cur"/*; do
+    [ -f "$f" ] || continue
+    age="$(file_age_s "$f")"
+    [ "$age" -lt "$SWEEP_MIN_AGE" ] || continue
+    n=$((n + 1))
+  done
+  printf '%s' "$n"
 }
 
 claim_new() {
@@ -2057,9 +2119,10 @@ cmd_hook() {
     idle)
       [ -n "$pane" ] || return 0
       set_pane_opt "$pane" @muxa_state idle
+      clear_stop_pending "$pane"
       ;;
     stop)
-      local name list payload lock
+      local name list payload lock from_new=0 pending_batch=""
       [ -n "$pane" ] || return 0
       name="$(pane_fmt "$pane" '#{@muxa_name}')"
       if [ -z "$name" ]; then
@@ -2071,6 +2134,7 @@ cmd_hook() {
       case "$status" in
         aborted|error)
           set_pane_opt "$pane" @muxa_state idle
+          clear_stop_pending "$pane"
           refresh_unread "$pane" "$name"
           return 0
           ;;
@@ -2081,12 +2145,25 @@ cmd_hook() {
       if lock_acquire "$lock" 100; then
         set_pane_opt "$pane" @muxa_hook_ok 1
         sweep_consumed "$name"
+        if [ "$(young_cur_count "$name")" -eq 0 ]; then
+          clear_stop_pending "$pane"
+        fi
         claim_new "$name" >"$list" || true
         lock_release "$lock"
       else
         set_pane_opt "$pane" @muxa_hook_ok 1
         sweep_consumed "$name"
+        if [ "$(young_cur_count "$name")" -eq 0 ]; then
+          clear_stop_pending "$pane"
+        fi
         claim_new "$name" >"$list" || true
+      fi
+      if [ -s "$list" ]; then
+        from_new=1
+        clear_stop_pending "$pane"
+      elif [ "$(pane_fmt "$pane" '#{@muxa_stop_pending}')" = "1" ]; then
+        pending_batch="$(pane_fmt "$pane" '#{@muxa_stop_pending_batch}')"
+        claim_cur_young "$name" "$pending_batch" >"$list" || true
       fi
       if [ ! -s "$list" ]; then
         rm -f "$list"
@@ -2098,8 +2175,21 @@ cmd_hook() {
       # here hid the message from peek/who when the CLI deferred followup.
       set_pane_opt "$pane" @muxa_state busy
       payload="$(payload_from_claimed "$list")"
+      if [ "$from_new" -eq 1 ]; then
+        pending_batch="$(stop_pending_batch_from_list "$list")"
+      fi
       rm -f "$list"
       refresh_unread "$pane" "$name"
+      if [ "$from_new" -eq 1 ] && [ "$format" = "cursor" ]; then
+        set_pane_opt "$pane" @muxa_stop_pending 1
+        if [ -n "$pending_batch" ]; then
+          set_pane_opt "$pane" @muxa_stop_pending_batch "$pending_batch"
+        else
+          unset_pane_opt "$pane" @muxa_stop_pending_batch
+        fi
+      else
+        clear_stop_pending "$pane"
+      fi
       printf '%s' "$payload" | json_out "$format"
       ;;
     *)
