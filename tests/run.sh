@@ -219,10 +219,32 @@ muxa_as "$bob_pane" send alice 'pi continue' >/dev/null
 pjson="$(muxa_as "$alice_pane" hook stop --format pi)"
 assert_contains "$pjson" '"continue": true' "pi stop JSON"
 
-# --- empty stop is silent ---
+# --- empty stop is silent (prior cursor/pi drains must not leak) ---
+python3 - "$(muxa_box alice)/cur" <<'PY'
+import os, sys, time
+d = sys.argv[1]
+now = time.time()
+for name in os.listdir(d):
+    p = os.path.join(d, name)
+    if os.path.isfile(p):
+        os.utime(p, (now - 5, now - 5))
+PY
+muxa_as "$alice_pane" hook stop --format claude >/dev/null
+find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
+find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
 muxa_as "$alice_pane" state busy
 empty="$(muxa_as "$alice_pane" hook stop --format claude)"
 [ -z "$empty" ] && ok "empty stop prints nothing" || bad "empty stop prints nothing" "got: $empty"
+# Fail-closed: fresh cursor/pi drains then immediate empty stop (Linux-fast path).
+muxa_as "$alice_pane" state busy
+muxa_as "$bob_pane" send alice 'cursor followup leak' >/dev/null
+muxa_as "$alice_pane" hook stop --format cursor >/dev/null
+muxa_as "$alice_pane" state busy
+muxa_as "$bob_pane" send alice 'pi continue leak' >/dev/null
+muxa_as "$alice_pane" hook stop --format pi >/dev/null
+empty_leak="$(muxa_as "$alice_pane" hook stop --format claude)"
+[ -z "$empty_leak" ] && ok "empty stop silent after prior cursor/pi drains" \
+  || bad "empty stop silent after prior cursor/pi drains" "got: $empty_leak"
 find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
 find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
 
