@@ -1040,6 +1040,73 @@ assert_contains "$flag_child" "spawned flag-child-flags" "child flags after -- a
 flag_child_sep="$(muxa_as "$bob_pane" spawn --name flag-child-sep sh -c 'exec sleep 3600' -- --cwd "$spawn_flag")"
 assert_contains "$flag_child_sep" "spawned flag-child-sep" "child -- separator allows later muxa-like flags"
 
+wait_args_file() {
+  local file="$1" i=0
+  while [ $i -lt 30 ] && [ ! -s "$file" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+}
+
+# --- spawn claude: do not append -p/--print (muxa#29) ---
+fake_bin="$tmpdir/fake-bin"
+mkdir -p "$fake_bin"
+claude_args="$tmpdir/claude-args.txt"
+: > "$claude_args"
+cat > "$fake_bin/claude" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" > "$claude_args"
+exec sleep 3600
+EOF
+chmod +x "$fake_bin/claude"
+claude_sp="$(muxa_as "$bob_pane" spawn --name claude-test -- "$fake_bin/claude" --model haiku)"
+assert_contains "$claude_sp" "spawned claude-test" "spawn claude creates child"
+assert_contains "$claude_sp" "kind=claude" "spawn claude infers kind=claude"
+wait_args_file "$claude_args"
+claude_argv="$(cat "$claude_args" 2>/dev/null || true)"
+case " $claude_argv " in
+  *" -p "*|*" --print "*) bad "spawn claude does not append -p/--print" "argv=$claude_argv" ;;
+  *) ok "spawn claude does not append -p/--print" ;;
+esac
+assert_contains "$claude_argv" "--model" "spawn claude passes caller flags"
+assert_contains "$claude_argv" "haiku" "spawn claude passes --model value"
+
+: > "$claude_args"
+muxa_as "$bob_pane" spawn --name claude-print -- "$fake_bin/claude" --print hello >/dev/null
+wait_args_file "$claude_args"
+print_argv="$(cat "$claude_args" 2>/dev/null || true)"
+case " $print_argv " in
+  *" --print "*) ok "spawn claude preserves caller --print" ;;
+  *) bad "spawn claude preserves caller --print" "argv=$print_argv" ;;
+esac
+
+cursor_args="$tmpdir/cursor-args.txt"
+: > "$cursor_args"
+cat > "$fake_bin/agent" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" > "$cursor_args"
+exec sleep 3600
+EOF
+chmod +x "$fake_bin/agent"
+muxa_as "$bob_pane" spawn --name cursor-test --kind cursor -- "$fake_bin/agent" --model foo >/dev/null
+wait_args_file "$cursor_args"
+cursor_argv="$(cat "$cursor_args" 2>/dev/null || true)"
+case " $cursor_argv " in
+  *" --trust "*) ok "spawn cursor appends --trust" ;;
+  *) bad "spawn cursor appends --trust" "argv=$cursor_argv" ;;
+esac
+
+fail_sp="$(muxa_as "$bob_pane" spawn --name failfast -- false)"
+fail_pane="$(printf '%s\n' "$fail_sp" | spawn_pane_id)"
+sleep 0.3
+fail_win="$(tmux -L "$SOCK" display-message -t "$fail_pane" -p '#{session_name}:#{window_index}' 2>/dev/null || true)"
+fail_roe="$(tmux -L "$SOCK" show-window-options -t "$fail_win" -v remain-on-exit 2>/dev/null || true)"
+[ "$fail_roe" = "on" ] && ok "spawn sets remain-on-exit on child window" \
+  || bad "spawn sets remain-on-exit on child window" "remain-on-exit=$fail_roe"
+fail_dead="$(tmux -L "$SOCK" display-message -t "$fail_pane" -p '#{pane_dead}' 2>/dev/null || echo 0)"
+[ "$fail_dead" = "1" ] && ok "failed spawn child pane stays visible as dead" \
+  || bad "failed spawn child pane stays visible as dead" "pane_dead=$fail_dead"
+
 # --- spawn cwd occupancy: warn on stderr, still create the pane ---
 occ_dir="$tmpdir/occ-cwd"
 occ_git="$tmpdir/occ-git"
