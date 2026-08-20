@@ -437,13 +437,7 @@ pane_command_line() {
 
 # Classify a CLI from a spawn argument (muxa spawn -- CMD …).
 kind_from_command() {
-  case "$1" in
-    *claude*) printf 'claude' ;;
-    *cursor-agent*) printf 'cursor' ;;
-    agent|cursor-agent|*/agent) printf 'cursor' ;;
-    omp|pi|*/omp) printf 'pi' ;;
-    *) printf 'generic' ;;
-  esac
+  kind_from_argv "$1"
 }
 
 # Classify from a full process command line (ps). Match executable basenames

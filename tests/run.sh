@@ -1121,6 +1121,22 @@ cat > "$kind_fakebin/claude-projects/cursor-agent/node" <<'EOF'
 exec sleep 3600
 EOF
 chmod +x "$kind_fakebin/claude-projects/cursor-agent/node"
+
+spawn_claudeproj="$(muxa_as "$bob_pane" spawn --name kind-claudeproj-spawn -- \
+  "$kind_fakebin/claude-projects/cursor-agent/node")"
+assert_contains "$spawn_claudeproj" "kind=cursor" \
+  "spawn claude-projects/cursor-agent path infers cursor"
+case "$spawn_claudeproj" in
+  *kind=claude*) bad "spawn claude-projects path is not classified as claude" "$spawn_claudeproj" ;;
+  *) ok "spawn claude-projects path is not classified as claude" ;;
+esac
+spawn_claudeproj_pane="$(printf '%s\n' "$spawn_claudeproj" | spawn_pane_id)"
+spawn_claudeproj_kind="$(tmux -L "$SOCK" display-message -t "$spawn_claudeproj_pane" -p '#{@muxa_kind}')"
+[ "$spawn_claudeproj_kind" = "cursor" ] \
+  && ok "spawn sets @muxa_kind=cursor for claude-projects cursor path" \
+  || bad "spawn sets @muxa_kind=cursor for claude-projects cursor path" \
+     "got=$spawn_claudeproj_kind"
+
 tmux -L "$SOCK" new-window -t muxa -n kindclaudeproj \
   "$kind_fakebin/claude-projects/cursor-agent/node"
 sleep 0.2
