@@ -25,6 +25,7 @@ muxa — message other AI CLIs in this tmux server
 
   muxa register [--name NAME] [--id ID] [--parent NAME] [--kind claude|cursor|pi|generic] [--deliver hook|inject]
   muxa spawn [--name NAME] [--kind KIND] [--cwd DIR] [--split] [--window] -- COMMAND...
+                                spawn flags must precede -- or the command word
                                 omit --name to get a unique adjective-noun alias (swift-oak)
                                 default: split into a tiled grid in this window (--window for a new window)
                                 child cwd: --cwd, else process PWD, else this pane's path
@@ -1864,6 +1865,7 @@ EOF
 cmd_spawn() {
   need_tmux
   local pane name kind new_window=0 parent id cwd cwd_flag="" sess quoted child cmdpath
+  local explicit_cmd=0 cmd arg
   pane="$(this_pane)"
   parent="$(pane_fmt "$pane" '#{@muxa_name}')"
   [ -n "$parent" ] || die "spawn: register this pane first"
@@ -1876,11 +1878,25 @@ cmd_spawn() {
       --cwd) cwd_flag="$2"; shift 2 ;;
       --split) shift ;; # compat: split into the parent window is the default
       --window) new_window=1; shift ;;
-      --) shift; break ;;
+      --) explicit_cmd=1; shift; break ;;
       -*) die "spawn: unknown flag $1" ;;
       *) break ;;
     esac
   done
+  # Fail closed: muxa flags after the command word are passed to the child today.
+  if [ "$explicit_cmd" -eq 0 ] && [ $# -gt 1 ]; then
+    cmd="$1"
+    shift
+    for arg in "$@"; do
+      case "$arg" in
+        --) break ;;
+        --name|--kind|--cwd|--split|--window)
+          die "spawn: $arg must precede the command (use: muxa spawn --name NAME --cwd DIR -- COMMAND…)"
+          ;;
+      esac
+    done
+    set -- "$cmd" "$@"
+  fi
   [ $# -ge 1 ] || die "spawn: command required (muxa spawn --name worker -- cmd…)"
   id="$(new_muxa_id)"
   if [ -n "$name" ]; then

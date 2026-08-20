@@ -1021,6 +1021,25 @@ set -e
 [ "$cwd_code" -eq 2 ] && ok "spawn --cwd missing dir exits 2" \
   || bad "spawn --cwd missing dir exits 2" "exit=$cwd_code"
 
+# --- spawn flag order: muxa flags after the command must fail closed ---
+set +e
+flag_order_err="$(muxa_as "$bob_pane" spawn sleep --cwd "$spawn_flag" --name flag-order-probe 2>&1)"
+flag_order_code=$?
+set -e
+[ "$flag_order_code" -eq 2 ] && ok "spawn flags after command exit 2" \
+  || bad "spawn flags after command exit 2" "exit=$flag_order_code out=$flag_order_err"
+assert_contains "$flag_order_err" "must precede the command" "spawn flags after command explains fix"
+
+flag_ok="$(muxa_as "$bob_pane" spawn --name flag-order-ok --cwd "$spawn_flag" -- sleep 3600)"
+assert_contains "$flag_ok" "spawned flag-order-ok" "spawn flags before -- succeed"
+assert_contains "$flag_ok" "cwd=$fromflag_abs" "spawn -- before command honors --cwd"
+
+flag_child="$(muxa_as "$bob_pane" spawn --name flag-child-flags -- sh -c 'exec sleep 3600' -- --cwd "$spawn_flag")"
+assert_contains "$flag_child" "spawned flag-child-flags" "child flags after -- are allowed"
+
+flag_child_sep="$(muxa_as "$bob_pane" spawn --name flag-child-sep sh -c 'exec sleep 3600' -- --cwd "$spawn_flag")"
+assert_contains "$flag_child_sep" "spawned flag-child-sep" "child -- separator allows later muxa-like flags"
+
 # --- spawn cwd occupancy: warn on stderr, still create the pane ---
 occ_dir="$tmpdir/occ-cwd"
 occ_git="$tmpdir/occ-git"
