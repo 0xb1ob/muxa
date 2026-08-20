@@ -929,8 +929,9 @@ def has_braille(text):
 
 def strip_input_chrome(body):
     body = body.strip().lstrip(PROMPT_CHARS + " ").strip()
-    body = PLACEHOLDER_RE.sub("", body)
-    return body.strip()
+    if PLACEHOLDER_RE.fullmatch(body):
+        return ""
+    return body
 
 try:
     rows = sys.stdin.read().split("\n")
