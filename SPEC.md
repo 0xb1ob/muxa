@@ -267,6 +267,9 @@ hook stop:
   else: set state=busy; print native continue payload; leave in cur/;
         set @muxa_stop_pending when draining new/ with --format cursor only
         (store batch basenames; cleared on re-emit, idle hook, or new claim)
+        When --format cursor and the composer is idle, paste into the tmux
+        pane instead of followup_message (live Agent CLI often ignores stop
+        stdout); dual-hook second Stop may then be silent without losing mail
 ```
 
 Native continue payloads (stdout of `muxa hook stop --format …`):
@@ -274,7 +277,7 @@ Native continue payloads (stdout of `muxa hook stop --format …`):
 | CLI    | Format                                                       |
 | ------ | ------------------------------------------------------------ |
 | Claude | `{hookSpecificOutput:{hookEventName:"Stop", additionalContext}}` |
-| Cursor | `{followup_message}` with `loop_limit: null`                 |
+| Cursor | `{followup_message}` with `loop_limit: null` (or silent stdout when pasted) |
 | Pi     | `{continue: true, additionalContext}`                        |
 
 Inject payload (what the TUI sees) is the same text the model would get
