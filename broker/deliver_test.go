@@ -87,10 +87,10 @@ func fakeCursorPos(cap string) string {
 	lines := strings.Split(cap, "\n")
 	y, x := 0, 0
 	for i, l := range lines {
-		cells := attrCells(l)
+		runes := visibleRunes(l)
 		empty := true
-		for _, c := range cells {
-			if !unicode.IsSpace(c.r) {
+		for _, r := range runes {
+			if !unicode.IsSpace(r) {
 				empty = false
 				break
 			}
@@ -99,7 +99,7 @@ func fakeCursorPos(cap string) string {
 			continue
 		}
 		y = i
-		x = len(cells)
+		x = len(runes)
 	}
 	return strconv.Itoa(y) + " " + strconv.Itoa(x)
 }

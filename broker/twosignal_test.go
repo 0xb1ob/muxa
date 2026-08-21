@@ -24,11 +24,11 @@ func TestTwoSignalFreeBasics(t *testing.T) {
 func TestTwoSignalEmptyAtCursorTypedShell(t *testing.T) {
 	line := "muxa % hello"
 	// cursor after "hello" → text left of cursor is the whole line → typed.
-	cells := attrCells(line)
-	if emptyAtCursor(line, 0, len(cells)) {
+	runes := visibleRunes(line)
+	if emptyAtCursor(line, 0, len(runes)) {
 		t.Fatal("typed text left of cursor must WAIT")
 	}
-	if !emptyAtCursor("muxa % ", 0, len(attrCells("muxa % "))) {
+	if !emptyAtCursor("muxa % ", 0, len(visibleRunes("muxa % "))) {
 		t.Fatal("prompt only, cursor at end, must be empty")
 	}
 }
