@@ -35,6 +35,10 @@ export XDG_RUNTIME_DIR="$HOME_ISO/run"
 unset TMUX MUXA_NAME MUXA_PARENT MUXA_ID || true
 # Do not inherit the operator mailbox.
 unset MUXA_HOME || true
+case "$MUXA_BROKER_DIR" in
+  "$HOME_ISO"/*) ;;
+  *) echo "tests/broker.sh: MUXA_BROKER_DIR must be under $HOME_ISO" >&2; exit 1 ;;
+esac
 
 pass=0
 fail=0
@@ -42,9 +46,13 @@ ok() { pass=$((pass + 1)); printf 'ok %s %s\n' "$pass" "$1"; }
 bad() { fail=$((fail + 1)); printf 'not ok %s %s\n' "$((pass + fail))" "$1"; printf '  %s\n' "$2" >&2; }
 
 cleanup() {
-  if [ -f "$MUXA_BROKER_PID" ]; then
-    kill "$(cat "$MUXA_BROKER_PID")" 2>/dev/null || true
-  fi
+  case "${MUXA_BROKER_PID:-}" in
+    "$HOME_ISO"/*)
+      if [ -f "$MUXA_BROKER_PID" ]; then
+        kill "$(cat "$MUXA_BROKER_PID")" 2>/dev/null || true
+      fi
+      ;;
+  esac
   tmux -L "$SOCK" kill-server 2>/dev/null || true
   rm -rf "$HOME_ISO"
 }

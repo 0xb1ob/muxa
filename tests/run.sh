@@ -45,11 +45,21 @@ export MUXA_BROKER_PID="$tmpdir/broker/broker.pid"
 export MUXA_BROKER_BIN="$ROOT/bin/muxa-broker"
 export XDG_RUNTIME_DIR="$tmpdir/run"
 mkdir -p "$tmpdir/run" "$tmpdir/broker"
+case "$MUXA_BROKER_DIR" in
+  "$tmpdir"/*) ;;
+  *) echo "tests/run.sh: MUXA_BROKER_DIR must be under $tmpdir" >&2; exit 1 ;;
+esac
 
 cleanup() {
-  if [ -f "${MUXA_BROKER_PID:-}" ]; then
-    kill "$(cat "$MUXA_BROKER_PID")" 2>/dev/null || true
-  fi
+  # Fail closed: never SIGTERM a pidfile outside this run's tmpdir
+  # (that would be the operator daemon on /tmp/muxa-UID/...).
+  case "${MUXA_BROKER_PID:-}" in
+    "$tmpdir"/*)
+      if [ -f "$MUXA_BROKER_PID" ]; then
+        kill "$(cat "$MUXA_BROKER_PID")" 2>/dev/null || true
+      fi
+      ;;
+  esac
   tmux -L "$SOCK" kill-server 2>/dev/null || true
   rm -rf "$tmpdir"
 }
@@ -794,6 +804,29 @@ fi
 who_json_is_null "$whoj" alice session && ok "who --json session is always null" \
   || bad "who --json session is always null" "alice session not null"
 
+shape_bad=""
+while IFS= read -r n; do
+  [ -n "$n" ] || continue
+  st="$(who_json_get "$whoj" "$n" state)"
+  case "$st" in
+    idle|busy) ;;
+    *) shape_bad="${shape_bad}${n}.state=${st}; " ;;
+  esac
+  [ "$st" = "blocked" ] && shape_bad="${shape_bad}${n}.state=blocked; "
+  sta="$(who_json_get "$whoj" "$n" status)"
+  case "$sta" in
+    live|drawing|ghost) ;;
+    *) shape_bad="${shape_bad}${n}.status=${sta}; " ;;
+  esac
+  if ! who_json_is_null "$whoj" "$n" session; then
+    shape_bad="${shape_bad}${n}.session!=null; "
+  fi
+done <<EOF
+$(printf '%s' "$whoj" | muxa-broker json-values name)
+EOF
+[ -z "$shape_bad" ] && ok "who --json fail-closed: state idle|busy, status live|drawing|ghost, session null" \
+  || bad "who --json fail-closed: state idle|busy, status live|drawing|ghost, session null" "$shape_bad"
+
 occ=""
 while IFS= read -r n; do
   [ -n "$n" ] || continue
@@ -1069,6 +1102,11 @@ case "$who" in
   *killid*) bad "kill by id removes from who" "still listed: $who" ;;
   *) ok "kill by id removes from who" ;;
 esac
+if pane_exists "$killid_pane"; then
+  bad "kill by id removes the tmux pane" "pane $killid_pane still exists (unregister would leave it)"
+else
+  ok "kill by id removes the tmux pane"
+fi
 
 set +e
 muxa_as "$bob_pane" kill nobody 2>/dev/null
@@ -1118,6 +1156,47 @@ state_rc=$?
 set -e
 [ "$state_rc" -eq 1 ] && ok "state is not a command" \
   || bad "state is not a command" "exit=$state_rc"
+
+# --- darwin adhoc sign of the source broker before RPC (#67) ---
+# broker_cli signs $MUXA_BROKER_BIN (the source) then execs it. Do not stop
+# the isolated test daemon: who --json still RPCs the source for encoding.
+unsigned_src="$tmpdir/unsigned-muxa-broker"
+"$GO" build "${ldflags[@]}" -o "$unsigned_src" "$ROOT/broker"
+chmod +x "$unsigned_src"
+daemon_pid_before=""
+[ -f "$MUXA_BROKER_PID" ] && daemon_pid_before="$(cat "$MUXA_BROKER_PID" 2>/dev/null || true)"
+saved_bin_sign="$MUXA_BROKER_BIN"
+export MUXA_BROKER_BIN="$unsigned_src"
+set +e
+who_unsigned="$(muxa_as "$bob_pane" who --json 2>&1)"
+rc_unsigned=$?
+set -e
+export MUXA_BROKER_BIN="$saved_bin_sign"
+if [ "$rc_unsigned" -eq 0 ] \
+  && [ "$(printf '%s' "$who_unsigned" | muxa-broker json-type)" = "array" ]; then
+  ok "who --json RPC works through an unsigned source broker (isolated daemon untouched)"
+else
+  bad "who --json RPC works through an unsigned source broker (isolated daemon untouched)" \
+    "exit=$rc_unsigned out=$who_unsigned"
+fi
+if [ "$(uname -s)" = Darwin ]; then
+  if codesign --verify "$unsigned_src" >/dev/null 2>&1; then
+    ok "broker_cli adhoc-signs the source broker before RPC"
+  else
+    bad "broker_cli adhoc-signs the source broker before RPC" "codesign --verify failed"
+  fi
+else
+  ok "broker_cli adhoc-signs the source broker before RPC (non-darwin: no-op)"
+fi
+daemon_pid_after=""
+[ -f "$MUXA_BROKER_PID" ] && daemon_pid_after="$(cat "$MUXA_BROKER_PID" 2>/dev/null || true)"
+if [ -n "$daemon_pid_before" ] && [ "$daemon_pid_before" = "$daemon_pid_after" ] \
+  && kill -0 "$daemon_pid_before" 2>/dev/null; then
+  ok "sign-before-RPC left the isolated test daemon pid unchanged"
+else
+  bad "sign-before-RPC left the isolated test daemon pid unchanged" \
+    "before=${daemon_pid_before:-none} after=${daemon_pid_after:-none}"
+fi
 
 # --- jobs/preflight gone; muxa must not require br, git, or python3 ---
 nobr_bin="$tmpdir/nobr-bin"

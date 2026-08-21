@@ -45,9 +45,13 @@ export XDG_RUNTIME_DIR="$ISO/run"
 unset TMUX MUXA_NAME MUXA_PARENT MUXA_ID MUXA_HOME || true
 
 cleanup() {
-  if [ -f "$MUXA_BROKER_PID" ]; then
-    kill "$(cat "$MUXA_BROKER_PID")" 2>/dev/null || true
-  fi
+  case "${MUXA_BROKER_PID:-}" in
+    "$ISO"/*)
+      if [ -f "$MUXA_BROKER_PID" ]; then
+        kill "$(cat "$MUXA_BROKER_PID")" 2>/dev/null || true
+      fi
+      ;;
+  esac
   tmux -L "$SOCK" kill-server 2>/dev/null || true
   # keep $ISO for evidence if failed; always leave LOG
 }
