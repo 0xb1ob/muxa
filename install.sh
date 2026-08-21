@@ -11,7 +11,7 @@
 #      MUXA_BROKER_VERSION (release tag, default latest) MUXA_BROKER_URL
 #      MUXA_BROKER_BASE_URL MUXA_BROKER_SKIP_VERIFY
 #
-# Go is not required: muxa-broker is downloaded as a release asset.
+# Go is not required: muxa is downloaded as a release asset.
 # A live daemon is stopped before the binary is replaced (overwriting a
 # running Mach-O on darwin 25 SIGKILLs it), then started again so the new
 # process re-adopts pending/ done/ in the broker dir.
@@ -25,7 +25,7 @@ BIN="${MUXA_BIN_DIR:-$HOME/.local/bin}"
 die() { printf 'muxa-install: %s\n' "$*" >&2; exit 1; }
 
 is_muxa_tree() {
-  [ -n "${1:-}" ] && [ -f "$1/bin/muxa" ] && [ -f "$1/install.sh" ] && [ -d "$1/skills/muxa-parent" ]
+  [ -n "${1:-}" ] && [ -f "$1/install.sh" ] && [ -d "$1/skills/muxa-parent" ]
 }
 
 # True if dir is empty or only files the previous installer left behind.
@@ -83,13 +83,10 @@ else
   exec "$MUXA_HOME/install.sh"
 fi
 
-mkdir -p "$BIN"
-ln -sfn "$ROOT/bin/muxa" "$BIN/muxa"
-chmod +x "$ROOT/bin/muxa" "$ROOT/install.sh" "$ROOT/tests/run.sh"
+mkdir -p "$BIN" "$ROOT/bin"
+chmod +x "$ROOT/install.sh" "$ROOT/tests/run.sh" 2>/dev/null || true
 
-# Go broker. Never compiled here: Go is not an install-time dependency.
-# The binary is a release asset, verified against that release's SHA256SUMS.
-broker_platform() {
+muxa_platform() {
   local os arch
   case "$(uname -s)" in
     Darwin) os=darwin ;;
@@ -124,15 +121,15 @@ sha256_of() {
   fi
 }
 
-# stdout: path of a verified broker binary in $1 (a scratch dir). Nonzero on
-# any failure — an unverified daemon binary is never installed.
-download_broker() {
+# stdout: path of a verified muxa binary in $1 (a scratch dir). Nonzero on
+# any failure — an unverified binary is never installed.
+download_muxa() {
   local tmp="$1" plat asset base bin want got
-  plat="$(broker_platform)" || {
-    printf 'muxa-install: no muxa-broker build for %s/%s\n' "$(uname -s)" "$(uname -m)" >&2
+  plat="$(muxa_platform)" || {
+    printf 'muxa-install: no muxa build for %s/%s\n' "$(uname -s)" "$(uname -m)" >&2
     return 1
   }
-  asset="muxa-broker-$plat"
+  asset="muxa-$plat"
   bin="$tmp/$asset"
 
   if [ -n "${MUXA_BROKER_URL:-}" ]; then
@@ -158,7 +155,7 @@ download_broker() {
     return 0
   fi
   fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" || {
-    printf 'muxa-install: %s/SHA256SUMS missing; refusing unverified broker\n' "$base" >&2
+    printf 'muxa-install: %s/SHA256SUMS missing; refusing unverified muxa\n' "$base" >&2
     return 1
   }
   want="$(awk -v a="$asset" '$2 == a || $2 == "*" a {print $1}' "$tmp/SHA256SUMS" | head -1)"
@@ -170,7 +167,7 @@ download_broker() {
   printf '%s' "$bin"
 }
 
-# Same layout as bin/muxa broker_setup_paths / runtime_root.
+# Same layout as muxa broker_setup_paths / runtime_root.
 install_broker_dir() {
   local base pid
   if [ -n "${MUXA_BROKER_DIR:-}" ]; then
@@ -195,7 +192,7 @@ install_broker_pidfile() {
   printf '%s/broker.pid' "$(install_broker_dir)"
 }
 
-# SIGTERM the pidfile pid, matching cmd_broker stop. Do not rm pending/,
+# SIGTERM the pidfile pid, matching muxa broker stop. Do not rm pending/,
 # done/, or the broker dir — the next start re-adopts that queue.
 stop_running_broker() {
   local pidfile sock pid i
@@ -241,30 +238,27 @@ start_installed_broker() {
   return 0
 }
 
-if [ -d "$ROOT/broker" ]; then
-  _tmp="$(mktemp -d "${TMPDIR:-/tmp}/muxa-broker.XXXXXX")"
-  if _bin="$(download_broker "$_tmp")" && [ -s "$_bin" ]; then
-    # Stop first, then replace. A live inode overwrite SIGKILLs on darwin 25.
-    stop_running_broker
-    install -m 755 "$_bin" "$ROOT/bin/muxa-broker"
-    if [ "$(uname -s)" = Darwin ]; then
-      # darwin 25+ SIGKILLs quarantined / unsigned Mach-O.
-      xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true
-      codesign -s - --force --timestamp=none "$ROOT/bin/muxa-broker" 2>/dev/null || true
-    fi
-    ln -sfn "$ROOT/bin/muxa-broker" "$BIN/muxa-broker"
-    printf 'muxa-install: muxa-broker -> %s\n' "$ROOT/bin/muxa-broker"
-  elif [ -x "$ROOT/bin/muxa-broker" ]; then
-    ln -sfn "$ROOT/bin/muxa-broker" "$BIN/muxa-broker"
-    printf 'muxa-install: keeping existing %s\n' "$ROOT/bin/muxa-broker" >&2
-  else
-    printf 'muxa-install: no muxa-broker installed; muxa send will fail closed\n' >&2
+_tmp="$(mktemp -d "${TMPDIR:-/tmp}/muxa-bin.XXXXXX")"
+if _bin="$(download_muxa "$_tmp")" && [ -s "$_bin" ]; then
+  # Stop first, then replace. A live inode overwrite SIGKILLs on darwin 25.
+  stop_running_broker
+  install -m 755 "$_bin" "$ROOT/bin/muxa"
+  if [ "$(uname -s)" = Darwin ]; then
+    xattr -c "$ROOT/bin/muxa" 2>/dev/null || true
+    codesign -s - --force --timestamp=none "$ROOT/bin/muxa" 2>/dev/null || true
   fi
-  rm -rf "$_tmp"
-  unset _tmp _bin
-  if [ -x "$ROOT/bin/muxa-broker" ] || [ -x "$BIN/muxa" ] || [ -x "$ROOT/bin/muxa" ]; then
-    start_installed_broker
-  fi
+  ln -sfn "$ROOT/bin/muxa" "$BIN/muxa"
+  printf 'muxa-install: muxa -> %s\n' "$ROOT/bin/muxa"
+elif [ -x "$ROOT/bin/muxa" ]; then
+  ln -sfn "$ROOT/bin/muxa" "$BIN/muxa"
+  printf 'muxa-install: keeping existing %s\n' "$ROOT/bin/muxa" >&2
+else
+  printf 'muxa-install: no muxa installed; muxa send will fail closed\n' >&2
+fi
+rm -rf "$_tmp"
+unset _tmp _bin
+if [ -x "$BIN/muxa" ] || [ -x "$ROOT/bin/muxa" ]; then
+  start_installed_broker
 fi
 
 # Skills: on-demand, not MCP. Progressive disclosure = fewer tokens.
@@ -278,6 +272,12 @@ for skill in muxa-parent muxa-worker; do
 done
 
 echo
-echo "muxa $("$BIN/muxa" version) -> $BIN/muxa  (repo $ROOT)"
+if [ -x "$BIN/muxa" ]; then
+  echo "muxa $("$BIN/muxa" version 2>/dev/null || true) -> $BIN/muxa  (repo $ROOT)"
+elif [ -x "$ROOT/bin/muxa" ]; then
+  echo "muxa $("$ROOT/bin/muxa" version 2>/dev/null || true) -> $ROOT/bin/muxa  (repo $ROOT)"
+else
+  echo "muxa not installed (repo $ROOT)"
+fi
 echo "Skills muxa-parent / muxa-worker -> ~/.cursor/skills, ~/.claude/skills, ~/.agents/skills"
 echo "Put $BIN on PATH if needed. Start each CLI inside tmux, then: muxa who"

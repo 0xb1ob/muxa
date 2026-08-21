@@ -2,8 +2,8 @@
 
 muxa is a messaging protocol for AI agent CLIs that already share a tmux
 server. It has no MCP server and no extra tools in the model context.
-A small user-level Go broker owns pane paste. Agents send with the Bash
-they already have. Incoming mail arrives as a normal user turn.
+A small user-level Go binary owns the CLI and pane paste. Agents send with
+the Bash they already have. Incoming mail arrives as a normal user turn.
 
 ## Why this shape
 
@@ -19,9 +19,12 @@ muxa pays for the body once, as a user message, and nothing else.
 ## Actors
 
 - **tmux** is the process manager and roster
-- **muxa-broker** is the delivery daemon: unix socket, file-backed queue,
-  paste-buffer + Enter when the pane looks free. It is required for `muxa send`.
-  Control-mode `%output` silence is presence: a pane that is drawing is busy.
+- **muxa** is one Go binary: the CLI (`register`, `spawn`, `dispatch`, `who`,
+  `tail`, `kill`, `whoami`, `parent`, `send`, `hook`, `broker`) and the
+  delivery daemon (`muxa broker`). The daemon owns a unix socket, a
+  file-backed queue, and paste-buffer + Enter when the pane looks free. It
+  is required for `muxa send`. Control-mode `%output` silence is presence: a
+  pane that is drawing is busy.
 - **`muxa hook session-start`** is optional root self-registration. Spawned
   panes are already registered by `spawn`. Presence is not hook-reported.
 
@@ -44,11 +47,11 @@ can tell which is which. `muxa who --json` is the same roster as objects
 `parent` is JSON `null`. `session` is always JSON `null` (CLI conversation
 ids are not tracked). Default `muxa who` has no DELIVER column.
 
-`who --json` reads tmux pane options only; it does not talk to the broker
-daemon. It still requires the `muxa-broker` binary: `bin/muxa` pipes roster
-rows to the broker CLI subcommand `who-json` for encoding (same helper used
-by `send --json`). Install always ships that binary; command-post occupancy
-checks therefore depend on it being present even though no socket RPC occurs.
+`who --json` reads tmux pane options and encodes JSON in-process. It does
+not talk to the broker daemon and does not need a second binary. Occupancy
+checks consume `cwd` and `state` from that JSON. `busy` still consults the
+daemon's drawing list when the socket is up, and treats a down broker as
+not-drawing (idle, unless ghost).
 
 `muxa tail NAME [-n N]` is a one-shot pane read so a parent never has to
 call `tmux capture-pane`. With no `-n` it prints the visible grid; `-n N`
@@ -139,7 +142,7 @@ send(name, body):
 The broker keeps each enqueue as a JSON file under
 `$MUXA_BROKER_DIR/pending/` so a restart does not drop messages. Default
 socket is `<runtime>/broker/broker.sock`. `muxa send` auto-starts
-`bin/muxa-broker` when the socket does not answer `{"op":"ping"}`.
+the same binary as the daemon when the socket does not answer `{"op":"ping"}`.
 
 The broker MUST daemonize itself. It re-execs with `setsid(2)`, so the
 running daemon leads its own session and process group, and writes its own
@@ -151,9 +154,9 @@ first delivery, with the first brief still in `pending/` and nothing but
 repeated `listening` lines in the log. macOS ships no `setsid(1)`, so the
 shell cannot do this. `MUXA_BROKER_FOREGROUND=1` opts out for tests and
 supervisors. The forking parent waits for its daemon to answer a ping before
-exiting, so a zero exit means the queue has an owner; the shell still starts
-it in the background and polls, because `bin/muxa-broker` is versioned
-separately from `bin/muxa` and an older broker would never return.
+exiting, so a zero exit means the queue has an owner. The CLI copies itself
+into `$MUXA_BROKER_DIR/muxa-broker` and launches that file so a live daemon
+is never overwritten by `go build -o`.
 
 **One queue, one owner.** A second daemon against the same
 `$MUXA_BROKER_DIR` unlinks the live socket, rebinds it, and then races the
@@ -175,9 +178,9 @@ never silently stranded: the count is in the log and the files stay on disk
 for the next start. SIGHUP is ignored. Socket paths of 104 bytes or more are
 rejected with an explicit error rather than the kernel's `invalid argument`.
 
-`bin/muxa-broker` is a prebuilt release asset (`muxa-broker-<os>-<arch>`),
-downloaded and checksum-verified by `install.sh`. Install never compiles Go;
-a Go toolchain is a test-only dependency.
+`muxa` is a prebuilt release asset (`muxa-<os>-<arch>`), downloaded and
+checksum-verified by `install.sh`. Install never compiles Go and never
+places a second binary; a Go toolchain is a test-only dependency.
 
 For each queued message the broker captures the target pane (`tmux
 capture-pane -p -e`, attributes retained) and pastes only when the pane is
@@ -209,7 +212,7 @@ same quiescence and empty-at-cursor as an idle composer. Pasting over
 someone mid-prompt is recoverable in seconds when the human is at that
 pane; the ~700-line typed-in-box parser that closed that hole was dropped
 as poor ROI for a lightweight tool. **Etiquette:** do not leave half-typed
-input in worker panes. `muxa-broker -check-pane %id` prints the two-signal
+input in worker panes. `muxa -check-pane %id` prints the two-signal
 verdict.
 
 Retry until the pane is actually free. `MUXA_BROKER_DEADLINE` (default 600)

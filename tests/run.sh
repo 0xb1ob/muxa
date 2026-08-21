@@ -13,11 +13,11 @@ esac
 # darwin 25+ aborts a test binary without LC_UUID; only the external linker emits it.
 "$GO" test "${ldflags[@]}" "$ROOT/broker"
 "$GO" test "${ldflags[@]}" "$ROOT/tests/jsonhelper"
-"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-broker" "$ROOT/broker"
+"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa" "$ROOT/broker"
 "$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-test-json" "$ROOT/tests/jsonhelper"
 if [ "$(uname -s)" = Darwin ]; then
-  xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true
-  codesign -s - --force --timestamp=none "$ROOT/bin/muxa-broker" 2>/dev/null || true
+  xattr -c "$ROOT/bin/muxa" 2>/dev/null || true
+  codesign -s - --force --timestamp=none "$ROOT/bin/muxa" 2>/dev/null || true
   xattr -c "$ROOT/bin/muxa-test-json" 2>/dev/null || true
   codesign -s - --force --timestamp=none "$ROOT/bin/muxa-test-json" 2>/dev/null || true
 fi
@@ -46,7 +46,7 @@ alice_out="$tmpdir/alice.out"
 export MUXA_BROKER_DIR="$tmpdir/broker"
 export MUXA_BROKER_SOCK="$tmpdir/broker/broker.sock"
 export MUXA_BROKER_PID="$tmpdir/broker/broker.pid"
-export MUXA_BROKER_BIN="$ROOT/bin/muxa-broker"
+export MUXA_BROKER_BIN="$ROOT/bin/muxa"
 export XDG_RUNTIME_DIR="$tmpdir/run"
 mkdir -p "$tmpdir/run" "$tmpdir/broker"
 case "$MUXA_BROKER_DIR" in
@@ -119,9 +119,11 @@ json_get() {
   printf '%s' "$1" | muxa-test-json json-get "$2"
 }
 
-pyc="$(grep -c python3 "$ROOT/bin/muxa" || true)"
-[ "$pyc" = "0" ] && ok "bin/muxa has no python3" \
-  || bad "bin/muxa has no python3" "count=$pyc"
+if grep -q python3 "$ROOT/broker"/*.go; then
+  bad "muxa has no python3" "python3 mentioned in broker sources"
+else
+  ok "muxa has no python3"
+fi
 
 tmux -L "$SOCK" new-session -d -s muxa -n alice "exec cat > '$alice_out'"
 tmux -L "$SOCK" split-window -h -t muxa:alice "exec sleep 3600"
@@ -1164,16 +1166,11 @@ case "$win_list" in
   *) ok "kill of --window spawn removes the window" ;;
 esac
 
-# --- darwin adhoc sign of the source broker before RPC (#67) ---
-# broker_cli signs $MUXA_BROKER_BIN (the source) then execs it. Do not stop
-# the isolated test daemon: who --json still RPCs the source for encoding.
-unsigned_src="$tmpdir/unsigned-muxa-broker"
-"$GO" build "${ldflags[@]}" -o "$unsigned_src" "$ROOT/broker"
-chmod +x "$unsigned_src"
+# --- who --json encodes in-process; a missing daemon binary must not break it ---
 daemon_pid_before=""
 [ -f "$MUXA_BROKER_PID" ] && daemon_pid_before="$(cat "$MUXA_BROKER_PID" 2>/dev/null || true)"
 saved_bin_sign="$MUXA_BROKER_BIN"
-export MUXA_BROKER_BIN="$unsigned_src"
+export MUXA_BROKER_BIN="$tmpdir/no-such-broker"
 set +e
 who_unsigned="$(muxa_as "$bob_pane" who --json 2>&1)"
 rc_unsigned=$?
@@ -1181,27 +1178,18 @@ set -e
 export MUXA_BROKER_BIN="$saved_bin_sign"
 if [ "$rc_unsigned" -eq 0 ] \
   && [ "$(printf '%s' "$who_unsigned" | muxa-test-json json-type)" = "array" ]; then
-  ok "who --json RPC works through an unsigned source broker (isolated daemon untouched)"
+  ok "who --json works without a daemon binary (isolated daemon untouched)"
 else
-  bad "who --json RPC works through an unsigned source broker (isolated daemon untouched)" \
+  bad "who --json works without a daemon binary (isolated daemon untouched)" \
     "exit=$rc_unsigned out=$who_unsigned"
-fi
-if [ "$(uname -s)" = Darwin ]; then
-  if codesign --verify "$unsigned_src" >/dev/null 2>&1; then
-    ok "broker_cli adhoc-signs the source broker before RPC"
-  else
-    bad "broker_cli adhoc-signs the source broker before RPC" "codesign --verify failed"
-  fi
-else
-  ok "broker_cli adhoc-signs the source broker before RPC (non-darwin: no-op)"
 fi
 daemon_pid_after=""
 [ -f "$MUXA_BROKER_PID" ] && daemon_pid_after="$(cat "$MUXA_BROKER_PID" 2>/dev/null || true)"
 if [ -n "$daemon_pid_before" ] && [ "$daemon_pid_before" = "$daemon_pid_after" ] \
   && kill -0 "$daemon_pid_before" 2>/dev/null; then
-  ok "sign-before-RPC left the isolated test daemon pid unchanged"
+  ok "who --json left the isolated test daemon pid unchanged"
 else
-  bad "sign-before-RPC left the isolated test daemon pid unchanged" \
+  bad "who --json left the isolated test daemon pid unchanged" \
     "before=${daemon_pid_before:-none} after=${daemon_pid_after:-none}"
 fi
 

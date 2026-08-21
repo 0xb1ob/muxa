@@ -39,7 +39,7 @@ seed_muxa_tree() {
   mkdir -p "$dest/bin" "$dest/skills/muxa-parent" "$dest/skills/muxa-worker" \
     "$dest/tests"
   cp "$ROOT/install.sh" "$dest/install.sh"
-  cp "$ROOT/bin/muxa" "$dest/bin/muxa"
+  printf '%s\n' '#!/bin/sh' 'echo stub-version' >"$dest/bin/muxa"
   cp "$ROOT/skills/muxa-parent/SKILL.md" "$dest/skills/muxa-parent/SKILL.md"
   cp "$ROOT/skills/muxa-worker/SKILL.md" "$dest/skills/muxa-worker/SKILL.md"
   : >"$dest/tests/run.sh"
@@ -142,14 +142,14 @@ esac
 [ -f "$clobber/secret.txt" ] && ok "non-muxa directory is not clobbered" \
   || bad "non-muxa directory is not clobbered" "secret.txt missing"
 
-# Install must never compile Go: the broker ships as a release asset.
+# Install must never compile Go: muxa ships as a release asset.
 if grep -nE '(^|[^_[:alnum:]])(go|\$_go|"\$_go")[[:space:]]+(build|install|mod)([^[:alnum:]]|$)' "$ROOT/install.sh" >/dev/null; then
   bad "install.sh does not compile Go" "$(grep -nE '(build|install|mod)' "$ROOT/install.sh" | grep -i go)"
 else
   ok "install.sh does not compile Go"
 fi
 
-# The download is fail-closed on a bad checksum, and a broker that cannot be
+# The download is fail-closed on a bad checksum, and a muxa that cannot be
 # fetched must not abort the rest of the install.
 case "$(uname -m)" in
   x86_64 | amd64) arch=amd64 ;;
@@ -170,14 +170,13 @@ sha256() {
 
 serve="$tmpdir/releases/latest/download"
 mkdir -p "$serve"
-printf 'not-a-broker\n' >"$serve/muxa-broker-$os-$arch"
-printf '0000000000000000000000000000000000000000000000000000000000000000  muxa-broker-%s-%s\n' \
+printf 'not-a-muxa\n' >"$serve/muxa-$os-$arch"
+printf '0000000000000000000000000000000000000000000000000000000000000000  muxa-%s-%s\n' \
   "$os" "$arch" >"$serve/SHA256SUMS"
 
-# A throwaway tree: install.sh writes bin/muxa-broker into its own checkout.
+# A throwaway tree: install.sh writes bin/muxa into its own checkout.
 tree="$tmpdir/tree"
 seed_muxa_tree "$tree"
-mkdir -p "$tree/broker"
 
 run_install() {
   local home="$1"
@@ -191,28 +190,38 @@ broker_out="$(run_install "$tmpdir/home-badsum" \
   env MUXA_BROKER_BASE_URL="file://$tmpdir/releases")"
 broker_rc=$?
 set -e
-[ "$broker_rc" -eq 0 ] && ok "install survives a broker it cannot verify" \
-  || bad "install survives a broker it cannot verify" "exit=$broker_rc out=$broker_out"
-[ ! -e "$tmpdir/home-badsum/bin/muxa-broker" ] && ok "bad checksum installs no broker" \
-  || bad "bad checksum installs no broker" "broker was installed anyway"
+[ "$broker_rc" -eq 0 ] && ok "install survives a muxa it cannot verify" \
+  || bad "install survives a muxa it cannot verify" "exit=$broker_rc out=$broker_out"
+if grep -q 'not-a-muxa' "$tree/bin/muxa" 2>/dev/null; then
+  bad "bad checksum installs no muxa" "unverified payload replaced bin/muxa"
+else
+  ok "bad checksum installs no muxa"
+fi
 case "$broker_out" in
   *"checksum mismatch"*) ok "bad checksum is reported" ;;
   *) bad "bad checksum is reported" "out=$broker_out" ;;
 esac
 
-# A matching checksum installs the asset next to muxa.
-printf '#!/bin/sh\nexit 0\n' >"$serve/muxa-broker-$os-$arch"
-printf '%s  muxa-broker-%s-%s\n' \
-  "$(sha256 "$serve/muxa-broker-$os-$arch")" "$os" "$arch" >"$serve/SHA256SUMS"
+# A matching checksum installs the asset as muxa (the one binary).
+printf '#!/bin/sh\n# good-muxa\nexit 1\n' >"$serve/muxa-$os-$arch"
+printf '%s  muxa-%s-%s\n' \
+  "$(sha256 "$serve/muxa-$os-$arch")" "$os" "$arch" >"$serve/SHA256SUMS"
 set +e
 good_out="$(run_install "$tmpdir/home-goodsum" \
   env MUXA_BROKER_BASE_URL="file://$tmpdir/releases")"
 good_rc=$?
 set -e
-[ "$good_rc" -eq 0 ] && ok "install succeeds with a verified broker" \
-  || bad "install succeeds with a verified broker" "exit=$good_rc out=$good_out"
-[ -x "$tmpdir/home-goodsum/bin/muxa-broker" ] && ok "verified broker lands next to muxa" \
-  || bad "verified broker lands next to muxa" "no $tmpdir/home-goodsum/bin/muxa-broker"
+[ "$good_rc" -eq 0 ] && ok "install succeeds with a verified muxa" \
+  || bad "install succeeds with a verified muxa" "exit=$good_rc out=$good_out"
+[ -x "$tmpdir/home-goodsum/bin/muxa" ] && ok "verified muxa lands on PATH" \
+  || bad "verified muxa lands on PATH" "no $tmpdir/home-goodsum/bin/muxa"
+if grep -q 'good-muxa' "$tree/bin/muxa" 2>/dev/null; then
+  ok "verified muxa replaces the checkout binary"
+else
+  bad "verified muxa replaces the checkout binary" "bin/muxa was not the asset"
+fi
+[ ! -e "$tmpdir/home-goodsum/bin/muxa-broker" ] && ok "install does not place a second binary" \
+  || bad "install does not place a second binary" "muxa-broker was installed"
 
 case "$good_out" in
   *"not in tmux"*) ok "install without tmux skips broker start and says why" ;;
@@ -235,8 +244,8 @@ printf '%s\n' "$live_pid" >"$live_broker/broker.pid"
 tree_live="$tmpdir/tree-live"
 seed_muxa_tree "$tree_live"
 mkdir -p "$tree_live/broker" "$tree_live/bin"
-printf 'old-install-path\n' >"$tree_live/bin/muxa-broker"
-chmod +x "$tree_live/bin/muxa-broker"
+printf 'old-install-path\n' >"$tree_live/bin/muxa"
+chmod +x "$tree_live/bin/muxa"
 
 set +e
 live_out="$(HOME="$tmpdir/home-live" MUXA_BIN_DIR="$tmpdir/home-live/bin" \
@@ -274,10 +283,10 @@ esac
 [ -d "$live_broker" ] && ok "broker dir is not deleted" \
   || bad "broker dir is not deleted" "$live_broker missing"
 
-if grep -q 'old-install-path' "$tree_live/bin/muxa-broker" 2>/dev/null; then
-  bad "new broker binary replaces the install-path file" "still old-install-path"
+if grep -q 'old-install-path' "$tree_live/bin/muxa" 2>/dev/null; then
+  bad "new muxa binary replaces the install-path file" "still old-install-path"
 else
-  ok "new broker binary replaces the install-path file"
+  ok "new muxa binary replaces the install-path file"
 fi
 
 # With a tmux socket, install must try `muxa broker start` after replace.

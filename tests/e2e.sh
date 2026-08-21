@@ -19,10 +19,10 @@ ldflags=()
 case "$(uname -s)" in
   Darwin) ldflags=(-ldflags=-linkmode=external) ;;
 esac
-"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-broker" "$ROOT/broker"
+"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa" "$ROOT/broker"
 if [ "$(uname -s)" = Darwin ]; then
-  xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true
-  codesign -s - --force --timestamp=none "$ROOT/bin/muxa-broker" 2>/dev/null || true
+  xattr -c "$ROOT/bin/muxa" 2>/dev/null || true
+  codesign -s - --force --timestamp=none "$ROOT/bin/muxa" 2>/dev/null || true
 fi
 SOCK="muxae2e$$"
 SESSION="muxae2e"
@@ -39,7 +39,7 @@ export MUXA_BROKER=1
 export MUXA_BROKER_DIR="$tmpdir/broker"
 export MUXA_BROKER_SOCK="$tmpdir/broker/broker.sock"
 export MUXA_BROKER_PID="$tmpdir/broker/broker.pid"
-export MUXA_BROKER_BIN="$ROOT/bin/muxa-broker"
+export MUXA_BROKER_BIN="$ROOT/bin/muxa"
 export XDG_RUNTIME_DIR="$tmpdir/run"
 mkdir -p "$tmpdir/run" "$tmpdir/broker"
 # Do not inherit the operator mailbox or this worker's identity.

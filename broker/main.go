@@ -9,9 +9,15 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
+
+// brokerEntryEnv is set by ensureBroker when it launches the runtime copy so a
+// race-test shim that execs this binary (argv0 "muxa") still enters daemon
+// mode. daemonize re-execs with the same environment.
+const brokerEntryEnv = "MUXA_BROKER_ENTRY"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
@@ -19,10 +25,18 @@ func main() {
 
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
-		case "ping", "status", "drawing", "enqueue",
-			"json-object", "json-array", "who-json":
+		case "ping", "status", "drawing", "enqueue":
 			os.Exit(runCLI(os.Args[1:]))
+		case "register", "spawn", "dispatch", "who", "tail", "kill",
+			"whoami", "parent", "send", "hook", "broker",
+			"version", "-v", "--version", "help", "-h", "--help":
+			os.Exit(runMuxa(os.Args[1:]))
 		}
+	}
+
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		printUsage(os.Stderr)
+		os.Exit(1)
 	}
 
 	checkPane := flag.String("check-pane", "", "print two-signal verdict for a tmux pane and exit")
@@ -35,6 +49,23 @@ func main() {
 		return
 	}
 
+	if wantDaemon() {
+		runDaemon()
+		return
+	}
+
+	printUsage(os.Stdout)
+}
+
+func wantDaemon() bool {
+	if os.Getenv(daemonEnv) == "1" || os.Getenv(brokerEntryEnv) == "1" {
+		return true
+	}
+	base := filepath.Base(os.Args[0])
+	return base == "muxa-broker" || strings.HasPrefix(base, "muxa-broker-")
+}
+
+func runDaemon() {
 	dir := env("MUXA_BROKER_DIR", "")
 	if dir == "" {
 		fmt.Fprintln(os.Stderr, "muxa-broker: MUXA_BROKER_DIR is required")
@@ -42,7 +73,7 @@ func main() {
 	}
 	// Resolve before forking: the daemon runs with cwd=/ so it does not pin
 	// the caller's worktree, which would make a relative path point somewhere
-	// else in the child than in the parent.
+	// else than in the parent.
 	dir = abs(dir)
 	sock := abs(env("MUXA_BROKER_SOCK", filepath.Join(dir, "broker.sock")))
 	pidPath := abs(env("MUXA_BROKER_PID", filepath.Join(dir, "broker.pid")))

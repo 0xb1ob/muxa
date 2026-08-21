@@ -15,11 +15,11 @@ esac
 # darwin 25+ aborts a test binary without LC_UUID; only the external linker emits it.
 "$GO" test "${ldflags[@]}" "$ROOT/broker"
 "$GO" test "${ldflags[@]}" "$ROOT/tests/jsonhelper"
-"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-broker" "$ROOT/broker"
+"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa" "$ROOT/broker"
 "$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-test-json" "$ROOT/tests/jsonhelper"
 if [ "$(uname -s)" = Darwin ]; then
-  xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true
-  codesign -s - --force --timestamp=none "$ROOT/bin/muxa-broker" 2>/dev/null || true
+  xattr -c "$ROOT/bin/muxa" 2>/dev/null || true
+  codesign -s - --force --timestamp=none "$ROOT/bin/muxa" 2>/dev/null || true
   xattr -c "$ROOT/bin/muxa-test-json" 2>/dev/null || true
   codesign -s - --force --timestamp=none "$ROOT/bin/muxa-test-json" 2>/dev/null || true
 fi
@@ -32,7 +32,7 @@ export MUXA_BROKER=1
 export MUXA_BROKER_DIR="$HOME_ISO/broker"
 export MUXA_BROKER_SOCK="$HOME_ISO/broker/broker.sock"
 export MUXA_BROKER_PID="$HOME_ISO/broker/broker.pid"
-export MUXA_BROKER_BIN="$ROOT/bin/muxa-broker"
+export MUXA_BROKER_BIN="$ROOT/bin/muxa"
 export MUXA_BROKER_DEADLINE="${MUXA_BROKER_DEADLINE:-8}"
 export MUXA_BROKER_POLL_MS=100
 export XDG_RUNTIME_DIR="$HOME_ISO/run"
@@ -474,7 +474,7 @@ race_shim="$HOME_ISO/slow-broker"
 cat >"$race_shim" <<SHIM
 #!/bin/sh
 sleep 2
-exec "$ROOT/bin/muxa-broker" "\$@"
+exec "$ROOT/bin/muxa" "\$@"
 SHIM
 chmod +x "$race_shim"
 : >"$MUXA_BROKER_DIR/broker.log"
