@@ -50,9 +50,9 @@ The broker pastes with load-buffer + Enter when the target pane looks free.
 If the pane is mid-typing or drawing, the broker retries and leaves mail
 queued even after `MUXA_BROKER_DEADLINE` (default 10 minutes). It does not
 paste into a busy pane just because the clock ran out. After paste,
-`delivered` means the payload (or Cursor's `[Pasted text +N lines]`
-collapse) was visible; if the pane went busy without that, the message is
-filed `unknown/` and is not retried. If the
+`delivered` (filed `done/`, never retried) means the pane reacted — cursor
+row no longer empty/prompt, or drawing. If the pane stayed free, the
+message stays queued and may be retried. If the
 broker is down, `muxa send` exits non-zero and pastes nothing.
 
 The broker daemonizes itself with `setsid(2)` and owns its pidfile. That is
@@ -73,9 +73,10 @@ Heuristic (documented in [SPEC.md](SPEC.md)):
   half-typed input in worker panes.
 
 tmux user options are the roster (`@muxa_name`, `@muxa_kind`, `@muxa_parent`,
-`@muxa_id`). `muxa who` STATE is the broker's drawing list (`busy` if the
-pane is emitting `%output`, else `idle`). `tmux list-panes` is service
-discovery.
+`@muxa_id`). `muxa who` STATE is `idle` | `busy` | `ghost`: `busy` if the
+pane is emitting `%output`, `ghost` if the cwd is missing or a
+`claude`/`cursor`/`pi` pane is at a shell prompt, else `idle`.
+`tmux list-panes` is service discovery.
 The broker's file queue is the send path. Pane titles are CLI-owned.
 
 Spec: [SPEC.md](SPEC.md).
@@ -163,8 +164,8 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 | `muxa register [--name --id --parent --kind]` | Set pane identity (optional; spawn already does this for children) |
 | `muxa spawn [--name NAME] [--cwd DIR] [--window] -- CMD` | Split a child pane into a tiled grid in the parent's window. Child cwd is `--cwd`, else process `$PWD`, else the parent pane path. Warns on stderr if a live worker already has that cwd (does not refuse). Omit `--name` for a unique `adjective-noun` alias. `--window` for a dedicated window |
 | `muxa dispatch [--name NAME] [--cwd DIR] [--brief-file F] -- CMD` | Spawn + first brief. Brief on stdin or `--brief-file`. stdout `{"name","id","pane","cwd","state":"dispatched","from","to"}`. Broker waits for drawn-then-quiet-and-free; never-ready mails `[muxa] from=broker` to the parent |
-| `muxa who` | Roster (name, id, session, parent, cwd, STATE, STATUS, …) |
-| `muxa who --json` | Same roster as objects (`parent`/`session` are `null` when empty; `state` is `idle`/`busy` from the broker drawing list). Requires `muxa-broker` on disk: `bin/muxa` delegates JSON encoding to the broker CLI (`who-json`), not to a daemon RPC, but the binary must exist and be executable |
+| `muxa who` | Roster (name, id, session, parent, cwd, STATE, …) |
+| `muxa who --json` | Same roster as objects (`parent`/`session` are `null` when empty; `state` is `idle`/`busy`/`ghost`). Requires `muxa-broker` on disk: `bin/muxa` delegates JSON encoding to the broker CLI (`who-json`), not to a daemon RPC, but the binary must exist and be executable |
 | `muxa tail NAME [-n N]` | One-shot pane read (visible grid, or last N lines of history) |
 | `muxa kill NAME\|ID` | Remove the pane (`kill-pane`); gone from `muxa who` |
 | `muxa send NAME TEXT` | Enqueue on the broker (parent↔child). Auto-starts the daemon if the socket is dead; fails closed if it cannot |

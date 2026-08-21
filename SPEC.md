@@ -37,11 +37,10 @@ Each participating pane sets tmux user options:
 | `@muxa_kind`    | `claude` \| `cursor` \| `pi` \| `generic`    |
 
 Roster is `tmux list-panes -a`. There is no registry file. `muxa who`
-prints that roster plus each pane's current working directory, a **STATE**
-column derived from the broker's drawing list, and a **STATUS** column so
-agents on the same tmux server, in different projects, can tell which is
-which. `muxa who --json` is the same roster as objects (`name`, `id`,
-`parent`, `kind`, `state`, `pane`, `session`, `cwd`, `status`). Empty
+prints that roster plus each pane's current working directory and a
+**STATE** column so agents on the same tmux server, in different projects,
+can tell which is which. `muxa who --json` is the same roster as objects
+(`name`, `id`, `parent`, `kind`, `state`, `pane`, `session`, `cwd`). Empty
 `parent` is JSON `null`. `session` is always JSON `null` (CLI conversation
 ids are not tracked). Default `muxa who` has no DELIVER column.
 
@@ -56,26 +55,20 @@ call `tmux capture-pane`. With no `-n` it prints the visible grid; `-n N`
 prints the last N lines of history plus the visible grid, ignoring trailing
 blank rows. One read, never a poll. Unknown names exit 2.
 
-**STATE** is computed from the broker, not stored on the pane. No hook is
-required. `blocked` is not a value:
+**STATE** is computed, not stored on the pane. No hook is required.
+`blocked`, `live`, and `drawing` are not values. Ghosts are not filtered
+from the roster and remain reachable via `muxa send`:
 
 | STATE | Meaning |
 | ----- | ------- |
-| `idle` | Pane is not in the broker's live drawing list |
-| `busy` | Pane has been emitting `%output` across a quiet window |
-
-**STATUS** is informational only; ghosts are not filtered from the roster
-and remain reachable via `muxa send`:
-
-| STATUS | Meaning |
-| ------ | ------- |
-| `live` | Pane cwd exists and (for `claude`/`cursor`/`pi`) the foreground process is not a shell |
+| `idle` | Registered, reachable, not in the broker's drawing list |
+| `busy` | Registered, in the broker's drawing list (emitting `%output` across a quiet window) |
 | `ghost` | Pane cwd is missing, or a `claude`/`cursor`/`pi` pane is sitting at a shell prompt (`zsh`, `bash`, `fish`, `sh`, `dash`, `ksh`) |
-| `drawing` | `live`, and the pane is in the broker's drawing list |
 
-`generic` panes at a shell are still `live`. A CLI version string in
-`pane_current_command` (e.g. `2.1.233` for Claude) is not treated as a
-shell.
+`generic` panes at a shell are still `idle` (or `busy` if drawing). A CLI
+version string in `pane_current_command` (e.g. `2.1.233` for Claude) is
+not treated as a shell. Ghost wins over drawing: a missing cwd is `ghost`,
+not `busy`.
 
 `muxa kill NAME|ID` is the `kill-pane` counterpart of spawn. Lookup prefers
 an exact name match, then a 12-hex id match. Unknown targets exit 2. It
@@ -198,7 +191,7 @@ user-configurable, so no fixed prompt/status model can be correct:
    silent-loss).
 2. Drawing — `%output` inside the quiet window (muxa#46) → not free. A busy
    agent draws continuously; an idle one draws nothing. Delivery wakes on
-   silence rather than a 250 ms poll. `muxa who` STATUS `drawing` is this
+   silence rather than a 250 ms poll. `muxa who` STATE `busy` is this
    same window, with no hook involvement.
 3. Two-signal (muxa#44), sharing the same decision as the poll fallback so
    the paths cannot drift: (a) this capture equals the previous poll
@@ -224,15 +217,14 @@ is how long a *dead* pane is retried before the message is failed; a live
 busy pane keeps its mail in `pending/` past that deadline. The broker MUST
 NOT timeout-fallback paste: two fallbacks into one busy composer overwrite
 each other, both get filed as `done/`, and the agent never sees the first.
-After a paste, confirmation has three outcomes: **delivered** (payload or
-Cursor's `[Pasted text +N lines]` collapse is visible), **pending-safe-retry**
-(pane still free — cursor row still empty/prompt),
-and **unknown-no-retry** (the pane went busy or started drawing but the
-payload is not in the visible grid — Cursor collapses long pastes and
-scrolls them off). Unknown MUST NOT retry: a duplicate first brief re-runs
-work. `delivered` is never recorded for an overwritten timeout paste. When
-the broker is down or the binary is missing, `muxa send` exits non-zero and
-pastes nothing.
+After a paste, confirmation has two outcomes, from one snapshot. **delivered**
+(filed `done/`, never retried): the pane reacted — cursor row no longer
+empty/prompt, or control-mode drawing. **pending-safe-retry**: the pane
+stayed free (cursor row still empty/prompt, not drawing). A pane that
+reacted MUST NOT be retried: a duplicate first brief re-runs work. The
+broker does not match the payload against pane captures. `delivered` is
+never recorded for an overwritten timeout paste. When the broker is down
+or the binary is missing, `muxa send` exits non-zero and pastes nothing.
 
 An implementation MUST NOT paste into a pane that is dead or that is in
 copy-mode (`#{pane_in_mode}`). Copy-mode is a silent-loss mode:

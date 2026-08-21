@@ -80,16 +80,6 @@ func TestDrawingPanesRequiresAStream(t *testing.T) {
 	}
 }
 
-func TestConfirmNeedleSkipsEnvelope(t *testing.T) {
-	n := confirmNeedle("[muxa] from=coder\nUNIQUE-BODY\nReply: muxa send coder \"…\"\n")
-	if n != "UNIQUE-BODY" {
-		t.Fatalf("needle=%q", n)
-	}
-	if !landed("ready> UNIQUE-BODY", n) {
-		t.Fatal("landed")
-	}
-}
-
 func TestDrawingBlocksPaste(t *testing.T) {
 	dir := t.TempDir()
 	q, _ := OpenQueue(dir)

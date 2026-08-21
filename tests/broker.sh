@@ -511,7 +511,7 @@ case "$cap_i" in
   *) bad "I the single owner still delivers" "cap: $cap_i" ;;
 esac
 
-# --- who STATUS drawing from control-mode %output, no hooks ---
+# --- who STATE busy from control-mode %output, no hooks ---
 tmux -L "$SOCK" new-window -t muxa -n ticker "while true; do echo DRAWING_TICK; sleep 0.15; done"
 sleep 0.4
 ticker_pane="$(tmux -L "$SOCK" list-panes -t muxa:ticker -F '#{pane_id}' | head -1)"
@@ -519,21 +519,15 @@ muxa_as "$ticker_pane" register --name ticker --kind generic --parent parent >/d
 # Drawing report window is 1s; wait for %output to land in the hub.
 sleep 1.2
 who_tick="$(muxa_as "$parent_pane" who)"
-st_tick="$(printf '%s\n' "$who_tick" | awk '$1=="ticker" { print substr($0, 105, 8); exit }')"
-st_tick="${st_tick#"${st_tick%%[![:space:]]*}"}"
-st_tick="${st_tick%"${st_tick##*[![:space:]]}"}"
-[ "$st_tick" = "drawing" ] && ok "who STATUS is drawing for a pane emitting %output" \
-  || bad "who STATUS is drawing for a pane emitting %output" "status=$st_tick who=$who_tick"
 st_state="$(printf '%s\n' "$who_tick" | awk '$1=="ticker" { print substr($0, 96, 8); exit }')"
 st_state="${st_state#"${st_state%%[![:space:]]*}"}"
 st_state="${st_state%"${st_state##*[![:space:]]}"}"
 [ "$st_state" = "busy" ] && ok "who STATE is busy for a pane emitting %output" \
   || bad "who STATE is busy for a pane emitting %output" "state=$st_state who=$who_tick"
 who_tickj="$(muxa_as "$parent_pane" who --json)"
-[ "$(printf '%s' "$who_tickj" | muxa-test-json json-get ticker status)" = "drawing" ] \
-  && [ "$(printf '%s' "$who_tickj" | muxa-test-json json-get ticker state)" = "busy" ] \
-  && ok "who --json status is drawing and state is busy for a pane emitting %output" \
-  || bad "who --json status is drawing and state is busy for a pane emitting %output" "json=$who_tickj"
+[ "$(printf '%s' "$who_tickj" | muxa-test-json json-get ticker state)" = "busy" ] \
+  && ok "who --json state is busy for a pane emitting %output" \
+  || bad "who --json state is busy for a pane emitting %output" "json=$who_tickj"
 
 # --- C: broker down + binary hidden → fail closed, nothing pasted ---
 muxa_as "$parent_pane" broker stop >/dev/null || true

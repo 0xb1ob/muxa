@@ -80,18 +80,18 @@ assert_contains() {
   esac
 }
 
-who_status_for() {
+who_state_for() {
   local who="$1" name="$2" s
-  s="$(printf '%s\n' "$who" | awk -v n="$name" '$1==n { print substr($0, 105, 8); exit }')"
+  s="$(printf '%s\n' "$who" | awk -v n="$name" '$1==n { print substr($0, 96, 8); exit }')"
   s="${s#"${s%%[![:space:]]*}"}"
   s="${s%"${s##*[![:space:]]}"}"
   printf '%s' "$s"
 }
 
-assert_who_status() {
+assert_who_state() {
   local who="$1" name="$2" want="$3" label="$4"
   local got
-  got="$(who_status_for "$who" "$name")"
+  got="$(who_state_for "$who" "$name")"
   [ "$got" = "$want" ] && ok "$label" || bad "$label" "name=$name want=$want got=$got"
 }
 
@@ -487,7 +487,7 @@ sleep 0.2
 occghost_pane="$(tmux -L "$SOCK" list-panes -t muxa:occghost -F '#{pane_id}' | head -1)"
 muxa_as "$occghost_pane" register --name occghost --kind cursor --parent bob >/dev/null
 who="$(muxa_as "$bob_pane" who)"
-assert_who_status "$who" "occghost" "ghost" "cursor+shell occupant is ghost"
+assert_who_state "$who" "occghost" "ghost" "cursor+shell occupant is ghost"
 occ_spawn "$tmpdir/occ-ghost.err" --cwd "$ghost_dir" --name occ-afterghost -- sleep 3600
 [ "$occ_code" -eq 0 ] && ok "spawn into a ghost worker cwd exits 0" \
   || bad "spawn into a ghost worker cwd exits 0" "exit=$occ_code out=$occ_out err=$occ_err"
@@ -528,21 +528,6 @@ who_kind_for() {
   k="${k#"${k%%[![:space:]]*}"}"
   k="${k%"${k##*[![:space:]]}"}"
   printf '%s' "$k"
-}
-
-who_state_for() {
-  local who="$1" name="$2" s
-  s="$(printf '%s\n' "$who" | awk -v n="$name" '$1==n { print substr($0, 96, 8); exit }')"
-  s="${s#"${s%%[![:space:]]*}"}"
-  s="${s%"${s##*[![:space:]]}"}"
-  printf '%s' "$s"
-}
-
-assert_who_state() {
-  local who="$1" name="$2" want="$3" label="$4"
-  local got
-  got="$(who_state_for "$who" "$name")"
-  [ "$got" = "$want" ] && ok "$label" || bad "$label" "name=$name want=$want got=$got"
 }
 
 kind_fakebin="$tmpdir/kind-fakebin"
@@ -814,29 +799,32 @@ muxa_as "$proj_pane" register --name projagent --kind generic >/dev/null
 who="$(muxa_as "$bob_pane" who)"
 assert_contains "$who" "$projdir" "who shows pane cwd"
 assert_contains "$who" "CWD" "who header has CWD"
-assert_contains "$who" "STATUS" "who header has STATUS"
+case "$who" in
+  *STATUS*) bad "who header has no STATUS column" "got: $who" ;;
+  *) ok "who header has no STATUS column" ;;
+esac
 
-# --- who STATUS: ghost vs live ---
+# --- who STATE: ghost vs idle ---
 tmux -L "$SOCK" new-window -t muxa -n zshghost "exec zsh"
 sleep 0.2
 zsh_pane="$(tmux -L "$SOCK" list-panes -t muxa:zshghost -F '#{pane_id}')"
 muxa_as "$zsh_pane" register --name zsh-cursor --kind cursor >/dev/null
 who="$(muxa_as "$bob_pane" who)"
-assert_who_status "$who" "zsh-cursor" "ghost" "cursor+shell is ghost"
+assert_who_state "$who" "zsh-cursor" "ghost" "cursor+shell is ghost"
 
 tmux -L "$SOCK" new-window -t muxa -n zshpi "exec zsh"
 sleep 0.2
 zshpi_pane="$(tmux -L "$SOCK" list-panes -t muxa:zshpi -F '#{pane_id}')"
 muxa_as "$zshpi_pane" register --name zsh-pi --kind pi >/dev/null
 who="$(muxa_as "$bob_pane" who)"
-assert_who_status "$who" "zsh-pi" "ghost" "pi+shell is ghost"
+assert_who_state "$who" "zsh-pi" "ghost" "pi+shell is ghost"
 
 tmux -L "$SOCK" new-window -t muxa -n zshgen "exec zsh"
 sleep 0.2
 zshgen_pane="$(tmux -L "$SOCK" list-panes -t muxa:zshgen -F '#{pane_id}')"
 muxa_as "$zshgen_pane" register --name zsh-generic --kind generic >/dev/null
 who="$(muxa_as "$bob_pane" who)"
-assert_who_status "$who" "zsh-generic" "live" "generic+shell is live"
+assert_who_state "$who" "zsh-generic" "idle" "generic+shell is idle"
 
 gone_dir="$tmpdir/gone-cwd"
 mkdir -p "$gone_dir"
@@ -846,7 +834,7 @@ badcwd_pane="$(tmux -L "$SOCK" list-panes -t muxa:badcwd -F '#{pane_id}')"
 rm -rf "$gone_dir"
 muxa_as "$badcwd_pane" register --name bad-cwd --kind generic >/dev/null
 who="$(muxa_as "$bob_pane" who)"
-assert_who_status "$who" "bad-cwd" "ghost" "missing pane cwd is ghost"
+assert_who_state "$who" "bad-cwd" "ghost" "missing pane cwd is ghost"
 
 # --- who --json, tail, send --json (machine-readable surface) ---
 human_who="$(muxa_as "$bob_pane" who)"
@@ -864,11 +852,14 @@ case "$who_hdr" in
   *) ok "who header has no DELIVER column" ;;
 esac
 assert_contains "$who_hdr" "STATE" "who header has STATE"
-assert_contains "$who_hdr" "STATUS" "who header has STATUS"
+case "$who_hdr" in
+  *STATUS*) bad "who header has no STATUS column" "got: $who_hdr" ;;
+  *) ok "who header has no STATUS column" ;;
+esac
 
 whoj="$(muxa_as "$bob_pane" who --json)"
 if [ "$(printf '%s' "$whoj" | muxa-test-json json-type)" = "array" ] \
-  && printf '%s' "$whoj" | muxa-test-json json-keys name id parent kind state pane session cwd status; then
+  && printf '%s' "$whoj" | muxa-test-json json-keys name id parent kind state pane session cwd; then
   ok "who --json is an array of roster objects"
 else
   bad "who --json is an array of roster objects" "got: $whoj"
@@ -884,10 +875,10 @@ if same_dir "$proj_json_cwd" "$projdir"; then
 else
   bad "who --json cwd is a field not a column" "got: $proj_json_cwd want: $projdir"
 fi
-[ "$(who_json_get "$whoj" zsh-cursor status)" = "ghost" ] && ok "who --json status is ghost for cursor+shell" \
-  || bad "who --json status is ghost for cursor+shell" "got: $(who_json_get "$whoj" zsh-cursor status 2>/dev/null || true)"
-[ "$(who_json_get "$whoj" projagent status)" = "live" ] && ok "who --json status is live for generic sleep" \
-  || bad "who --json status is live for generic sleep" "got: $(who_json_get "$whoj" projagent status 2>/dev/null || true)"
+[ "$(who_json_get "$whoj" zsh-cursor state)" = "ghost" ] && ok "who --json state is ghost for cursor+shell" \
+  || bad "who --json state is ghost for cursor+shell" "got: $(who_json_get "$whoj" zsh-cursor state 2>/dev/null || true)"
+[ "$(who_json_get "$whoj" projagent state)" = "idle" ] && ok "who --json state is idle for generic sleep" \
+  || bad "who --json state is idle for generic sleep" "got: $(who_json_get "$whoj" projagent state 2>/dev/null || true)"
 [ "$(who_json_get "$whoj" alice state)" = "idle" ] && ok "who --json state is idle when the pane is not drawing" \
   || bad "who --json state is idle when the pane is not drawing" "got: $(who_json_get "$whoj" alice state 2>/dev/null || true)"
 who_json_is_null "$whoj" alice session && ok "who --json session is always null" \
@@ -898,28 +889,31 @@ while IFS= read -r n; do
   [ -n "$n" ] || continue
   st="$(who_json_get "$whoj" "$n" state)"
   case "$st" in
-    idle|busy) ;;
+    idle|busy|ghost) ;;
     *) shape_bad="${shape_bad}${n}.state=${st}; " ;;
   esac
   [ "$st" = "blocked" ] && shape_bad="${shape_bad}${n}.state=blocked; "
-  sta="$(who_json_get "$whoj" "$n" status)"
-  case "$sta" in
-    live|drawing|ghost) ;;
-    *) shape_bad="${shape_bad}${n}.status=${sta}; " ;;
-  esac
+  [ "$st" = "live" ] && shape_bad="${shape_bad}${n}.state=live; "
+  [ "$st" = "drawing" ] && shape_bad="${shape_bad}${n}.state=drawing; "
+  if who_json_get "$whoj" "$n" status >/dev/null 2>&1; then
+    shape_bad="${shape_bad}${n}.status; "
+  fi
   if ! who_json_is_null "$whoj" "$n" session; then
     shape_bad="${shape_bad}${n}.session!=null; "
   fi
 done <<EOF
 $(printf '%s' "$whoj" | muxa-test-json json-values name)
 EOF
-[ -z "$shape_bad" ] && ok "who --json fail-closed: state idle|busy, status live|drawing|ghost, session null" \
-  || bad "who --json fail-closed: state idle|busy, status live|drawing|ghost, session null" "$shape_bad"
+[ -z "$shape_bad" ] && ok "who --json fail-closed: state idle|busy|ghost, no status, session null" \
+  || bad "who --json fail-closed: state idle|busy|ghost, no status, session null" "$shape_bad"
 
 occ=""
 while IFS= read -r n; do
   [ -n "$n" ] || continue
-  [ "$(who_json_get "$whoj" "$n" status)" = "live" ] || continue
+  case "$(who_json_get "$whoj" "$n" state)" in
+    idle|busy) ;;
+    *) continue ;;
+  esac
   cwd="$(who_json_get "$whoj" "$n" cwd)"
   if [ -d "$cwd" ] && same_dir "$cwd" "$projdir"; then
     if [ -n "$occ" ]; then occ="$occ,$n"; else occ="$n"; fi
@@ -927,8 +921,8 @@ while IFS= read -r n; do
 done <<EOF
 $(printf '%s' "$whoj" | muxa-test-json json-values name)
 EOF
-[ "$occ" = "projagent" ] && ok "who --json occupancy consumes cwd+status with no awk" \
-  || bad "who --json occupancy consumes cwd+status with no awk" "got: $occ"
+[ "$occ" = "projagent" ] && ok "who --json occupancy consumes cwd+state with no awk" \
+  || bad "who --json occupancy consumes cwd+state with no awk" "got: $occ"
 
 esc_cwd="$tmpdir/acme-\"quote\"\\slash"
 mkdir -p "$esc_cwd"
@@ -1102,7 +1096,7 @@ case "$who" in
 esac
 whoj_kill="$(muxa_as "$bob_pane" who --json)"
 set +e
-who_json_get "$whoj_kill" killme status >/dev/null
+who_json_get "$whoj_kill" killme state >/dev/null
 kill_json_rc=$?
 set -e
 [ "$kill_json_rc" -ne 0 ] && ok "kill by name removes from who --json" \
@@ -1229,7 +1223,7 @@ who_nobr="$(PATH="$nobr_path" muxa_as "$bob_pane" who)"
 assert_contains "$who_nobr" "bob" "who works with br absent from PATH"
 whoj_nopy="$(PATH="$nobr_path" muxa_as "$bob_pane" who --json)"
 if [ "$(printf '%s' "$whoj_nopy" | PATH="$nobr_path" muxa-test-json json-type)" = "array" ] \
-  && printf '%s' "$whoj_nopy" | PATH="$nobr_path" muxa-test-json json-keys name id parent kind state pane session cwd status; then
+  && printf '%s' "$whoj_nopy" | PATH="$nobr_path" muxa-test-json json-keys name id parent kind state pane session cwd; then
   ok "who --json works when python3 would fail if invoked"
 else
   bad "who --json works when python3 would fail if invoked" "got: $whoj_nopy"

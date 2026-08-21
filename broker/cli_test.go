@@ -57,17 +57,18 @@ func TestJSONObjectNullKeys(t *testing.T) {
 }
 
 func TestWhoJSONShapeAndNulls(t *testing.T) {
-	in := "%1||alice||abc123||bob||generic||muxa:1.0||/tmp/proj||sleep||live||idle\n" +
-		"%2||bob||def456||||generic||muxa:0.0||/tmp||sleep||live||idle\n"
+	in := "%1||alice||abc123||bob||generic||muxa:1.0||/tmp/proj||sleep||idle\n" +
+		"%2||bob||def456||||generic||muxa:0.0||/tmp||sleep||busy\n" +
+		"%3||zed||aaa111||bob||cursor||muxa:2.0||/gone||zsh||ghost\n"
 	out := runCLIWithArgs(t, []byte(in), "who-json")
 	var rows []map[string]any
 	if err := json.Unmarshal(out, &rows); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, out)
 	}
-	if len(rows) != 2 {
+	if len(rows) != 3 {
 		t.Fatalf("rows=%d", len(rows))
 	}
-	need := []string{"name", "id", "parent", "kind", "state", "pane", "session", "cwd", "status"}
+	need := []string{"name", "id", "parent", "kind", "state", "pane", "session", "cwd"}
 	for _, row := range rows {
 		if len(row) != len(need) {
 			t.Fatalf("keys=%v", keysOf(row))
@@ -77,6 +78,9 @@ func TestWhoJSONShapeAndNulls(t *testing.T) {
 				t.Fatalf("missing %s", k)
 			}
 		}
+		if _, ok := row["status"]; ok {
+			t.Fatalf("status must not be present: %+v", row)
+		}
 	}
 	if rows[0]["parent"] != "bob" || rows[0]["session"] != nil {
 		t.Fatalf("alice: %+v", rows[0])
@@ -84,14 +88,13 @@ func TestWhoJSONShapeAndNulls(t *testing.T) {
 	if rows[1]["parent"] != nil || rows[1]["session"] != nil {
 		t.Fatalf("bob: %+v", rows[1])
 	}
+	if rows[2]["state"] != "ghost" {
+		t.Fatalf("zed state: %+v", rows[2])
+	}
 	for _, row := range rows {
 		st, _ := row["state"].(string)
-		if st != "idle" && st != "busy" {
-			t.Fatalf("state must be idle|busy, not %q (blocked is gone)", st)
-		}
-		status, _ := row["status"].(string)
-		if status != "live" && status != "drawing" && status != "ghost" {
-			t.Fatalf("status must be live|drawing|ghost, not %q", status)
+		if st != "idle" && st != "busy" && st != "ghost" {
+			t.Fatalf("state must be idle|busy|ghost, not %q", st)
 		}
 		if row["session"] != nil {
 			t.Fatalf("session must be null: %+v", row)
@@ -101,7 +104,7 @@ func TestWhoJSONShapeAndNulls(t *testing.T) {
 
 func TestWhoJSONEscapesCwd(t *testing.T) {
 	cwd := `/tmp/acme-"quote"\slash`
-	in := "%9||projagent||ididid||||generic||s:1.0||" + cwd + "||sleep||live||idle\n"
+	in := "%9||projagent||ididid||||generic||s:1.0||" + cwd + "||sleep||idle\n"
 	out := runCLIWithArgs(t, []byte(in), "who-json")
 	var rows []map[string]any
 	if err := json.Unmarshal(out, &rows); err != nil {
