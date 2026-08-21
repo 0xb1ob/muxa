@@ -170,13 +170,9 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 | `muxa who` | Roster (name, id, session, parent, cwd, STATE, STATUS, …) |
 | `muxa who --json` | Same roster as objects (`parent`/`session` are `null` when empty; `state` is `idle`/`busy` from the broker drawing list). Requires `muxa-broker` on disk: `bin/muxa` delegates JSON encoding to the broker CLI (`who-json`), not to a daemon RPC, but the binary must exist and be executable |
 | `muxa tail NAME [-n N]` | One-shot pane read (visible grid, or last N lines of history) |
-| `muxa unregister NAME\|ID` | Clear muxa registration; leave pane running |
 | `muxa kill NAME\|ID` | Remove the pane (`kill-pane`); gone from `muxa who` |
-| `muxa session` | Empty (CLI session id is not tracked) |
-| `muxa children` | Direct children of this pane |
 | `muxa send NAME TEXT` | Enqueue on the broker (parent↔child). Auto-starts the daemon if the socket is dead; fails closed if it cannot |
-| `muxa send --json NAME TEXT` | Same enqueue; stdout is `{"id","pane","from","to"}` (`--all` → array) |
-| `muxa send --all TEXT` | Every parent/child pane (not siblings or other roots) |
+| `muxa send --json NAME TEXT` | Same enqueue; stdout is `{"id","pane","from","to"}` |
 | `muxa broker [start\|status\|stop]` | User-level paste broker (unix socket + file queue) |
 | `muxa hook session-start [--kind KIND]` | Optional root self-registration (`TMUX_PANE` only) |
 

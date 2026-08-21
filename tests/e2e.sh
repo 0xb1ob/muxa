@@ -262,10 +262,6 @@ ppar="$(muxa_as "$pi_pane" parent 2>/dev/null || true)"
 if [ "$cpar" = "claude" ]; then ok "cursor parent is claude"; else bad "cursor parent is claude" "$cpar"; fi
 if [ "$ppar" = "claude" ]; then ok "pi parent is claude"; else bad "pi parent is claude" "$ppar"; fi
 
-kids="$(muxa_as "$claude_pane" children 2>/dev/null || true)"
-printf '%s\n' "$kids" | grep -qx cursor && ok "children lists cursor" || bad "children lists cursor" "$kids"
-printf '%s\n' "$kids" | grep -qx pi && ok "children lists pi" || bad "children lists pi" "$kids"
-
 # --- ACL (no LLM) ---
 sib="$(muxa_as "$cursor_pane" send --no-reply pi 'SIB_NOPE' 2>&1 || true)"
 printf '%s\n' "$sib" | grep -q forbidden && ok "sibling cursor → pi refused" || bad "sibling cursor → pi refused" "$sib"
@@ -336,7 +332,7 @@ wait_pane_has "$cursor_pane" "$b_live" 20 && ok "B-live: broker lands after copy
 wait_state claude idle 60 || true
 sleep 2
 hop="MUXA_HOP_$TOKEN"
-hop_prompt="You have two child panes (cursor and pi). Ping both with one command, then stop: muxa send --no-reply --all ${hop}"
+hop_prompt="You have two child panes (cursor and pi). Send each: muxa send --no-reply cursor ${hop} and muxa send --no-reply pi ${hop}. Then stop."
 printf '%s' "$hop_prompt" | tmux_e load-buffer -b muxae2e-hop -
 tmux_e paste-buffer -p -d -b muxae2e-hop -t "$claude_pane"
 sleep "${MUXA_ENTER_DELAY}"
