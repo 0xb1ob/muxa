@@ -12,6 +12,9 @@
 #      MUXA_BROKER_BASE_URL MUXA_BROKER_SKIP_VERIFY
 #
 # Go is not required: muxa-broker is downloaded as a release asset.
+# A live daemon is stopped before the binary is replaced (overwriting a
+# running Mach-O on darwin 25 SIGKILLs it), then started again so the new
+# process re-adopts pending/ done/ in the broker dir.
 set -euo pipefail
 
 MUXA_REPO="${MUXA_REPO:-https://github.com/0xb1ob/muxa.git}"
@@ -167,9 +170,82 @@ download_broker() {
   printf '%s' "$bin"
 }
 
+# Same layout as bin/muxa broker_setup_paths / runtime_root.
+install_broker_dir() {
+  local base pid
+  if [ -n "${MUXA_BROKER_DIR:-}" ]; then
+    printf '%s' "$MUXA_BROKER_DIR"
+    return 0
+  fi
+  base="${XDG_RUNTIME_DIR:-/tmp/muxa-${UID:-$(id -u)}}"
+  if [ -n "${MUXA_TMUX_SOCKET:-}" ]; then
+    pid="$(tmux -L "$MUXA_TMUX_SOCKET" list-sessions -F '#{pid}' 2>/dev/null | head -1 || true)"
+  else
+    pid="$(tmux list-sessions -F '#{pid}' 2>/dev/null | head -1 || true)"
+  fi
+  [ -n "$pid" ] || pid=0
+  printf '%s/muxa/%s/broker' "$base" "$pid"
+}
+
+install_broker_pidfile() {
+  if [ -n "${MUXA_BROKER_PID:-}" ]; then
+    printf '%s' "$MUXA_BROKER_PID"
+    return 0
+  fi
+  printf '%s/broker.pid' "$(install_broker_dir)"
+}
+
+# SIGTERM the pidfile pid, matching cmd_broker stop. Do not rm pending/,
+# done/, or the broker dir — the next start re-adopts that queue.
+stop_running_broker() {
+  local pidfile sock pid i
+  pidfile="$(install_broker_pidfile)"
+  sock="${MUXA_BROKER_SOCK:-$(dirname "$pidfile")/broker.sock}"
+  [ -f "$pidfile" ] || return 0
+  pid="$(tr -d ' \t\n' <"$pidfile" 2>/dev/null || true)"
+  if [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    i=0
+    while [ "$i" -lt 50 ]; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      printf 'muxa-install: broker pid %s still running after SIGTERM\n' "$pid" >&2
+    else
+      printf 'muxa-install: stopped broker pid=%s\n' "$pid"
+    fi
+  fi
+  rm -f "$pidfile" "$sock"
+}
+
+# After the new muxa is on PATH. Skip without tmux: curl|bash on a fresh
+# machine has no session to attach a daemon to. `muxa broker start` later.
+start_installed_broker() {
+  local muxa
+  if [ -x "$BIN/muxa" ]; then
+    muxa="$BIN/muxa"
+  elif [ -x "$ROOT/bin/muxa" ]; then
+    muxa="$ROOT/bin/muxa"
+  else
+    printf 'muxa-install: muxa not on PATH yet; start the broker later with: muxa broker start\n' >&2
+    return 0
+  fi
+  if [ -z "${TMUX:-}" ] && [ -z "${MUXA_TMUX_SOCKET:-}" ]; then
+    printf 'muxa-install: not in tmux; start the broker later with: muxa broker start\n'
+    return 0
+  fi
+  PATH="$BIN:$PATH" "$muxa" broker start || \
+    printf 'muxa-install: could not start muxa-broker; run: muxa broker start\n' >&2
+  return 0
+}
+
 if [ -d "$ROOT/broker" ]; then
   _tmp="$(mktemp -d "${TMPDIR:-/tmp}/muxa-broker.XXXXXX")"
   if _bin="$(download_broker "$_tmp")" && [ -s "$_bin" ]; then
+    # Stop first, then replace. A live inode overwrite SIGKILLs on darwin 25.
+    stop_running_broker
     install -m 755 "$_bin" "$ROOT/bin/muxa-broker"
     if [ "$(uname -s)" = Darwin ]; then
       # darwin 25+ SIGKILLs quarantined / unsigned Mach-O.
@@ -186,6 +262,9 @@ if [ -d "$ROOT/broker" ]; then
   fi
   rm -rf "$_tmp"
   unset _tmp _bin
+  if [ -x "$ROOT/bin/muxa-broker" ] || [ -x "$BIN/muxa" ] || [ -x "$ROOT/bin/muxa" ]; then
+    start_installed_broker
+  fi
 fi
 
 # Skills: on-demand, not MCP. Progressive disclosure = fewer tokens.
