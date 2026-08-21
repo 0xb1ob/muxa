@@ -124,6 +124,10 @@ The broker keeps each enqueue as a JSON file under
 socket is `<runtime>/broker/broker.sock`. `muxa send` auto-starts
 `bin/muxa-broker` when the socket does not answer `{"op":"ping"}`.
 
+`bin/muxa-broker` is a prebuilt release asset (`muxa-broker-<os>-<arch>`),
+downloaded and checksum-verified by `install.sh`. Install never compiles Go;
+a Go toolchain is a test-only dependency.
+
 For each queued message the broker captures the target pane (`tmux
 capture-pane -p`) and pastes only when input looks **free**:
 
