@@ -31,8 +31,9 @@ import (
 //
 // Both paths stay CLI-agnostic — the composer path keys off terminal
 // attributes (SGR 2 faint, SGR 7 reverse) and half-block box chrome, not off
-// any Claude/Cursor/Pi string. Retry until deadline remains the reliability
-// layer.
+// any Claude/Cursor/Pi string. A live pane that is not free keeps its mail
+// queued; the broker does not paste after MUXA_BROKER_DEADLINE just because
+// the clock ran out.
 func LooksFree(capture string) bool {
 	if rows, top, bot, ok := findComposer(capture); ok {
 		return composerFree(rows, top, bot)

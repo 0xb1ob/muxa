@@ -30,6 +30,9 @@ func TestEnqueueAndStatus(t *testing.T) {
 	if !st.OK || st.Queued != 1 {
 		t.Fatalf("status: %+v", st)
 	}
+	if len(st.Drawing) != 0 {
+		t.Fatalf("status drawing without hub: %v", st.Drawing)
+	}
 	ping := rpc(t, sock, Request{Op: "ping"})
 	if !ping.OK || ping.State != "pong" {
 		t.Fatalf("ping: %+v", ping)

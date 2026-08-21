@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -9,12 +10,14 @@ import (
 type Deliverer struct {
 	Q        *Queue
 	T        *TMUX
+	Ctrl     *ControlHub
 	Poll     time.Duration
 	now      func() time.Time
 	mu       sync.Mutex
 	inflight map[string]bool   // pane currently being injected
 	pastes   []string          // test hook: pane ids pasted, in order
 	prev     map[string]string // last capture-pane per pane, for two-signal
+	held     map[string]bool   // already logged "holding past deadline"
 }
 
 func NewDeliverer(q *Queue, t *TMUX, poll time.Duration) *Deliverer {
@@ -28,28 +31,40 @@ func NewDeliverer(q *Queue, t *TMUX, poll time.Duration) *Deliverer {
 		now:      time.Now,
 		inflight: map[string]bool{},
 		prev:     map[string]string{},
+		held:     map[string]bool{},
 	}
 }
 
 func (d *Deliverer) Loop(stop <-chan struct{}) {
+	if d.Ctrl != nil {
+		go d.Ctrl.Run(stop)
+	}
+	ticker := time.NewTicker(d.Poll)
+	defer ticker.Stop()
+	d.Tick()
 	for {
 		select {
 		case <-stop:
 			return
-		default:
-		}
-		d.Tick()
-		select {
-		case <-stop:
-			return
-		case <-time.After(d.Poll):
+		case <-ticker.C:
+			d.Tick()
+		case <-d.wake():
+			d.Tick()
 		}
 	}
 }
 
-// Tick tries to deliver every pending message at most once.
-// A pane that is not free is left queued until its deadline, then
-// pasted once as a last-resort fallback.
+func (d *Deliverer) wake() <-chan struct{} {
+	if d.Ctrl == nil {
+		return nil
+	}
+	return d.Ctrl.Wake()
+}
+
+// Tick tries to deliver every pending message at most once per pane.
+// A pane that is not free is left queued — including past its deadline.
+// Timeout-fallback paste is how two messages into one busy composer
+// clobber each other and still get filed as done.
 func (d *Deliverer) Tick() {
 	msgs, err := d.Q.Pending()
 	if err != nil {
@@ -81,16 +96,15 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		}
 		return
 	}
-	free, two, err := d.observe(m.Pane)
+	free, err := d.canPaste(m.Pane)
 	if err != nil {
 		log.Printf("free %s: %v", m.Pane, err)
 		free = false
 	}
-	if two != free {
-		log.Printf("free-detection %s: parser=%v two-signal=%v", m.Pane, free, two)
-	}
-	fallback := !free && now >= m.DeadlineUnix
-	if !free && !fallback {
+	if !free {
+		if now >= m.DeadlineUnix {
+			d.noteHeld(m)
+		}
 		return
 	}
 	d.mu.Lock()
@@ -106,25 +120,62 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 	_ = d.Q.Save(m)
 	if err := d.T.Inject(m.Pane, m.Text); err != nil {
 		log.Printf("inject %s: %v", m.ID, err)
-		if fallback || now >= m.DeadlineUnix {
-			_ = d.Q.MarkFailed(m)
-		}
+		return
+	}
+	if !d.confirmed(m) {
+		log.Printf("unconfirmed %s → %s id=%s (paste not visible; left queued)", m.From, m.To, m.ID)
 		return
 	}
 	d.mu.Lock()
 	d.pastes = append(d.pastes, m.Pane+"|"+m.ID)
+	delete(d.held, m.ID)
 	d.mu.Unlock()
-	if fallback {
-		log.Printf("delivered %s → %s id=%s (timeout fallback paste)", m.From, m.To, m.ID)
-	} else {
-		log.Printf("delivered %s → %s id=%s", m.From, m.To, m.ID)
-	}
+	log.Printf("delivered %s → %s id=%s", m.From, m.To, m.ID)
 	_ = d.Q.MarkDone(m)
+}
+
+func (d *Deliverer) noteHeld(m *Msg) {
+	d.mu.Lock()
+	if d.held[m.ID] {
+		d.mu.Unlock()
+		return
+	}
+	d.held[m.ID] = true
+	d.mu.Unlock()
+	log.Printf("holding %s → %s id=%s (pane not free after deadline; left queued)", m.From, m.To, m.ID)
+}
+
+// canPaste is the single paste gate for both the poll loop and control-mode
+// silence. Drawing (%output inside the quiet window) waits; so does a pane
+// that LooksFree rejects. Two-signal is observed and logged, not followed.
+func (d *Deliverer) canPaste(pane string) (bool, error) {
+	if d.T.PaneDead(pane) {
+		return false, nil
+	}
+	if d.T.InMode(pane) {
+		return false, nil
+	}
+	if d.drawing(pane) {
+		return false, nil
+	}
+	parserFree, two, err := d.observe(pane)
+	if err != nil {
+		return false, err
+	}
+	if two != parserFree {
+		log.Printf("free-detection %s: parser=%v two-signal=%v", pane, parserFree, two)
+	}
+	return parserFree, nil
+}
+
+func (d *Deliverer) drawing(pane string) bool {
+	return d.Ctrl != nil && d.Ctrl.Live() && d.Ctrl.Drawing(pane)
 }
 
 // observe runs both free-detection rules. Paste still follows the parser
 // (LooksFree): two-signal cannot see paused typing in a Cursor Agent
-// composer, and pasting over a half-typed prompt is worse than a slow brief.
+// composer, and neither can control-mode silence — a paused half-typed
+// composer emits no %output, same as an empty one.
 func (d *Deliverer) observe(pane string) (parserFree, twoFree bool, err error) {
 	if d.T.PaneDead(pane) {
 		return false, false, nil
@@ -141,6 +192,47 @@ func (d *Deliverer) observe(pane string) (parserFree, twoFree bool, err error) {
 	d.prev[pane] = snap.Capture
 	d.mu.Unlock()
 	return LooksFree(snap.Capture), TwoSignalFree(prev, snap.Capture, snap.CursorY, snap.CursorX), nil
+}
+
+func (d *Deliverer) confirmed(m *Msg) bool {
+	needle := confirmNeedle(m.Text)
+	if needle == "" {
+		return false
+	}
+	for i := 0; i < 3; i++ {
+		cap, err := d.T.Capture(m.Pane)
+		if err == nil && landed(cap, needle) {
+			return true
+		}
+		if i < 2 {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	return false
+}
+
+func confirmNeedle(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		s := strings.TrimSpace(line)
+		if s == "" || strings.HasPrefix(s, "[muxa]") || strings.HasPrefix(s, "Reply:") || s == "Do not reply." {
+			continue
+		}
+		return s
+	}
+	return strings.TrimSpace(text)
+}
+
+func landed(capture, needle string) bool {
+	if needle == "" {
+		return false
+	}
+	if strings.Contains(capture, needle) {
+		return true
+	}
+	if len(needle) > 24 && strings.Contains(capture, needle[:24]) {
+		return true
+	}
+	return false
 }
 
 func (d *Deliverer) pasteIDs() []string {

@@ -14,6 +14,8 @@ type fakeTMUX struct {
 	capI     int
 	injects  []string
 	failInj  bool
+	echo     string
+	hideEcho bool
 }
 
 func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
@@ -41,20 +43,26 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 		}
 		return "0", nil
 	case "capture-pane":
+		s := ""
 		if f.capI < len(f.captures) {
-			s := f.captures[f.capI]
+			s = f.captures[f.capI]
 			f.capI++
-			return s, nil
+		} else if len(f.captures) > 0 {
+			s = f.captures[len(f.captures)-1]
 		}
-		if len(f.captures) > 0 {
-			return f.captures[len(f.captures)-1], nil
+		if f.echo != "" && !f.hideEcho {
+			if s == "" {
+				return f.echo, nil
+			}
+			return f.echo + "\n" + s, nil
 		}
-		return "", nil
+		return s, nil
 	case "load-buffer":
 		if f.failInj {
 			return "", errPaste
 		}
 		f.injects = append(f.injects, string(stdin))
+		f.echo = string(stdin)
 		return "", nil
 	case "paste-buffer":
 		if f.failInj {
@@ -131,7 +139,7 @@ func TestRetryUntilFree(t *testing.T) {
 	}
 }
 
-func TestTimeoutFallbackPaste(t *testing.T) {
+func TestNoTimeoutFallbackPaste(t *testing.T) {
 	dir := t.TempDir()
 	q, _ := OpenQueue(dir)
 	f := &fakeTMUX{captures: []string{"ready> never clears"}}
@@ -146,11 +154,73 @@ func TestTimeoutFallbackPaste(t *testing.T) {
 	}
 	now = 1005
 	d.Tick()
-	if f.injectCount() != 1 {
-		t.Fatalf("want fallback paste at deadline, got %d", f.injectCount())
+	if f.injectCount() != 0 {
+		t.Fatalf("timeout fallback pasted into a busy pane: %d", f.injectCount())
 	}
-	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 {
-		t.Fatalf("after fallback pending=%d done=%d failed=%d", p, doneN, failed)
+	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 {
+		t.Fatalf("after deadline pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+}
+
+func TestUnconfirmedPasteNotDone(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{captures: []string{"ready>"}, hideEcho: true}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	_ = q.Put(&Msg{ID: "u1", Pane: "%1", From: "c", To: "p", Text: "TOKEN-GHOST", DeadlineUnix: 2000})
+
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("want 1 inject, got %d", f.injectCount())
+	}
+	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 {
+		t.Fatalf("unconfirmed pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+}
+
+func TestBusyPaneDeliversInOrderAfterFree(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{captures: []string{"ready> BLOCKED"}}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	now := int64(1000)
+	d.now = func() time.Time { return time.Unix(now, 0) }
+	_ = q.Put(&Msg{ID: "a", Pane: "%1", From: "c", To: "p", Text: "first-mail", EnqueuedUnix: 1, DeadlineUnix: 1005})
+	_ = q.Put(&Msg{ID: "b", Pane: "%1", From: "c", To: "p", Text: "second-mail", EnqueuedUnix: 2, DeadlineUnix: 1005})
+
+	d.Tick()
+	now = 1010
+	d.Tick()
+	if f.injectCount() != 0 {
+		t.Fatalf("pasted while busy: %d", f.injectCount())
+	}
+
+	f.mu.Lock()
+	f.captures = []string{"ready>"}
+	f.capI = 0
+	f.mu.Unlock()
+	d.Tick()
+	if f.injectCount() != 1 || f.lastInject() != "first-mail" {
+		t.Fatalf("first paste=%q count=%d", f.lastInject(), f.injectCount())
+	}
+	if ids := d.pasteIDs(); len(ids) != 1 || ids[0] != "%1|a" {
+		t.Fatalf("paste ids after first: %v", ids)
+	}
+
+	f.mu.Lock()
+	f.echo = ""
+	f.capI = 0
+	f.mu.Unlock()
+	d.Tick()
+	if f.injectCount() != 2 || f.lastInject() != "second-mail" {
+		t.Fatalf("second paste=%q count=%d", f.lastInject(), f.injectCount())
+	}
+	if ids := d.pasteIDs(); len(ids) != 2 || ids[0] != "%1|a" || ids[1] != "%1|b" {
+		t.Fatalf("paste order: %v", ids)
+	}
+	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 2 || failed != 0 {
+		t.Fatalf("after both pending=%d done=%d failed=%d", p, doneN, failed)
 	}
 }
 

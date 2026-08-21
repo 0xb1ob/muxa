@@ -83,12 +83,17 @@ func main() {
 	}
 	defer s.Close()
 
-	d := NewDeliverer(q, NewTMUX(), poll)
+	t := NewTMUX()
+	quiet := durationMS("MUXA_BROKER_QUIET_MS", 250)
+	ctrl := NewControlHub(t, quiet)
+	s.Drawing = ctrl.DrawingPanes
+	d := NewDeliverer(q, t, poll)
+	d.Ctrl = ctrl
 	stop := make(chan struct{})
 	go d.Loop(stop)
 	go s.Serve()
-	log.Printf("listening %s pid=%d pgid=%d deadline=%s poll=%s",
-		sock, os.Getpid(), processGroup(), deadline, poll)
+	log.Printf("listening %s pid=%d pgid=%d deadline=%s poll=%s quiet=%s",
+		sock, os.Getpid(), processGroup(), deadline, poll, quiet)
 	// A restart re-adopts whatever the previous owner had not delivered;
 	// say so, so "queued" with no "delivered" is never a silent hole.
 	if n, _, _, err := q.Counts(); err == nil && n > 0 {

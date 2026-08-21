@@ -222,15 +222,28 @@ composer box, and both idle-empty and idle-typed snapshots are internally
 static. Pasting over a half-typed prompt is worse than a slow brief, so
 LooksFree remains the paste gate until a third signal exists.
 
+**Control-mode silence (muxa#46) is not that third signal for Cursor Agent.**
+`tmux -C -f read-only,ignore-size attach` streams `%output` per pane. A busy
+agent draws continuously; an idle one draws nothing, so delivery wakes on
+silence rather than a 250 ms poll. Typing in a Cursor composer *does* emit
+`%output` (a redraw of the box containing `→ hello`). After the user pauses,
+`%output` stops — the same silence as an empty idle composer. Control mode
+therefore cannot distinguish a half-typed Cursor composer from an empty one,
+and the typed-in-box conjunct in LooksFree must stay. `muxa who` STATUS
+`drawing` is this same `%output` window, with no hook involvement.
+
 Faint means chrome, so default-foreground text inside the box counts as
 typed even when it is really a hint. That is deliberate: the cost is a
 delayed paste, whereas the other way round overwrites a human's input.
 
-Retry until `MUXA_BROKER_DEADLINE` seconds (default 600) is the reliability
-layer. When the deadline expires the broker pastes once anyway (timeout
-fallback) — a fallback paste is a symptom, not the design. When the broker is
-down or the binary is missing, `muxa send` exits non-zero and pastes
-nothing.
+Retry until the pane is actually free. `MUXA_BROKER_DEADLINE` (default 600)
+is how long a *dead* pane is retried before the message is failed; a live
+busy pane keeps its mail in `pending/` past that deadline. The broker MUST
+NOT timeout-fallback paste: two fallbacks into one busy composer overwrite
+each other, both get filed as `done/`, and the agent never sees the first.
+`delivered` means the payload was visible in the pane after paste, not that
+`paste-buffer` exited 0. When the broker is down or the binary is missing,
+`muxa send` exits non-zero and pastes nothing.
 
 An implementation MUST NOT paste into a pane that is dead or that is in
 copy-mode (`#{pane_in_mode}`). Copy-mode is a silent-loss mode:
