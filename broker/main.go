@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +16,16 @@ import (
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("muxa-broker: ")
+
+	checkPane := flag.String("check-pane", "", "print parser and two-signal verdicts for a tmux pane and exit")
+	flag.Parse()
+	if *checkPane != "" {
+		if err := checkPaneVerdicts(*checkPane); err != nil {
+			fmt.Fprintf(os.Stderr, "muxa-broker: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	dir := env("MUXA_BROKER_DIR", "")
 	if dir == "" {
@@ -166,4 +177,37 @@ func writePID(path string) error {
 	defer f.Close()
 	_, err = io.WriteString(f, strconv.Itoa(os.Getpid())+"\n")
 	return err
+}
+
+func checkPaneVerdicts(pane string) error {
+	t := NewTMUX()
+	if t.PaneDead(pane) {
+		fmt.Printf("pane=%s dead=1 parser=WAIT two-signal=WAIT\n", pane)
+		return nil
+	}
+	if t.InMode(pane) {
+		fmt.Printf("pane=%s in_mode=1 parser=WAIT two-signal=WAIT\n", pane)
+		return nil
+	}
+	a, err := t.Snapshot(pane)
+	if err != nil {
+		return err
+	}
+	time.Sleep(durationMS("MUXA_BROKER_POLL_MS", 250))
+	b, err := t.Snapshot(pane)
+	if err != nil {
+		return err
+	}
+	parser := LooksFree(b.Capture)
+	two := TwoSignalFree(a.Capture, b.Capture, b.CursorY, b.CursorX)
+	fmt.Printf("pane=%s cursor_y=%d cursor_x=%d quiescent=%v parser=%s two-signal=%s\n",
+		pane, b.CursorY, b.CursorX, a.Capture == b.Capture, freeWord(parser), freeWord(two))
+	return nil
+}
+
+func freeWord(free bool) string {
+	if free {
+		return "FREE"
+	}
+	return "WAIT"
 }

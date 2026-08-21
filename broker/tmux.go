@@ -84,6 +84,24 @@ func (t *TMUX) Capture(pane string) (string, error) {
 	return t.Run([]string{"capture-pane", "-p", "-e", "-t", pane}, nil)
 }
 
+// Snapshot captures the pane and the hardware cursor in adjacent tmux calls.
+func (t *TMUX) Snapshot(pane string) (Snapshot, error) {
+	cap, err := t.Capture(pane)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	pos, err := t.fmt(pane, "#{cursor_y} #{cursor_x}")
+	if err != nil {
+		return Snapshot{Capture: cap}, err
+	}
+	var y, x int
+	n, _ := fmt.Sscanf(pos, "%d %d", &y, &x)
+	if n != 2 {
+		return Snapshot{Capture: cap}, fmt.Errorf("cursor format %q", pos)
+	}
+	return Snapshot{Capture: cap, CursorY: y, CursorX: x}, nil
+}
+
 func (t *TMUX) Inject(pane, text string) error {
 	buf := fmt.Sprintf("muxa-broker-%d", time.Now().UnixNano())
 	if _, err := t.Run([]string{"load-buffer", "-b", buf, "-"}, []byte(text)); err != nil {

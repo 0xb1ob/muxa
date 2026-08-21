@@ -210,6 +210,18 @@ half-block box chrome, which Claude, Cursor Agent and pi all render. Rule 3
 alone is not enough — every agent CLI's idle pane ends in chrome, so it read
 as busy and every first brief waited out the whole deadline.
 
+**Two-signal rule (beside the parser, muxa#44).** A second detector asks
+what the pane does: (1) is this capture identical to the previous poll
+(quiescence — the pane is not drawing)? (2) is the text left of the
+hardware cursor empty or a prompt (nothing typed at `cursor_x` on
+`cursor_y`)? `muxa-broker -check-pane %id` prints both verdicts. Paste still
+follows the composer/shell parser above. The two-signal rule cannot see
+paused typing in Cursor Agent: the hardware cursor stays on the blank row
+below the `cwd · branch` splash footer while `hello world` sits in the
+composer box, and both idle-empty and idle-typed snapshots are internally
+static. Pasting over a half-typed prompt is worse than a slow brief, so
+LooksFree remains the paste gate until a third signal exists.
+
 Faint means chrome, so default-foreground text inside the box counts as
 typed even when it is really a hint. That is deliberate: the cost is a
 delayed paste, whereas the other way round overwrites a human's input.
