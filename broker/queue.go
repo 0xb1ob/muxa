@@ -36,6 +36,7 @@ type Queue struct {
 	pending string
 	done    string
 	failed  string
+	unknown string
 }
 
 func OpenQueue(dir string) (*Queue, error) {
@@ -44,8 +45,9 @@ func OpenQueue(dir string) (*Queue, error) {
 		pending: filepath.Join(dir, "pending"),
 		done:    filepath.Join(dir, "done"),
 		failed:  filepath.Join(dir, "failed"),
+		unknown: filepath.Join(dir, "unknown"),
 	}
-	for _, d := range []string{q.pending, q.done, q.failed} {
+	for _, d := range []string{q.pending, q.done, q.failed, q.unknown} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
@@ -114,7 +116,13 @@ func (q *Queue) MarkFailed(m *Msg) error {
 	return q.move(m, q.failed)
 }
 
-func (q *Queue) Counts() (pending, done, failed int, err error) {
+func (q *Queue) MarkUnknown(m *Msg) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.move(m, q.unknown)
+}
+
+func (q *Queue) Counts() (pending, done, failed, unknown int, err error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	pending, err = countJSON(q.pending)
@@ -126,6 +134,10 @@ func (q *Queue) Counts() (pending, done, failed int, err error) {
 		return
 	}
 	failed, err = countJSON(q.failed)
+	if err != nil {
+		return
+	}
+	unknown, err = countJSON(q.unknown)
 	return
 }
 
