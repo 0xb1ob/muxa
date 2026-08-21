@@ -704,11 +704,27 @@ broker_bin_path() {
   printf '%s' "$dir/muxa-broker"
 }
 
+# darwin 25+ SIGKILLs provenance-tagged worktree binaries. ensure_broker
+# signs the runtime copy; broker_cli execs $bin (the source, e.g. a freshly
+# `go build`-ed muxa-broker) so every RPC dies unless that file is signed too.
+# Once: skip when the provenance xattr is gone and codesign already verifies.
+broker_sign_darwin() {
+  local p="$1"
+  [ "$(uname -s)" = Darwin ] || return 0
+  [ -f "$p" ] && [ -x "$p" ] || return 0
+  if xattr -p com.apple.provenance "$p" >/dev/null 2>&1 \
+     || ! codesign --verify "$p" >/dev/null 2>&1; then
+    xattr -c "$p" 2>/dev/null || true
+    codesign -s - --force --timestamp=none "$p" 2>/dev/null || true
+  fi
+}
+
 broker_cli() {
   local bin
   bin="$(broker_bin_path)"
   [ -x "$bin" ] || return 1
   [ -n "${BROKER_SOCK:-}" ] || broker_setup_paths
+  broker_sign_darwin "$bin"
   MUXA_BROKER_SOCK="$BROKER_SOCK" "$bin" "$@"
 }
 
@@ -761,10 +777,7 @@ ensure_broker() {
     fi
     chmod +x "$runbin"
     # darwin 25+ SIGKILLs provenance-tagged worktree binaries; sign the copy.
-    if [ "$(uname -s)" = Darwin ]; then
-      xattr -c "$runbin" 2>/dev/null || true
-      codesign -s - --force --timestamp=none "$runbin" 2>/dev/null || true
-    fi
+    broker_sign_darwin "$runbin"
     rm -f "$BROKER_SOCK" "$BROKER_PID"
     # Still backgrounded, even though the binary now forks its own daemon:
     # bin/muxa-broker is gitignored and versioned separately from this script,

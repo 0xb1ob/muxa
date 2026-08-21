@@ -576,6 +576,29 @@ case "$cap_c" in
   *) ok "C nothing pasted when broker down" ;;
 esac
 
+# --- J: broker_cli must RPC a freshly go-built source binary (unsigned /
+# provenance-tagged). ensure_broker already signs the runtime copy; without
+# signing $bin, darwin 25 SIGKILLs who --json / ping and `muxa broker start`
+# fails even though the daemon copy is fine.
+unsigned_j="$HOME_ISO/fresh-unsigned-broker"
+"$GO" build "${ldflags[@]}" -o "$unsigned_j" "$ROOT/broker"
+chmod +x "$unsigned_j"
+muxa_as "$parent_pane" broker stop >/dev/null || true
+sleep 0.1
+saved_bin_j="$MUXA_BROKER_BIN"
+export MUXA_BROKER_BIN="$unsigned_j"
+set +e
+start_j="$(muxa_as "$parent_pane" broker start 2>&1)"
+rc_j=$?
+who_j="$(muxa_as "$parent_pane" who --json 2>&1)"
+rc_who_j=$?
+set -e
+export MUXA_BROKER_BIN="$saved_bin_j"
+[ "$rc_j" -eq 0 ] && ok "J broker start with unsigned source binary" \
+  || bad "J broker start with unsigned source binary" "exit=$rc_j out=$start_j"
+[ "$rc_who_j" -eq 0 ] && ok "J who --json with unsigned source binary" \
+  || bad "J who --json with unsigned source binary" "exit=$rc_who_j out=$who_j"
+
 # restart broker for cleanliness
 muxa_as "$parent_pane" broker start >/dev/null || true
 
