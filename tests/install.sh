@@ -8,7 +8,20 @@ pass=0
 fail=0
 tmpdir="$(mktemp -d /tmp/muxa-install-test.XXXXXX)"
 
-cleanup() { rm -rf "$tmpdir"; }
+# Isolate from the operator session. A live TMUX here would make install.sh
+# call `muxa broker start` against the real broker dir.
+unset TMUX MUXA_TMUX_SOCKET MUXA_BROKER_DIR MUXA_BROKER_PID MUXA_BROKER_SOCK \
+  MUXA_BROKER_BIN || true
+
+cleanup() {
+  if [ -n "${live_pid:-}" ]; then
+    kill "$live_pid" 2>/dev/null || true
+  fi
+  if [ -n "${start_sock:-}" ]; then
+    tmux -L "$start_sock" kill-server 2>/dev/null || true
+  fi
+  rm -rf "$tmpdir"
+}
 trap cleanup EXIT
 
 ok() { pass=$((pass + 1)); printf 'ok %s %s\n' "$pass" "$1"; }
@@ -200,6 +213,120 @@ set -e
   || bad "install succeeds with a verified broker" "exit=$good_rc out=$good_out"
 [ -x "$tmpdir/home-goodsum/bin/muxa-broker" ] && ok "verified broker lands next to muxa" \
   || bad "verified broker lands next to muxa" "no $tmpdir/home-goodsum/bin/muxa-broker"
+
+case "$good_out" in
+  *"not in tmux"*) ok "install without tmux skips broker start and says why" ;;
+  *) bad "install without tmux skips broker start and says why" "out=$good_out" ;;
+esac
+
+# A live daemon must be SIGTERM'd before the binary is replaced. Queue files
+# under the broker dir survive so the next start can re-adopt them.
+live_broker="$tmpdir/live-broker"
+mkdir -p "$live_broker/pending" "$live_broker/done" "$live_broker/failed"
+printf '{"id":"keep-pending"}\n' >"$live_broker/pending/msg.json"
+printf '{"id":"keep-done"}\n' >"$live_broker/done/old.json"
+printf 'old-runtime-copy\n' >"$live_broker/muxa-broker"
+sleep 3600 &
+live_pid=$!
+disown "$live_pid" 2>/dev/null || true
+printf '%s\n' "$live_pid" >"$live_broker/broker.pid"
+: >"$live_broker/broker.sock"
+
+tree_live="$tmpdir/tree-live"
+seed_muxa_tree "$tree_live"
+mkdir -p "$tree_live/broker" "$tree_live/bin"
+printf 'old-install-path\n' >"$tree_live/bin/muxa-broker"
+chmod +x "$tree_live/bin/muxa-broker"
+
+set +e
+live_out="$(HOME="$tmpdir/home-live" MUXA_BIN_DIR="$tmpdir/home-live/bin" \
+  MUXA_BROKER_DIR="$live_broker" \
+  MUXA_BROKER_PID="$live_broker/broker.pid" \
+  MUXA_BROKER_SOCK="$live_broker/broker.sock" \
+  MUXA_BROKER_BASE_URL="file://$tmpdir/releases" \
+  bash "$tree_live/install.sh" 2>&1)"
+live_rc=$?
+set -e
+
+[ "$live_rc" -eq 0 ] && ok "install with a live daemon succeeds" \
+  || bad "install with a live daemon succeeds" "exit=$live_rc out=$live_out"
+
+if ! kill -0 "$live_pid" 2>/dev/null; then
+  ok "install stops a live broker before replacing the binary"
+  live_pid=""
+else
+  bad "install stops a live broker before replacing the binary" "pid $live_pid still running"
+  kill "$live_pid" 2>/dev/null || true
+  live_pid=""
+fi
+
+case "$live_out" in
+  *"stopped broker pid="*) ok "install reports the stopped broker pid" ;;
+  *) bad "install reports the stopped broker pid" "out=$live_out" ;;
+esac
+
+[ -f "$live_broker/pending/msg.json" ] && ok "pending/ survives stop+replace" \
+  || bad "pending/ survives stop+replace" "pending/msg.json missing"
+[ -f "$live_broker/done/old.json" ] && ok "done/ survives stop+replace" \
+  || bad "done/ survives stop+replace" "done/old.json missing"
+[ -d "$live_broker/failed" ] && ok "failed/ survives stop+replace" \
+  || bad "failed/ survives stop+replace" "failed/ missing"
+[ -d "$live_broker" ] && ok "broker dir is not deleted" \
+  || bad "broker dir is not deleted" "$live_broker missing"
+
+if grep -q 'old-install-path' "$tree_live/bin/muxa-broker" 2>/dev/null; then
+  bad "new broker binary replaces the install-path file" "still old-install-path"
+else
+  ok "new broker binary replaces the install-path file"
+fi
+
+# With a tmux socket, install must try `muxa broker start` after replace.
+# The release stand-in is not a real daemon, so start is allowed to fail.
+start_sock="muxainst-$$"
+tmux -L "$start_sock" new-session -d -s muxa "sleep 60"
+sleep 3600 &
+live_pid=$!
+disown "$live_pid" 2>/dev/null || true
+printf '%s\n' "$live_pid" >"$live_broker/broker.pid"
+printf '{"id":"keep-pending"}\n' >"$live_broker/pending/msg.json"
+
+set +e
+start_out="$(HOME="$tmpdir/home-start" MUXA_BIN_DIR="$tmpdir/home-start/bin" \
+  MUXA_TMUX_SOCKET="$start_sock" \
+  MUXA_BROKER_DIR="$live_broker" \
+  MUXA_BROKER_PID="$live_broker/broker.pid" \
+  MUXA_BROKER_SOCK="$live_broker/broker.sock" \
+  MUXA_BROKER_BASE_URL="file://$tmpdir/releases" \
+  bash "$tree_live/install.sh" 2>&1)"
+start_rc=$?
+set -e
+
+[ "$start_rc" -eq 0 ] && ok "install in tmux succeeds after broker restart attempt" \
+  || bad "install in tmux succeeds after broker restart attempt" "exit=$start_rc out=$start_out"
+
+if ! kill -0 "$live_pid" 2>/dev/null; then
+  ok "install in tmux stops the live daemon first"
+  live_pid=""
+else
+  bad "install in tmux stops the live daemon first" "pid $live_pid still running"
+  kill "$live_pid" 2>/dev/null || true
+  live_pid=""
+fi
+
+[ -f "$live_broker/pending/msg.json" ] && ok "pending/ survives tmux-path restart" \
+  || bad "pending/ survives tmux-path restart" "pending/msg.json missing"
+
+case "$start_out" in
+  *"broker pid="*|*"could not start muxa-broker"*)
+    ok "install in tmux starts (or reports it could not start) the new daemon"
+    ;;
+  *)
+    bad "install in tmux starts (or reports it could not start) the new daemon" "out=$start_out"
+    ;;
+esac
+
+tmux -L "$start_sock" kill-server 2>/dev/null || true
+start_sock=""
 
 printf '%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
