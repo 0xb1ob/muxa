@@ -51,8 +51,10 @@ broker pastes with load-buffer + Enter when the target pane looks free
 (tmux `capture-pane` plus, when available, control-mode `%output` silence).
 If the pane is mid-typing or drawing, the broker retries and leaves mail
 queued even after `MUXA_BROKER_DEADLINE` (default 10 minutes). It does not
-paste into a busy pane just because the clock ran out. `delivered` is
-recorded only when the payload is visible in the pane. If the
+paste into a busy pane just because the clock ran out. After paste,
+`delivered` means the payload (or Cursor's `[Pasted text +N lines]`
+collapse) was visible; if the pane went busy without that, the message is
+filed `unknown/` and is not retried. If the
 broker is down, `muxa send` exits non-zero and pastes nothing.
 `MUXA_BROKER=0` is an error — it does not restore the old bash delivery
 stack.
