@@ -255,6 +255,49 @@ sys.exit(0 if ia >= 0 and ib >= 0 and ia < ib else 1)
   && ok "queued messages arrive in order, none clobbered" \
   || bad "queued messages arrive in order, none clobbered" "cap: $cap_u"
 
+# --- dispatch: first brief after ready; never-ready fails to parent, not child ---
+tok_dsp="BRKDSP_$$"
+dsp_json="$(printf '%s\n' "$tok_dsp" | muxa_as "$parent_pane" dispatch --window --name dspkid -- bash -c "$prompt_loop")"
+python3 -c '
+import json, sys
+o = json.loads(sys.argv[1])
+assert o["state"] == "dispatched" and o["name"] == "dspkid" and o["pane"].startswith("%")
+' "$dsp_json" && ok "dispatch enqueues with JSON dispatched" \
+  || bad "dispatch enqueues with JSON dispatched" "got: $dsp_json"
+dsp_pane="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["pane"])' "$dsp_json")"
+cap_dsp="$(wait_capture "$dsp_pane" "$tok_dsp" 50 || true)"
+case "$cap_dsp" in
+  *"$tok_dsp"*) ok "dispatch pastes the brief once the child is ready" ;;
+  *) bad "dispatch pastes the brief once the child is ready" "cap: $cap_dsp" ;;
+esac
+n_dsp="$(printf '%s\n' "$cap_dsp" | grep -c "$tok_dsp" || true)"
+[ "$n_dsp" -eq 1 ] && ok "dispatch brief appears once" \
+  || bad "dispatch brief appears once" "count=$n_dsp cap=$cap_dsp"
+
+tok_nr="BRKNR_$$"
+start_nr="$(date +%s)"
+nr_json="$(printf '%s\n' "$tok_nr" | muxa_as "$parent_pane" dispatch --window --name dspstuck -- sleep 3600)"
+nr_pane="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["pane"])' "$nr_json")"
+cap_nr_parent="$(wait_capture "$parent_pane" "dispatch failed: dspstuck" 80 || true)"
+elapsed_nr=$(( $(date +%s) - start_nr ))
+case "$cap_nr_parent" in
+  *"dispatch failed: dspstuck"*"$nr_pane"*) ok "never-ready dispatch mails the parent" ;;
+  *) bad "never-ready dispatch mails the parent" "elapsed=${elapsed_nr}s cap: $cap_nr_parent" ;;
+esac
+[ "$elapsed_nr" -le $((MUXA_BROKER_DEADLINE + 4)) ] \
+  && ok "never-ready failure arrives near the deadline (${elapsed_nr}s)" \
+  || bad "never-ready failure arrives near the deadline" "took ${elapsed_nr}s deadline=${MUXA_BROKER_DEADLINE}s"
+cap_nr_child="$(tmux -L "$SOCK" capture-pane -p -t "$nr_pane" 2>/dev/null || true)"
+case "$cap_nr_child" in
+  *"$tok_nr"*) bad "never-ready child is not timeout-pasted" "cap: $cap_nr_child" ;;
+  *) ok "never-ready child is not timeout-pasted" ;;
+esac
+case "$(cat "$MUXA_BROKER_DIR/broker.log" 2>/dev/null || true)" in
+  *"timeout fallback"*) bad "dispatch does not timeout-fallback paste" "log mentions timeout fallback" ;;
+  *"dispatch failed"*"never ready"*) ok "log records dispatch failure instead of a fallback paste" ;;
+  *) bad "log records dispatch failure instead of a fallback paste" "log: $(tail -15 "$MUXA_BROKER_DIR/broker.log" 2>/dev/null)" ;;
+esac
+
 # --- E: agent-CLI composer pane takes the first brief immediately ---
 # The regression is timing as much as delivery: a first brief to an idle
 # composer must land because LooksFree says free, not because a deadline

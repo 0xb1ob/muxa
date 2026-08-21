@@ -26,6 +26,10 @@ for skill in muxa-parent muxa-worker; do
     exit 1
   fi
 done
+if grep -E 'unbriefed|Brief immediately with `muxa send`' "$ROOT/skills/muxa-parent/SKILL.md" >/dev/null; then
+  echo "muxa-parent still carries spawn-then-brief choreography" >&2
+  exit 1
+fi
 SOCK="muxatest-$$"
 export MUXA_TMUX_SOCKET="$SOCK"
 export MUXA_ENTER_DELAY=0.05
@@ -840,6 +844,59 @@ nonej="$(muxa_as "$eve_pane" send --json --all json-none)"
 [ "$nonej" = "[]" ] && ok "send --all --json with no peers is []" \
   || bad "send --all --json with no peers is []" "got: $nonej"
 
+tok_disp="DISPJ_$$"
+disp_loop='while true; do printf "ready> "; read -r _ || break; done'
+disp_out="$(printf 'dispatch-body-%s\n' "$tok_disp" | muxa_as "$bob_pane" dispatch --window --name dispkid -- bash -c "$disp_loop")"
+python3 -c '
+import json, sys
+o = json.loads(sys.argv[1])
+assert o["name"] == "dispkid" and o["to"] == "dispkid" and o["from"] == "bob"
+assert o["state"] == "dispatched" and o["id"] and o["pane"].startswith("%")
+assert o["cwd"]
+assert set(o) == {"name", "id", "pane", "cwd", "state", "from", "to"}
+' "$disp_out" && ok "dispatch stdout is send --json plus name/cwd/state" \
+  || bad "dispatch stdout is send --json plus name/cwd/state" "got: $disp_out"
+disp_pane="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["pane"])' "$disp_out")"
+disp_cap=""
+i=0
+while [ "$i" -lt 40 ]; do
+  disp_cap="$(tmux -L "$SOCK" capture-pane -p -t "$disp_pane" 2>/dev/null || true)"
+  case "$disp_cap" in
+    *"$tok_disp"*) break ;;
+  esac
+  sleep 0.15
+  i=$((i + 1))
+done
+case "$disp_cap" in
+  *"$tok_disp"*) ok "dispatch delivers the brief once the pane is ready" ;;
+  *) bad "dispatch delivers the brief once the pane is ready" "cap: $disp_cap" ;;
+esac
+brief_file="$tmpdir/dispatch.brief"
+printf 'file-brief-%s\n' "$tok_disp" >"$brief_file"
+disp_file_out="$(muxa_as "$bob_pane" dispatch --window --name dispfile --brief-file "$brief_file" -- bash -c "$disp_loop")"
+disp_file_pane="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["pane"])' "$disp_file_out")"
+disp_file_cap=""
+i=0
+while [ "$i" -lt 40 ]; do
+  disp_file_cap="$(tmux -L "$SOCK" capture-pane -p -t "$disp_file_pane" 2>/dev/null || true)"
+  case "$disp_file_cap" in
+    *"file-brief-$tok_disp"*) break ;;
+  esac
+  sleep 0.15
+  i=$((i + 1))
+done
+case "$disp_file_cap" in
+  *"file-brief-$tok_disp"*) ok "dispatch --brief-file delivers" ;;
+  *) bad "dispatch --brief-file delivers" "cap: $disp_file_cap" ;;
+esac
+set +e
+empty_disp="$(printf '' | muxa_as "$bob_pane" dispatch --name dispempty -- true 2>&1)"
+empty_rc=$?
+set -e
+[ "$empty_rc" -ne 0 ] && ok "dispatch empty brief exits non-zero" \
+  || bad "dispatch empty brief exits non-zero" "exit=$empty_rc out=$empty_disp"
+assert_contains "$empty_disp" "empty brief" "dispatch empty brief names the error"
+
 tmux -L "$SOCK" new-window -t muxa -n taildata "printf '%s\n' alpha-tail bravo-tail charlie-tail; exec sleep 3600"
 sleep 0.3
 tail_pane="$(tmux -L "$SOCK" list-panes -t muxa:taildata -F '#{pane_id}' | head -1)"
@@ -923,6 +980,7 @@ ver_nobr="$(PATH="$nobr_path" muxa version)"
   || bad "version works with br absent from PATH" "out=$ver_nobr"
 help_nobr="$(PATH="$nobr_path" muxa help)"
 assert_contains "$help_nobr" "muxa send" "help works with br absent from PATH"
+assert_contains "$help_nobr" "muxa dispatch" "help mentions dispatch"
 case "$help_nobr" in
   *"muxa jobs"*|*"muxa preflight"*) bad "help does not mention jobs or preflight" "out=$help_nobr" ;;
   *) ok "help does not mention jobs or preflight" ;;

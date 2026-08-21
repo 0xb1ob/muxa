@@ -72,6 +72,14 @@ func (h *ControlHub) Drawing(pane string) bool {
 	return time.Since(d.last) < h.Quiet
 }
 
+// EverDrew reports whether this pane has produced any %output since attach.
+func (h *ControlHub) EverDrew(pane string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, ok := h.lastDraw[pane]
+	return ok
+}
+
 // DrawingPanes is who-is-drawing for muxa who, without hooks. The window is
 // at least a second so a roster snapshot can catch a chatty pane.
 func (h *ControlHub) DrawingPanes() []string {

@@ -167,6 +167,7 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 | --- | --- |
 | `muxa register [--name --id --parent --kind]` | Set pane identity (optional; spawn already does this for children) |
 | `muxa spawn [--name NAME] [--cwd DIR] [--split] [--window] -- CMD` | Split a child pane into a tiled grid in the parent's window. Child cwd is `--cwd`, else process `$PWD`, else the parent pane path. Warns on stderr if a live worker already has that cwd (does not refuse). Omit `--name` for a unique `adjective-noun` alias. `--window` for a dedicated window; `--split` is compat |
+| `muxa dispatch [--name NAME] [--cwd DIR] [--brief-file F] -- CMD` | Spawn + first brief. Brief on stdin or `--brief-file`. stdout `{"name","id","pane","cwd","state":"dispatched","from","to"}`. Broker waits for drawn-then-quiet-and-free; never-ready mails `[muxa] from=broker` to the parent |
 | `muxa who` | Roster (name, id, session, parent, cwd, STATE, STATUS, …) |
 | `muxa who --json` | Same roster as objects (`parent`/`session` are `null` when empty; `state` is `idle`/`busy` from the broker drawing list) |
 | `muxa tail NAME [-n N]` | One-shot pane read (visible grid, or last N lines of history) |

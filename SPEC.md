@@ -299,6 +299,7 @@ muxa session
 muxa parent
 muxa children
 muxa spawn [--name worker] [--cwd DIR] [--window] -- command…
+muxa dispatch [--name NAME] [--cwd DIR] [--brief-file F] -- command…
 muxa hook session-start [--kind KIND]
 muxa broker [start|status|stop]
 ```
@@ -307,6 +308,14 @@ muxa broker [start|status|stop]
 objects for `--all`) so a fire-and-forget caller can correlate a later
 failure turn with the enqueue. Human send output is unchanged without
 `--json`.
+
+`muxa dispatch` prints `{"name","id","pane","cwd","state":"dispatched","from","to"}`
+and exits 0 once the pane exists and the brief is queued. The broker then
+waits until the child has drawn, gone quiet, and LooksFree, and pastes
+once. A CLI that never becomes ready produces a `[muxa] from=broker` turn
+in the parent; the brief is not pasted into the child. Brief on stdin or
+`--brief-file`, never a positional string. No worktree, lease, retry
+policy, or job id.
 
 Exit 0 on queued. Exit 2 if the name is unknown (including
 `muxa unregister` and `muxa tail`) or the broker cannot be started/enqueued. Exit 3 if not
@@ -334,8 +343,8 @@ Role instructions live in the **muxa-parent** and **muxa-worker** skills.
 Paired record: [0xb1ob/command-post](https://github.com/0xb1ob/command-post)
 `AGENTS.md`. The two notes must agree.
 
-**muxa owns the transport** — panes, identity, and getting a message into a
-running agent.
+**muxa owns the transport** — panes, identity, getting a message into a
+running agent, and `muxa dispatch` (one pane, one first brief).
 
 **command-post owns the work** — what to do, where, by whom, and whether it
 is done.

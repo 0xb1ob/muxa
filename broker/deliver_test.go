@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -259,5 +260,76 @@ func TestSkipOtherPaneWhileOneInflight(t *testing.T) {
 	d.Tick()
 	if f.injectCount() != 1 {
 		t.Fatalf("same-pane batch should paste at most one per tick, got %d", f.injectCount())
+	}
+}
+
+func TestDispatchWaitsUntilPaneDrew(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{captures: []string{"\n\n", "ready>"}}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	_ = q.Put(&Msg{
+		ID: "d1", Pane: "%1", From: "p", To: "kid", Text: "FIRST-BRIEF",
+		DeadlineUnix: 2000, Kind: kindDispatch, ParentPane: "%2",
+	})
+	d.Tick()
+	if f.injectCount() != 0 {
+		t.Fatalf("pasted into a pane that has not drawn: %d", f.injectCount())
+	}
+	d.Tick()
+	if f.injectCount() != 1 || f.lastInject() != "FIRST-BRIEF" {
+		t.Fatalf("want brief after ready, got %q count=%d", f.lastInject(), f.injectCount())
+	}
+	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 {
+		t.Fatalf("after ready pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+}
+
+func TestDispatchDeadlineNotifiesParentNotChild(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{captures: []string{"\n\n"}}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	now := int64(1000)
+	d.now = func() time.Time { return time.Unix(now, 0) }
+	_ = q.Put(&Msg{
+		ID: "d1", Pane: "%1", From: "parent", To: "stuck", Text: "NEVER-BRIEF",
+		DeadlineUnix: 1005, Kind: kindDispatch, ParentPane: "%2",
+	})
+	d.Tick()
+	now = 1005
+	d.Tick()
+	if f.injectCount() != 0 {
+		t.Fatalf("timeout-pasted the brief into a cold pane: %d %q", f.injectCount(), f.lastInject())
+	}
+	if p, doneN, failed, _ := q.Counts(); doneN != 0 || failed != 1 || p != 1 {
+		t.Fatalf("want brief failed + parent notify pending, pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+	pending, _ := q.Pending()
+	if len(pending) != 1 || pending[0].From != "broker" || pending[0].Pane != "%2" {
+		t.Fatalf("parent notify: %+v", pending)
+	}
+	if strings.Contains(pending[0].Text, "NEVER-BRIEF") {
+		t.Fatal("failure turn must not include the undelivered brief")
+	}
+	if !strings.Contains(pending[0].Text, "stuck") || !strings.Contains(pending[0].Text, "d1") {
+		t.Fatalf("failure turn missing name/id: %s", pending[0].Text)
+	}
+
+	f.mu.Lock()
+	f.captures = []string{"ready>"}
+	f.capI = 0
+	f.echo = ""
+	f.mu.Unlock()
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("want parent failure paste, got %d", f.injectCount())
+	}
+	if strings.Contains(f.lastInject(), "NEVER-BRIEF") {
+		t.Fatal("child brief must not be pasted after dispatch failure")
+	}
+	if !strings.Contains(f.lastInject(), "dispatch failed") {
+		t.Fatalf("parent paste=%q", f.lastInject())
 	}
 }
