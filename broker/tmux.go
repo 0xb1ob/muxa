@@ -76,10 +76,8 @@ func (t *TMUX) InMode(pane string) bool {
 	return err != nil || v == "1"
 }
 
-// Capture reads the visible pane. -e keeps the SGR attributes, which is how
-// the typed-in-box conjunct tells a faint placeholder from text a human
-// typed. Without it tmux hands back plain text and unsubmitted input is
-// indistinguishable from chrome.
+// Capture reads the visible pane. -e keeps SGR attributes so empty-at-cursor
+// can decode the cursor row without counting escape bytes as text.
 func (t *TMUX) Capture(pane string) (string, error) {
 	return t.Run([]string{"capture-pane", "-p", "-e", "-t", pane}, nil)
 }

@@ -314,9 +314,9 @@ esac
 
 # --- E: agent-CLI composer pane takes the first brief immediately ---
 # The regression is timing as much as delivery: a first brief to an idle
-# composer must land because free-detection plus typed-in-box say free, not
-# because a deadline expired. Control-mode silence should make that
-# sub-second; the log must never call it a fallback paste (that path is gone).
+# composer must land because free-detection says free, not because a deadline
+# expired. Control-mode silence should make that sub-second; the log must
+# never call it a fallback paste (that path is gone).
 tmux -L "$SOCK" split-window -v -t muxa:parent "$composer_loop"
 sleep 0.5
 composer_pane="$(tmux -L "$SOCK" list-panes -t muxa:parent -F '#{pane_id} #{pane_top}' | sort -k2,2n | awk 'END{print $1}')"
@@ -350,12 +350,11 @@ case "$line_e" in
   *) ok "E was not a timeout fallback paste" ;;
 esac
 
-# --- F: a composer that is typed-in or mid-turn is left alone ---
-# Typed-in-box still protects unsubmitted input. A mid-turn pane must
-# actually draw (free-detection is drawing / two-signal, not interrupt
-# phrases), so the busy stand-in animates rather than painting one static
-# chrome frame.
-composer_holds() {
+# --- F: a busy composer is left alone ---
+# Mid-turn pane must actually draw (free-detection is drawing / two-signal,
+# not interrupt phrases), so the busy stand-in animates rather than painting
+# one static chrome frame.
+composer_holds_busy() {
   local label="$1" state="$2" tok="$3" cap
   settle "$composer_pane"
   printf '%s\n' "$state" >"$composer_state"
@@ -374,8 +373,7 @@ composer_holds() {
     *) bad "$label → delivered once idle" "cap: $cap" ;;
   esac
 }
-composer_holds "F typed composer is not pasted over" typed "BRKF_$$"
-composer_holds "F busy composer is not pasted over" busy "BRKFB_$$"
+composer_holds_busy "F busy composer is not pasted over" busy "BRKFB_$$"
 
 # --- G: the daemon outlives its starter's process group ---
 # The incident: nohup + disown left the broker in the caller's process group,

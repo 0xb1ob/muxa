@@ -1,16 +1,9 @@
 #!/usr/bin/env bash
 # End-to-end: Claude Code (parent) spawns Cursor Agent + Oh My Pi (children).
-# Project-scoped hooks only. Usage: tests/e2e.sh [--capture-fixtures]
+# Project-scoped hooks only. Usage: tests/e2e.sh
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source=tests/record-fixture.sh
-. "$ROOT/tests/record-fixture.sh"
-CAPTURE_FIXTURES=0
-if [ "${1:-}" = "--capture-fixtures" ]; then
-  CAPTURE_FIXTURES=1
-  shift
-fi
 CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude)}"
 AGENT_BIN="${AGENT_BIN:-$(command -v agent)}"
 OMP_BIN="${OMP_BIN:-$(command -v omp)}"
@@ -106,16 +99,6 @@ dump() {
   pane_text "$(pane_by_name cursor)" >"$ART/cursor.pane" 2>/dev/null || true
   pane_text "$(pane_by_name pi)" >"$ART/pi.pane" 2>/dev/null || true
   cp "$HOOK_LOG" "$ART/hooks.log.copy" 2>/dev/null || true
-  if [ "${CAPTURE_FIXTURES:-0}" = "1" ]; then
-    mkdir -p "$ROOT/tests/fixtures/composer"
-    local n p
-    for n in claude cursor pi; do
-      p="$(pane_by_name "$n")"
-      [ -n "$p" ] || continue
-      record_composer_fixture "$SOCK" "$p" \
-        "$ROOT/tests/fixtures/composer/${n}-harvest" || true
-    done
-  fi
 }
 
 dismiss_named() {

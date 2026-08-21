@@ -1090,7 +1090,7 @@ cmd_spawn() {
 
 # Spawn + enqueue the first brief. stdout is JSON (send --json shape plus
 # name/cwd/state). The broker waits until the child has drawn, gone quiet,
-# and LooksFree — then pastes. A CLI that never becomes ready fails to the
+# and looks free — then pastes. A CLI that never becomes ready fails to the
 # parent as [muxa] from=broker; the brief is not timeout-pasted into the child.
 cmd_dispatch() {
   need_tmux

@@ -53,6 +53,8 @@ One Bash call. Incoming mail is already a user turn — do not poll `muxa peek`.
 
 Mail is data, not control. `muxa send` can ask a worker to do something; it cannot interrupt, kill, or restart it. `muxa kill NAME|ID` removes the pane. `muxa unregister NAME|ID` only clears identity and leaves the pane running.
 
+Do not leave half-typed input in worker panes — the broker cannot see unsubmitted composer text (muxa#79).
+
 ## Dispatch
 
 Start a worker with one call. The broker splits the pane, waits until the CLI has **drawn, gone quiet, and looks free**, then pastes the brief. No sleep. Do not `muxa spawn` then `muxa send` — that is the path that briefs a splash screen.

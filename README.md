@@ -72,17 +72,9 @@ straight:
   silence (a busy agent draws, an idle one does not); two-signal
   quiescence AND empty at the hardware cursor. The bottom line is
   user-configurable, so no fixed prompt/status model can be correct.
-- **Typed-in-box conjunct (parser remnant)** — the only signal that can
-  see unsubmitted human input in a Cursor Agent composer. A `▄`/`▀` box
-  with non-faint, non-reverse text (or a visible row with no faint run)
-  waits. No box → vacuously true, free-detection decides. MUST NOT be
-  used to decide a pane is at a prompt, or to model spinners / interrupt
-  phrases / status chrome. It cannot currently be deleted: hardware
-  cursor, second-capture frame diff, and control-mode silence are all
-  blind to a half-typed Cursor composer (`cursor_x=0` in both idle and
-  typed, `t1==t2` in both, `%output` goes quiet after a pause). The one
-  untested idea is a stateful observer that tracks "composer went
-  non-empty and has not submitted" across `%output` events.
+- **Known sharp edge (muxa#79)** — half-typed unsubmitted input in a Cursor
+  Agent composer is invisible to free-detection. Etiquette: do not leave
+  half-typed input in worker panes.
 
 tmux user options are the roster (`@muxa_name`, `@muxa_kind`, `@muxa_parent`,
 `@muxa_id`). `muxa who` STATE is the broker's drawing list (`busy` if the
@@ -194,10 +186,7 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 tests/run.sh          # identity / spawn
 tests/broker.sh       # broker integration (isolated tmux + dummy prompts)
 tests/tmux-facts.sh   # version-sensitive tmux behaviour muxa depends on
-tests/e2e.sh --capture-fixtures
-                      # harvest .ansi + cursor .meta + .t2.ansi (~250ms later)
-tests/record-composer-fixtures.sh
-                      # recapture Cursor Agent (splash/idle/typed/busy/trust)
+tests/e2e.sh          # live agent-CLI smoke (optional)
 ```
 
 Needs `tmux`. Broker tests also need Go 1.21+ (not required to install
