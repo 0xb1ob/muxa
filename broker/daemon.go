@@ -91,17 +91,15 @@ func daemonize(dir, sock, pidPath, logPath string) (parent bool, err error) {
 // lockQueue takes an exclusive non-blocking flock on path and returns the open
 // file, which the caller must keep for the process lifetime.
 //
-// One queue gets one owner. The start lock in bin/muxa is the first line of
-// defence, but it cannot be the only one: two starters racing a daemon's bind,
-// a lock reaped as stale, or someone running the binary by hand would each end
-// up with a second daemon that unlinks the live socket, rebinds it, and then
+// One queue gets one owner. Concurrent starters — from ensure_broker, a manual
+// run, or different shells — each fork a daemon; one wins this flock, the rest
+// exit 0. Without it, a second daemon unlinks the live socket, rebinds it, and
 // races the first over pending/ — pastes go missing or land twice, and the log
 // shows two "listening" lines and no explanation. The kernel releases an flock
 // when the fd closes, so this also clears on SIGKILL, where no defer runs.
 //
 // The lock lives on the inode, so nothing may unlink this file while a broker
-// is running — a replacement would be a fresh inode and lock cleanly. Nothing
-// in muxa deletes it; ensure_broker only clears broker.sock and broker.pid.
+// is running — a replacement would be a fresh inode and lock cleanly.
 func lockQueue(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {

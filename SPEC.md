@@ -163,24 +163,16 @@ separately from `bin/muxa` and an older broker would never return.
 
 **One queue, one owner.** A second daemon against the same
 `$MUXA_BROKER_DIR` unlinks the live socket, rebinds it, and then races the
-first over `pending/` — pastes go missing or land twice. Two mechanisms
-enforce this and both are required:
-
-1. `ensure_broker` holds `start.lock` for the *whole* startup, releasing it
-   only once the socket answers — not when the process is backgrounded. The
-   daemon re-execs with `setsid` and binds a moment later; a lock released at
-   launch lets a second starter claim it inside that gap, delete
-   `broker.sock` and `broker.pid` from under the daemon coming up, and start
-   another. A starter that does not hold the lock MUST NOT touch those files;
-   it only waits. A lock older than a minute is treated as abandoned, so one
-   killed starter cannot wedge every later start.
-2. The daemon takes an exclusive `flock` on `<dir>/owner.lock` before it
-   opens the socket or writes the pidfile, and holds it for its lifetime. If
-   the lock is taken it logs `another broker already owns …` and exits 0 —
-   the queue has an owner, which is all the caller wanted. This covers what
-   the shell lock cannot: two starters in different shells, a lock reaped as
-   stale, or the binary run by hand. Nothing may unlink `owner.lock` while a
-   broker is running; the lock is on the inode.
+first over `pending/` — pastes go missing or land twice. The daemon takes an
+exclusive `flock` on `<dir>/owner.lock` before it opens the socket or writes
+the pidfile, and holds it for its lifetime. If the lock is taken it logs
+`another broker already owns …` and exits 0 — the queue has an owner, which
+is all the caller wanted. Concurrent `ensure_broker` callers each fork a
+daemon; one wins the flock, the rest exit 0, and every caller's ping-poll
+succeeds once the winner binds. The shell never deletes `broker.sock` or
+`broker.pid`; the daemon removes a stale socket before bind and writes its own
+pidfile after winning flock. Nothing may unlink `owner.lock` while a broker is
+running; the lock is on the inode.
 
 Startup logs `re-adopted N pending` when it inherits an undelivered queue.
 Shutdown on SIGINT/SIGTERM makes one last delivery pass, then logs

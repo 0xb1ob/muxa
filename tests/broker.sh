@@ -465,13 +465,9 @@ else
 fi
 sleep 0.2
 
-# --- I: a concurrent auto-start must not race the first daemon's bind ---
-# ensure_broker used to drop start.lock as soon as it had backgrounded the
-# broker, but the daemon re-execs with setsid and binds a moment later. In that
-# gap a second starter took the lock, deleted broker.sock/broker.pid, and ran a
-# second daemon against the same dir — two owners polling one pending/. The
-# shim below binds late so the gap is wide on purpose; without the fix this
-# logs two "listening" lines.
+# --- I: concurrent auto-starts must leave one queue owner (owner.lock flock) ---
+# The shim sleeps before exec so two starters overlap while nothing is bound yet.
+# Without flock arbitration this logs two "listening" lines and races pending/.
 muxa_as "$parent_pane" broker stop >/dev/null 2>&1 || true
 sleep 0.3
 race_shim="$HOME_ISO/slow-broker"
@@ -483,32 +479,13 @@ SHIM
 chmod +x "$race_shim"
 : >"$MUXA_BROKER_DIR/broker.log"
 rm -f "$MUXA_BROKER_SOCK" "$MUXA_BROKER_PID"
-rmdir "$MUXA_BROKER_DIR/start.lock" 2>/dev/null || true
 ( MUXA_BROKER_BIN="$race_shim" muxa_as "$parent_pane" broker start >/dev/null 2>&1 ) &
 race_a=$!
-# Mid-gap: the shim has not exec'd the real binary yet, so nothing is bound.
-# The lock must still be held here — that is the whole fix. Asserting the held
-# lock rather than racing a second starter keeps this deterministic; the
-# destructive window (a non-owner deleting a *live* socket) is only a few
-# hundred ms wide and would make the test flaky either way.
 sleep 0.8
 if muxa_as "$parent_pane" broker status >/dev/null 2>&1; then
   bad "I precondition: daemon not yet bound mid-gap" "socket already answering"
 else
   ok "I precondition: daemon not yet bound mid-gap"
-fi
-if [ -d "$MUXA_BROKER_DIR/start.lock" ]; then
-  ok "I start.lock is held until the daemon answers"
-else
-  bad "I start.lock is held until the daemon answers" \
-      "lock already released while nothing was bound — a second starter could now delete the socket and pidfile of the daemon coming up"
-fi
-# A second starter arriving in the gap must not be able to claim the lock.
-if mkdir "$MUXA_BROKER_DIR/start.lock" 2>/dev/null; then
-  bad "I a second starter cannot claim the lock mid-gap" "took the lock"
-  rmdir "$MUXA_BROKER_DIR/start.lock" 2>/dev/null || true
-else
-  ok "I a second starter cannot claim the lock mid-gap"
 fi
 ( MUXA_BROKER_BIN="$race_shim" muxa_as "$parent_pane" broker start >/dev/null 2>&1 ) &
 race_b=$!
@@ -523,11 +500,6 @@ if [ -n "$race_pid" ] && kill -0 "$race_pid" 2>/dev/null; then
   ok "I the surviving owner is the one in the pidfile"
 else
   bad "I the surviving owner is the one in the pidfile" "pid=${race_pid:-none}"
-fi
-if [ -d "$MUXA_BROKER_DIR/start.lock" ]; then
-  bad "I start.lock is released once the daemon is up" "lock still held"
-else
-  ok "I start.lock is released once the daemon is up"
 fi
 # The queue must still work through a real daemon afterwards.
 tok_i="BRKI_$$"
