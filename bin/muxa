@@ -291,12 +291,12 @@ can_send() {
   return 1
 }
 
-pane_command_line() {
-  local pane="$1" pid line
-  pid="$(pane_fmt "$pane" '#{pane_pid}')"
+command_line_for_pid() {
+  local pid="$1" line
   [ -n "$pid" ] || return 1
   if [ -r "/proc/$pid/cmdline" ]; then
     line="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/[[:space:]]*$//')"
+    line="${line#"${line%%[![:space:]]*}"}"
     if [ -n "$line" ]; then
       printf '%s' "$line"
       return 0
@@ -306,6 +306,42 @@ pane_command_line() {
     line="$(ps -p "$pid" -o command= 2>/dev/null | head -1)" || return 1
   line="${line#"${line%%[![:space:]]*}"}"
   [ -n "$line" ] && printf '%s' "$line"
+}
+
+pane_command_line() {
+  command_line_for_pid "$(pane_fmt "$1" '#{pane_pid}')"
+}
+
+# Direct children of $1 from a ps snapshot (portable; no pgrep).
+pane_child_pids() {
+  local parent="$1"
+  [ -n "$parent" ] || return 0
+  ps -ax -o pid=,ppid= 2>/dev/null | awk -v p="$parent" '$2 == p { print $1 }'
+}
+
+# Classify pane_pid, then descendants. Cursor IDE keeps a shell as pane_pid
+# and runs node/agent as a child — looking only at #{pane_pid} is generic.
+kind_from_pid_tree() {
+  local pid="$1" depth="${2:-0}" args k child
+  [ -n "$pid" ] || { printf 'generic'; return 0; }
+  [ "$depth" -gt 8 ] && { printf 'generic'; return 0; }
+  args="$(command_line_for_pid "$pid" 2>/dev/null || true)"
+  if [ -n "$args" ]; then
+    k="$(kind_from_argv "$args")"
+    if [ "$k" != "generic" ]; then
+      printf '%s' "$k"
+      return 0
+    fi
+  fi
+  for child in $(pane_child_pids "$pid"); do
+    [ -n "$child" ] || continue
+    k="$(kind_from_pid_tree "$child" $((depth + 1)))"
+    if [ "$k" != "generic" ]; then
+      printf '%s' "$k"
+      return 0
+    fi
+  done
+  printf 'generic'
 }
 
 # Classify a CLI from a spawn argument (muxa spawn -- CMD …).
@@ -341,16 +377,46 @@ kind_from_argv() {
 }
 
 detect_kind() {
-  local pane="$1" cmd args
+  local pane="$1" cmd pid k
   cmd="$(pane_fmt "$pane" '#{pane_current_command}')"
   case "$cmd" in
     claude*) printf 'claude'; return ;;
     agent|cursor-agent) printf 'cursor'; return ;;
     omp|pi) printf 'pi'; return ;;
   esac
-  args="$(pane_command_line "$pane" 2>/dev/null || true)"
-  if [ -n "$args" ]; then
-    kind_from_argv "$args"
+  pid="$(pane_fmt "$pane" '#{pane_pid}')"
+  k="$(kind_from_pid_tree "$pid" 0)"
+  printf '%s' "${k:-generic}"
+}
+
+# Pick @muxa_kind for a hook. Process argv (including descendants) wins over
+# a conflicting --kind flag; a live claude/cursor/pi registration is kept
+# when the hook would flip CLI family without matching process evidence.
+resolve_hook_kind() {
+  local pane="$1" hook_kind="${2:-}" existing detected
+  detected="$(detect_kind "$pane")"
+  existing="$(pane_fmt "$pane" '#{@muxa_kind}')"
+  if [ -n "$hook_kind" ] && [ "$detected" != "generic" ] && [ "$hook_kind" != "$detected" ]; then
+    printf '%s' "$detected"
+    return
+  fi
+  if [ -n "$existing" ] && [ "$existing" != "generic" ] \
+     && [ -n "$hook_kind" ] && [ "$hook_kind" != "$existing" ]; then
+    if [ "$detected" = "generic" ] || [ "$detected" = "$existing" ]; then
+      printf '%s' "$existing"
+      return
+    fi
+  fi
+  if [ -n "$hook_kind" ]; then
+    printf '%s' "$hook_kind"
+    return
+  fi
+  if [ "$detected" != "generic" ]; then
+    printf '%s' "$detected"
+    return
+  fi
+  if [ -n "$existing" ]; then
+    printf '%s' "$existing"
     return
   fi
   printf 'generic'
@@ -1234,11 +1300,13 @@ hook_register_pane() {
 # spawn; TMUX_PANE is enough — no stdin payload, no resolution ladder.
 # Leftover presence events (busy/idle/blocked/stop/session-end) no-op so
 # previously merged per-CLI hooks do not fail closed on upgrade.
+# SessionStart does not rename a live pane; it may correct @muxa_kind when
+# process/argv evidence disagrees with --kind.
 cmd_hook() {
   need_tmux
   local event="${1:-}"
   shift || true
-  local kind="" pane
+  local kind="" pane existing
   while [ $# -gt 0 ]; do
     case "$1" in
       --kind) kind="$2"; shift 2 ;;
@@ -1258,8 +1326,14 @@ cmd_hook() {
     *) die "hook: unknown event $event" ;;
   esac
   pane="$(this_pane)"
-  pane_is_registered "$pane" && return 0
-  [ -n "$kind" ] || kind="$(detect_kind "$pane")"
+  kind="$(resolve_hook_kind "$pane" "$kind")"
+  if pane_is_registered "$pane"; then
+    existing="$(pane_fmt "$pane" '#{@muxa_kind}')"
+    if [ -n "$kind" ] && [ "$kind" != "$existing" ]; then
+      set_pane_opt "$pane" @muxa_kind "$kind"
+    fi
+    return 0
+  fi
   hook_register_pane "$pane" "$kind"
 }
 
