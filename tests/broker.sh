@@ -206,27 +206,60 @@ case "$cap_d" in
   *) bad "D parent pane received child token" "cap: $cap_d" ;;
 esac
 
-# --- timeout fallback: never-free pane still pastes after deadline ---
+# --- busy pane past deadline keeps mail; N messages arrive in order, none clobbered ---
 tok_t="BRKT_$$"
+tok_u="BRKU_$$"
 settle "$child_pane"
 tmux -L "$SOCK" send-keys -t "$child_pane" "BLOCKEDINPUT"
 sent_t="$(muxa_as "$parent_pane" send child "$tok_t")"
+sent_u="$(muxa_as "$parent_pane" send child "$tok_u")"
 case "$sent_t" in
-  *broker*) ok "timeout send enqueues" ;;
-  *) bad "timeout send enqueues" "got: $sent_t" ;;
+  *broker*) ok "busy-pane first send enqueues" ;;
+  *) bad "busy-pane first send enqueues" "got: $sent_t" ;;
 esac
-cap_t="$(wait_capture "$child_pane" "$tok_t" 80 || true)"
+case "$sent_u" in
+  *broker*) ok "busy-pane second send enqueues" ;;
+  *) bad "busy-pane second send enqueues" "got: $sent_u" ;;
+esac
+sleep $((MUXA_BROKER_DEADLINE + 2))
+cap_t="$(tmux -L "$SOCK" capture-pane -p -t "$child_pane" 2>/dev/null || true)"
 case "$cap_t" in
-  *"$tok_t"*) ok "timeout fallback pastes once" ;;
-  *) bad "timeout fallback pastes once" "cap: $cap_t" ;;
+  *"$tok_t"*|*"$tok_u"*) bad "busy pane past deadline does not fallback-paste" "cap: $cap_t" ;;
+  *) ok "busy pane past deadline does not fallback-paste" ;;
+esac
+pending_t="$(find "$MUXA_BROKER_DIR/pending" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
+[ "$pending_t" -eq 2 ] && ok "both messages still pending after deadline" \
+  || bad "both messages still pending after deadline" "pending=$pending_t"
+case "$(cat "$MUXA_BROKER_DIR/broker.log" 2>/dev/null || true)" in
+  *"timeout fallback"*) bad "log has no timeout fallback paste" "log mentions timeout fallback" ;;
+  *"holding"*"left queued"*) ok "log holds mail past deadline instead of pasting" ;;
+  *) bad "log holds mail past deadline instead of pasting" "log: $(tail -20 "$MUXA_BROKER_DIR/broker.log" 2>/dev/null)" ;;
 esac
 tmux -L "$SOCK" send-keys -t "$child_pane" C-u
-sleep 0.2
+cap_t="$(wait_capture "$child_pane" "$tok_t" 50 || true)"
+cap_u="$(wait_capture "$child_pane" "$tok_u" 50 || true)"
+case "$cap_t" in
+  *"$tok_t"*) ok "first queued message arrives after pane is free" ;;
+  *) bad "first queued message arrives after pane is free" "cap: $cap_t" ;;
+esac
+case "$cap_u" in
+  *"$tok_u"*) ok "second queued message arrives after pane is free" ;;
+  *) bad "second queued message arrives after pane is free" "cap: $cap_u" ;;
+esac
+python3 -c '
+import sys
+cap, a, b = sys.argv[1], sys.argv[2], sys.argv[3]
+ia, ib = cap.find(a), cap.find(b)
+sys.exit(0 if ia >= 0 and ib >= 0 and ia < ib else 1)
+' "$cap_u" "$tok_t" "$tok_u" \
+  && ok "queued messages arrive in order, none clobbered" \
+  || bad "queued messages arrive in order, none clobbered" "cap: $cap_u"
 
 # --- E: agent-CLI composer pane takes the first brief immediately ---
-# The regression is timing as much as delivery: before the composer rule this
-# pane only ever got a timeout fallback paste, so assert both that the token
-# lands well inside the deadline and that the log does not call it a fallback.
+# The regression is timing as much as delivery: a first brief to an idle
+# composer must land because LooksFree says free, not because a deadline
+# expired. Control-mode silence should make that sub-second; the log must
+# never call it a fallback paste (that path is gone).
 tmux -L "$SOCK" split-window -v -t muxa:parent "$composer_loop"
 sleep 0.5
 composer_pane="$(tmux -L "$SOCK" list-panes -t muxa:parent -F '#{pane_id} #{pane_top}' | sort -k2,2n | awk 'END{print $1}')"
@@ -448,6 +481,29 @@ case "$cap_i" in
   *"$tok_i"*) ok "I the single owner still delivers" ;;
   *) bad "I the single owner still delivers" "cap: $cap_i" ;;
 esac
+
+# --- who STATUS drawing from control-mode %output, no hooks ---
+tmux -L "$SOCK" new-window -t muxa -n ticker "while true; do echo DRAWING_TICK; sleep 0.15; done"
+sleep 0.4
+ticker_pane="$(tmux -L "$SOCK" list-panes -t muxa:ticker -F '#{pane_id}' | head -1)"
+muxa_as "$ticker_pane" register --name ticker --kind generic --deliver inject --parent parent >/dev/null
+# Drawing report window is 1s; wait for %output to land in the hub.
+sleep 1.2
+who_tick="$(muxa_as "$parent_pane" who)"
+st_tick="$(printf '%s\n' "$who_tick" | awk '$1=="ticker" { print substr($0, 105, 8); exit }')"
+st_tick="${st_tick#"${st_tick%%[![:space:]]*}"}"
+st_tick="${st_tick%"${st_tick##*[![:space:]]}"}"
+[ "$st_tick" = "drawing" ] && ok "who STATUS is drawing for a pane emitting %output" \
+  || bad "who STATUS is drawing for a pane emitting %output" "status=$st_tick who=$who_tick"
+who_tickj="$(muxa_as "$parent_pane" who --json)"
+python3 -c '
+import json, sys
+rows = json.loads(sys.stdin.read())
+st = next((r.get("status") for r in rows if r.get("name")=="ticker"), None)
+sys.exit(0 if st=="drawing" else 1)
+' <<<"$who_tickj" \
+  && ok "who --json status is drawing for a pane emitting %output" \
+  || bad "who --json status is drawing for a pane emitting %output" "json=$who_tickj"
 
 # --- C: broker down + binary hidden → fail closed, nothing pasted ---
 muxa_as "$parent_pane" broker stop >/dev/null || true

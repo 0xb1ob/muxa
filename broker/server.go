@@ -22,21 +22,23 @@ type Request struct {
 }
 
 type Response struct {
-	OK     bool   `json:"ok"`
-	Error  string `json:"error,omitempty"`
-	ID     string `json:"id,omitempty"`
-	State  string `json:"state,omitempty"`
-	PID    int    `json:"pid,omitempty"`
-	Queued int    `json:"queued,omitempty"`
-	Done   int    `json:"done,omitempty"`
-	Failed int    `json:"failed,omitempty"`
-	Socket string `json:"socket,omitempty"`
+	OK      bool     `json:"ok"`
+	Error   string   `json:"error,omitempty"`
+	ID      string   `json:"id,omitempty"`
+	State   string   `json:"state,omitempty"`
+	PID     int      `json:"pid,omitempty"`
+	Queued  int      `json:"queued,omitempty"`
+	Done    int      `json:"done,omitempty"`
+	Failed  int      `json:"failed,omitempty"`
+	Socket  string   `json:"socket,omitempty"`
+	Drawing []string `json:"drawing,omitempty"`
 }
 
 type Server struct {
 	Sock     string
 	Q        *Queue
 	Deadline time.Duration
+	Drawing  func() []string
 	ln       net.Listener
 }
 
@@ -114,7 +116,11 @@ func (s *Server) dispatch(req Request) Response {
 		if err != nil {
 			return Response{OK: false, Error: err.Error()}
 		}
-		return Response{OK: true, PID: os.Getpid(), Queued: p, Done: d, Failed: f, Socket: s.Sock}
+		resp := Response{OK: true, PID: os.Getpid(), Queued: p, Done: d, Failed: f, Socket: s.Sock}
+		if s.Drawing != nil {
+			resp.Drawing = s.Drawing()
+		}
+		return resp
 	case "enqueue":
 		if req.Pane == "" || req.Text == "" {
 			return Response{OK: false, Error: "pane and text required"}

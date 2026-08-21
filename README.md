@@ -48,8 +48,11 @@ muxa uses surfaces the CLIs already pay for:
 
 `muxa send` talks to **muxa-broker** (unix socket, file-backed queue). The
 broker pastes with load-buffer + Enter when the target pane looks free
-(tmux `capture-pane` only). If the pane is mid-typing, the broker retries
-until `MUXA_BROKER_DEADLINE` (default 10 minutes), then pastes once. If the
+(tmux `capture-pane` plus, when available, control-mode `%output` silence).
+If the pane is mid-typing or drawing, the broker retries and leaves mail
+queued even after `MUXA_BROKER_DEADLINE` (default 10 minutes). It does not
+paste into a busy pane just because the clock ran out. `delivered` is
+recorded only when the payload is visible in the pane. If the
 broker is down, `muxa send` exits non-zero and pastes nothing.
 `MUXA_BROKER=0` is an error — it does not restore the old bash delivery
 stack.
@@ -197,8 +200,9 @@ socket, not your session.
 | `MUXA_BROKER_SOCK` | `$MUXA_BROKER_DIR/broker.sock` | Unix socket |
 | `MUXA_BROKER_PID` | `$MUXA_BROKER_DIR/broker.pid` | Pidfile |
 | `MUXA_BROKER_BIN` | `bin/muxa-broker` next to `muxa` | Daemon binary |
-| `MUXA_BROKER_DEADLINE` | `600` | Seconds to wait for a free pane before the broker pastes anyway |
-| `MUXA_BROKER_POLL_MS` | `250` | Broker retry interval |
+| `MUXA_BROKER_DEADLINE` | `600` | Seconds after which a *dead* pane's mail is failed; a live busy pane stays queued |
+| `MUXA_BROKER_POLL_MS` | `250` | Broker retry interval (fallback if control-mode attach fails) |
+| `MUXA_BROKER_QUIET_MS` | `250` | Control-mode silence window before a pane is considered not drawing |
 | `MUXA_BROKER_VERSION` | latest release | Install-time: release tag to fetch the broker asset from |
 | `MUXA_BROKER_URL` | unset | Install-time: exact broker URL (skips the checksum lookup) |
 | `MUXA_BROKER_BASE_URL` | `https://github.com/0xb1ob/muxa/releases` | Install-time: release base URL |

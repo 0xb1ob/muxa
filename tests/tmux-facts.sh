@@ -47,6 +47,41 @@ fi
 ver="$(tmux -L "$SOCK" display-message -p '#{version}' 2>/dev/null || true)"
 printf 'tmux version: %s\n' "${ver:-unknown}"
 
+# Control-mode attach with read-only,ignore-size must not resize, and
+# %output must still flow (muxa#46). Own window — do not write the cat pane
+# that later copy-mode facts assert against.
+tmux -L "$SOCK" new-window -t facts -n ctl "while true; do echo tick; sleep 0.2; done"
+sleep 0.2
+ctl_pane="$(tmux -L "$SOCK" list-panes -t facts:ctl -F '#{pane_id}')"
+before_sz="$(tmux -L "$SOCK" display-message -t "$ctl_pane" -p '#{window_width}x#{window_height}')"
+if python3 - "$SOCK" "$ctl_pane" <<'PY'
+import select, subprocess, sys, time
+sock = sys.argv[1]
+cmd = ["tmux", "-L", sock, "-C", "-f", "read-only,ignore-size", "attach-session", "-t", "facts"]
+p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+end = time.time() + 1.5
+n = 0
+while time.time() < end:
+    r, _, _ = select.select([p.stdout], [], [], 0.2)
+    if r:
+        line = p.stdout.readline()
+        if not line:
+            break
+        if line.startswith("%output"):
+            n += 1
+p.stdin.close()
+p.kill()
+sys.exit(0 if n > 0 else 1)
+PY
+then
+  ok "control-mode %output still flows under read-only,ignore-size"
+else
+  bad "control-mode %output still flows under read-only,ignore-size" "no %output from ticking pane"
+fi
+after_sz="$(tmux -L "$SOCK" display-message -t "$ctl_pane" -p '#{window_width}x#{window_height}')"
+[ "$after_sz" = "$before_sz" ] && ok "control-mode read-only,ignore-size does not resize ($after_sz)" \
+  || bad "control-mode read-only,ignore-size does not resize" "before=$before_sz after=$after_sz"
+
 # 1. paste-buffer into a copy-moded pane exits 0 and does not deliver
 : >"$OUT"
 tmux -L "$SOCK" copy-mode -t "$pane"

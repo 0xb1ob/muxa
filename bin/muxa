@@ -167,6 +167,48 @@ pane_status() {
   printf 'live'
 }
 
+# Overlay control-mode drawing onto a live status. Ghost stays ghost: a
+# missing cwd is not "drawing". Occupancy still uses pane_status.
+pane_who_status() {
+  local st pane drawing
+  st="$(pane_status "$1" "$2" "$3")"
+  pane="$4"
+  drawing="$5"
+  if [ "$st" = "live" ] && [ -n "$pane" ]; then
+    case " $drawing " in
+      *" $pane "*) st=drawing ;;
+    esac
+  fi
+  printf '%s' "$st"
+}
+
+# Best-effort: never start a broker, never fail who. Empty if the socket is down.
+broker_drawing_ids() {
+  [ -n "${BROKER_SOCK:-}" ] || broker_setup_paths
+  [ -S "${BROKER_SOCK:-}" ] || return 0
+  python3 -c '
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(0.2)
+try:
+    s.connect(sys.argv[1])
+    s.sendall(b"{\"op\":\"status\"}\n")
+    s.shutdown(socket.SHUT_WR)
+    data = b""
+    while True:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+    resp = json.loads(data.decode() or "{}")
+except Exception:
+    sys.exit(0)
+if not resp.get("ok"):
+    sys.exit(0)
+print(" ".join(resp.get("drawing") or []))
+' "$BROKER_SOCK" 2>/dev/null || true
+}
+
 clear_muxa_registration() {
   local pane="$1"
   unset_pane_opt "$pane" @muxa_name
@@ -659,14 +701,16 @@ cmd_register() {
 }
 
 cmd_who_json() {
-  local line kind cwd cmd status
+  local line kind cwd cmd status pane drawing
+  drawing="$(broker_drawing_ids)"
   {
     while IFS= read -r line; do
       [ -n "$line" ] || continue
+      pane="$(printf '%s\n' "$line" | field 1)"
       kind="$(printf '%s\n' "$line" | field 5)"
       cwd="$(printf '%s\n' "$line" | field 10)"
       cmd="$(printf '%s\n' "$line" | field 11)"
-      status="$(pane_status "$kind" "$cwd" "$cmd")"
+      status="$(pane_who_status "$kind" "$cwd" "$cmd" "$pane" "$drawing")"
       printf '%s||%s\n' "$line" "$status"
     done <<EOF
 $(roster_lines)
@@ -716,13 +760,15 @@ cmd_who() {
   fi
   printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-8s %-16s %s\n' \
     NAME ID SESSION PARENT KIND STATE STATUS DELIVER PANE WHERE CWD
-  local line kind cwd cmd status name
+  local line kind cwd cmd status name pane drawing
+  drawing="$(broker_drawing_ids)"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
+    pane="$(printf '%s\n' "$line" | field 1)"
     kind="$(printf '%s\n' "$line" | field 5)"
     cwd="$(printf '%s\n' "$line" | field 10)"
     cmd="$(printf '%s\n' "$line" | field 11)"
-    status="$(pane_status "$kind" "$cwd" "$cmd")"
+    status="$(pane_who_status "$kind" "$cwd" "$cmd" "$pane" "$drawing")"
     name="$(printf '%s\n' "$line" | field 2)"
     printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-8s %-16s %s\n' \
       "$name" \
