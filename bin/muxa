@@ -24,15 +24,10 @@ muxa — message other AI CLIs in this tmux server
                                 if it never becomes ready: [muxa] from=broker in the parent, child unbriefed
   muxa who [--json]                 roster (tmux pane options, cwd, STATUS; STATE from broker drawing)
   muxa whoami                       this pane's alias
-  muxa unregister NAME|ID           clear muxa registration; leave pane running
   muxa kill NAME|ID                 remove the pane (gone from muxa who)
-  muxa id                           this pane's unique muxa id
-  muxa session                      empty (CLI session id is not tracked)
   muxa parent                       this pane's parent alias (empty if root)
-  muxa children                     direct children of this pane
   muxa tail NAME [-n N]             one-shot pane capture (visible; -n last N lines of history)
   muxa send [--json] [--no-reply] NAME TEXT  enqueue on the pane-mail broker (parent↔child only)
-  muxa send [--json] --all TEXT     every parent/child pane (not siblings or other roots)
   muxa broker [start|status|stop]   user-level paste broker (unix socket + file queue)
   muxa hook session-start [--kind KIND]
                                 optional root self-registration; spawned panes are already registered
@@ -40,7 +35,7 @@ muxa — message other AI CLIs in this tmux server
 
 Reachability: a parent may message its children; a child may message its
 parent. Children cannot message each other. Roots (no parent) cannot
-message other roots. muxa send --all follows the same rule.
+message other roots.
 
 Agents send with Bash. Incoming mail arrives as a user turn.
 Do not poll an inbox. Do not add MCP tools.
@@ -195,23 +190,6 @@ broker_drawing_ids() {
   [ -n "${BROKER_SOCK:-}" ] || broker_setup_paths
   [ -S "${BROKER_SOCK:-}" ] || return 0
   broker_cli drawing 2>/dev/null || true
-}
-
-clear_muxa_registration() {
-  local pane="$1"
-  unset_pane_opt "$pane" @muxa_name
-  unset_pane_opt "$pane" @muxa_id
-  unset_pane_opt "$pane" @muxa_parent
-  unset_pane_opt "$pane" @muxa_kind
-  unset_pane_opt "$pane" @muxa_state
-  unset_pane_opt "$pane" @muxa_deliver
-  unset_pane_opt "$pane" @muxa_session
-  unset_pane_opt "$pane" @muxa_hook_ok
-  unset_pane_opt "$pane" @muxa_unread
-  unset_pane_opt "$pane" @muxa_kick_wait
-  unset_pane_opt "$pane" @muxa_stop_pending
-  unset_pane_opt "$pane" @muxa_stop_pending_batch
-  set_pane_title "$pane" ""
 }
 
 find_pane_by_target() {
@@ -700,19 +678,7 @@ cmd_tail() {
   fi
 }
 
-cmd_unregister() {
-  need_tmux
-  local target="${1:-}" pane name id
-  [ -n "$target" ] || die "unregister: NAME or ID required"
-  pane="$(find_pane_by_target "$target")" || die "unknown agent '$target' — muxa who"
-  name="$(pane_fmt "$pane" '#{@muxa_name}')"
-  id="$(pane_fmt "$pane" '#{@muxa_id}')"
-  clear_muxa_registration "$pane"
-  printf 'unregistered %s id=%s pane=%s\n' "$name" "$id" "$pane"
-}
-
-# kill-pane counterpart of spawn. NAME|ID lookup matches unregister.
-# Does not take a job id. unregister remains identity-only.
+# kill-pane counterpart of spawn. NAME|ID lookup matches find_pane_by_target.
 cmd_kill() {
   need_tmux
   local target="${1:-}" pane name id
@@ -732,37 +698,9 @@ cmd_whoami() {
   printf '%s\n' "$n"
 }
 
-cmd_id() {
-  need_tmux
-  local n
-  n="$(pane_fmt "$(this_pane)" '#{@muxa_id}')"
-  [ -n "$n" ] || die "this pane is not registered (muxa register)"
-  printf '%s\n' "$n"
-}
-
-cmd_session() {
-  need_tmux
-  printf '\n'
-}
-
 cmd_parent() {
   need_tmux
   printf '%s\n' "$(pane_fmt "$(this_pane)" '#{@muxa_parent}')"
-}
-
-cmd_children() {
-  need_tmux
-  local me line
-  me="$(pane_fmt "$(this_pane)" '#{@muxa_name}')"
-  [ -n "$me" ] || die "this pane is not registered (muxa register)"
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    if [ "$(printf '%s\n' "$line" | field 4)" = "$me" ]; then
-      printf '%s\n' "$(printf '%s\n' "$line" | field 2)"
-    fi
-  done <<EOF
-$(roster_lines)
-EOF
 }
 
 broker_bin_path() {
@@ -970,23 +908,19 @@ send_one() {
 
 cmd_send() {
   need_tmux
-  local no_reply=0 all=0 json=0 to="" body="" from flags line dest n item
-  local all_json=""
+  local no_reply=0 json=0 to="" body="" from flags
   while [ $# -gt 0 ]; do
     case "$1" in
       --no-reply) no_reply=1; shift ;;
-      --all) all=1; shift ;;
       --json) json=1; shift ;;
       --) shift; break ;;
       -*) die "send: unknown flag $1" ;;
       *) break ;;
     esac
   done
-  if [ "$all" -eq 0 ]; then
-    [ $# -ge 1 ] || die "send: NAME required"
-    to="$1"
-    shift
-  fi
+  [ $# -ge 1 ] || die "send: NAME required"
+  to="$1"
+  shift
   if [ $# -gt 0 ]; then
     body="$*"
   else
@@ -998,38 +932,6 @@ cmd_send() {
   flags=""
   [ "$no_reply" -eq 1 ] && flags="no-reply"
   SEND_JSON="$json"
-
-  if [ "$all" -eq 1 ]; then
-    n=0
-    seen=$'\n'
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      dest="$(printf '%s\n' "$line" | field 2)"
-      [ -n "$dest" ] || continue
-      case "$seen" in
-        *$'\n'"$dest"$'\n'*) continue ;;
-      esac
-      can_send "$from" "$dest" || continue
-      seen="${seen}${dest}"$'\n'
-      if [ "$json" -eq 1 ]; then
-        item="$(send_one "$from" "$dest" "$flags" "$body")"
-        all_json="${all_json}${item}"$'\n'
-      else
-        send_one "$from" "$dest" "$flags" "$body"
-      fi
-      n=$((n + 1))
-    done <<EOF
-$(roster_lines)
-EOF
-    if [ "$json" -eq 1 ]; then
-      printf '%s' "$all_json" | broker_cli json-array
-      return 0
-    fi
-    if [ "$n" -eq 0 ]; then
-      printf 'no reachable peers\n'
-    fi
-    return 0
-  fi
   send_one "$from" "$to" "$flags" "$body"
 }
 
@@ -1348,13 +1250,9 @@ main() {
     dispatch) cmd_dispatch "$@" ;;
     who|ls|roster) cmd_who "$@" ;;
     tail) cmd_tail "$@" ;;
-    unregister) cmd_unregister "$@" ;;
     kill) cmd_kill "$@" ;;
     whoami) cmd_whoami "$@" ;;
-    id) cmd_id "$@" ;;
-    session) cmd_session "$@" ;;
     parent) cmd_parent "$@" ;;
-    children) cmd_children "$@" ;;
     send) cmd_send "$@" ;;
     broker) cmd_broker "$@" ;;
     hook) cmd_hook "$@" ;;

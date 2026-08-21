@@ -71,15 +71,10 @@ and remain reachable via `muxa send`:
 `pane_current_command` (e.g. `2.1.233` for Claude) is not treated as a
 shell.
 
-`muxa unregister NAME|ID` clears `@muxa_name`, `@muxa_id`, `@muxa_parent`,
-`@muxa_kind` (and leftover options from older installs), resets
-the pane title, and leaves the tmux pane running. Lookup prefers an exact
-name match, then a 12-hex id match. Unknown targets exit 2.
-
-`muxa kill NAME|ID` is the `kill-pane` counterpart of spawn. Same lookup
-and unknown-target exit 2 as unregister. It removes the pane; `muxa who`
-does not list it afterwards. It does not take a job id. `unregister` stays
-identity-only so existing callers do not start killing panes.
+`muxa kill NAME|ID` is the `kill-pane` counterpart of spawn. Lookup prefers
+an exact name match, then a 12-hex id match. Unknown targets exit 2. It
+removes the pane; `muxa who` does not list it afterwards. It does not take
+a job id.
 
 Names are unique per tmux server. Duplicate register fails. Ids are unique
 even when two panes run the same CLI on the same project.
@@ -124,8 +119,6 @@ muxa does not know about orchestrators. It only enforces a tree:
 - child → its parent: allowed
 - child → sibling or unrelated: forbidden (exit 4)
 - roots (no parent) → other roots: forbidden (exit 4)
-
-`muxa send --all` sends only to reachable panes.
 
 ## Delivery
 
@@ -310,29 +303,23 @@ turn.
 
 ```
 muxa send <name> <text…>
-muxa send --all <text…>
 muxa send --no-reply <name> <text…>
 muxa send --json <name> <text…>
 muxa who
 muxa who --json
 muxa tail <name> [-n N]
-muxa unregister <name|id>
 muxa kill <name|id>
 muxa whoami
-muxa id
-muxa session
 muxa parent
-muxa children
 muxa spawn [--name worker] [--cwd DIR] [--window] -- command…
 muxa dispatch [--name NAME] [--cwd DIR] [--brief-file F] -- command…
 muxa hook session-start [--kind KIND]
 muxa broker [start|status|stop]
 ```
 
-`muxa send --json` prints `{"id","pane","from","to"}` (an array of those
-objects for `--all`) so a fire-and-forget caller can correlate a later
-failure turn with the enqueue. Human send output is unchanged without
-`--json`.
+`muxa send --json` prints `{"id","pane","from","to"}` so a fire-and-forget
+caller can correlate a later failure turn with the enqueue. Human send
+output is unchanged without `--json`.
 
 `muxa dispatch` prints `{"name","id","pane","cwd","state":"dispatched","from","to"}`
 and exits 0 once the pane exists and the brief is queued. The broker then
@@ -344,7 +331,7 @@ in the parent; the brief is not pasted into the child. Brief on stdin or
 policy, or job id.
 
 Exit 0 on queued. Exit 2 if the name is unknown (including
-`muxa unregister`, `muxa kill`, and `muxa tail`) or the broker cannot be started/enqueued. Exit 3 if not
+`muxa kill` and `muxa tail`) or the broker cannot be started/enqueued. Exit 3 if not
 running under tmux when tmux is required. Exit 4 if the send is forbidden
 by reachability.
 

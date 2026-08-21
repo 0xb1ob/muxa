@@ -174,8 +174,8 @@ err="$(muxa_as "$bob_pane" send nobody hi 2>&1 || true)"
 assert_contains "$err" "unknown agent" "unknown name errors"
 
 # --- unique ids ---
-id_a="$(muxa_as "$alice_pane" id)"
-id_b="$(muxa_as "$bob_pane" id)"
+id_a="$(tmux -L "$SOCK" display-message -p -t "$alice_pane" '#{@muxa_id}')"
+id_b="$(tmux -L "$SOCK" display-message -p -t "$bob_pane" '#{@muxa_id}')"
 [ -n "$id_a" ] && [ -n "$id_b" ] && [ "$id_a" != "$id_b" ] && ok "ids unique" || bad "ids unique" "a=$id_a b=$id_b"
 
 # --- parent/child ACL ---
@@ -192,9 +192,6 @@ who="$(muxa_as "$bob_pane" who)"
 assert_contains "$who" "carol" "who lists child carol"
 par="$(muxa_as "$carol_pane" parent)"
 assert_contains "$par" "bob" "carol parent is bob"
-kids="$(muxa_as "$bob_pane" children)"
-assert_contains "$kids" "carol" "bob children include carol"
-assert_contains "$kids" "dave" "bob children include dave"
 
 sent="$(muxa_as "$bob_pane" send carol 'from-parent')"
 assert_contains "$sent" "queued bob → carol" "parent → child allowed"
@@ -210,16 +207,6 @@ assert_contains "$sib" "forbidden" "sibling send refused"
 sib2="$(muxa_as "$alice_pane" send carol 'nope' 2>&1 || true)"
 assert_contains "$sib2" "forbidden" "sibling alice → carol refused"
 
-# --- send --all dedupes duplicate roster names ---
-saved_dave_name="$(tmux -L "$SOCK" display-message -p -t "$dave_pane" '#{@muxa_name}')"
-tmux -L "$SOCK" set-option -p -t "$dave_pane" @muxa_name carol
-marker="send-all-dedupe-$$"
-all_out="$(muxa_as "$bob_pane" send --no-reply --all "$marker")"
-count="$(printf '%s\n' "$all_out" | grep -c "queued bob → carol" || true)"
-tmux -L "$SOCK" set-option -p -t "$dave_pane" @muxa_name "$saved_dave_name"
-[ "$count" -eq 1 ] && ok "send --all dedupes duplicate roster names" \
-  || bad "send --all dedupes duplicate roster names" "expected 1 enqueue, count=$count out=$all_out"
-
 tmux -L "$SOCK" new-window -t muxa -n eve "exec sleep 3600"
 sleep 0.2
 eve_pane="$(tmux -L "$SOCK" list-panes -t muxa:eve -F '#{pane_id}')"
@@ -233,9 +220,6 @@ assert_contains "$r2r2" "forbidden" "root → other root refused"
 
 root_to_child="$(muxa_as "$eve_pane" send carol 'nope' 2>&1 || true)"
 assert_contains "$root_to_child" "forbidden" "unrelated root → child refused"
-
-none="$(muxa_as "$eve_pane" send --all 'nope')"
-assert_contains "$none" "no reachable peers" "root --all has no peers"
 
 # --- spawn (default: split into parent window, tiled grid) ---
 bob_win="$(tmux -L "$SOCK" display-message -t "$bob_pane" -p '#{session_name}:#{window_index}')"
@@ -808,9 +792,6 @@ muxa_as "$alice_pane" hook session-end
 who="$(muxa_as "$bob_pane" who)"
 assert_contains "$who" "alice" "leftover presence hooks do not unregister"
 assert_who_state "$who" "alice" "idle" "who STATE is idle when the pane is not drawing"
-got_sess="$(muxa_as "$alice_pane" session)"
-[ -z "$got_sess" ] && ok "muxa session is empty (CLI session id is not tracked)" \
-  || bad "muxa session is empty (CLI session id is not tracked)" "got: $got_sess"
 
 projdir="$tmpdir/acme-widgets"
 mkdir -p "$projdir"
@@ -1014,33 +995,6 @@ case "$esc_cap" in
   *) bad "enqueue delivers body with quote, backslash, newline" "cap: $esc_cap" ;;
 esac
 
-allj="$(muxa_as "$bob_pane" send --json --all json-all-body)"
-all_tos="$(printf '%s' "$allj" | muxa-broker json-values to)"
-all_froms="$(printf '%s' "$allj" | muxa-broker json-values from)"
-if [ "$(printf '%s' "$allj" | muxa-broker json-type)" = "array" ] \
-  && printf '%s' "$allj" | muxa-broker json-keys id pane from to; then
-  case "$all_tos" in
-    *carol*)
-      case "$all_tos" in
-        *alice*)
-          case "$all_froms" in
-            *bob*) ok "send --all --json is an array of enqueues" ;;
-            *) bad "send --all --json is an array of enqueues" "from=$all_froms got: $allj" ;;
-          esac
-          ;;
-        *) bad "send --all --json is an array of enqueues" "got: $allj" ;;
-      esac
-      ;;
-    *) bad "send --all --json is an array of enqueues" "got: $allj" ;;
-  esac
-else
-  bad "send --all --json is an array of enqueues" "got: $allj"
-fi
-
-nonej="$(muxa_as "$eve_pane" send --json --all json-none)"
-[ "$nonej" = "[]" ] && ok "send --all --json with no peers is []" \
-  || bad "send --all --json with no peers is []" "got: $nonej"
-
 tok_disp="DISPJ_$$"
 disp_loop='while true; do printf "ready> "; read -r _ || break; done'
 disp_out="$(printf 'dispatch-body-%s\n' "$tok_disp" | muxa_as "$bob_pane" dispatch --window --name dispkid -- bash -c "$disp_loop")"
@@ -1122,45 +1076,6 @@ set -e
 [ "$tail_code" -eq 2 ] && ok "tail unknown exits 2" \
   || bad "tail unknown exits 2" "exit=$tail_code"
 
-# --- unregister ---
-tmux -L "$SOCK" new-window -t muxa -n unreg "exec sleep 3600"
-sleep 0.2
-unreg_pane="$(tmux -L "$SOCK" list-panes -t muxa:unreg -F '#{pane_id}')"
-muxa_as "$unreg_pane" register --name dropme --kind generic >/dev/null
-unreg_out="$(muxa_as "$bob_pane" unregister dropme)"
-assert_contains "$unreg_out" "unregistered dropme" "unregister by name confirms"
-who="$(muxa_as "$bob_pane" who)"
-case "$who" in
-  *dropme*) bad "unregister by name removes from who" "still listed: $who" ;;
-  *) ok "unregister by name removes from who" ;;
-esac
-
-tmux -L "$SOCK" new-window -t muxa -n unreg2 "exec sleep 3600"
-sleep 0.2
-unreg2_pane="$(tmux -L "$SOCK" list-panes -t muxa:unreg2 -F '#{pane_id}')"
-muxa_as "$unreg2_pane" register --name dropid --kind generic >/dev/null
-drop_id="$(muxa_as "$unreg2_pane" id)"
-unreg_out="$(muxa_as "$bob_pane" unregister "$drop_id")"
-assert_contains "$unreg_out" "unregistered dropid" "unregister by id confirms"
-who="$(muxa_as "$bob_pane" who)"
-case "$who" in
-  *dropid*) bad "unregister by id removes from who" "still listed: $who" ;;
-  *) ok "unregister by id removes from who" ;;
-esac
-
-set +e
-muxa_as "$bob_pane" unregister nobody 2>/dev/null
-unreg_code=$?
-set -e
-[ "$unreg_code" -eq 2 ] && ok "unregister unknown exits 2" \
-  || bad "unregister unknown exits 2" "exit=$unreg_code"
-
-if pane_exists "$unreg_pane"; then
-  ok "unregister leaves the tmux pane running"
-else
-  bad "unregister leaves the tmux pane running" "pane $unreg_pane gone"
-fi
-
 # --- kill ---
 tmux -L "$SOCK" new-window -t muxa -n killme "exec sleep 3600"
 sleep 0.2
@@ -1190,7 +1105,7 @@ tmux -L "$SOCK" new-window -t muxa -n killid "exec sleep 3600"
 sleep 0.2
 killid_pane="$(tmux -L "$SOCK" list-panes -t muxa:killid -F '#{pane_id}')"
 muxa_as "$killid_pane" register --name killid --kind generic >/dev/null
-kill_id="$(muxa_as "$killid_pane" id)"
+kill_id="$(tmux -L "$SOCK" display-message -p -t "$killid_pane" '#{@muxa_id}')"
 kill_out="$(muxa_as "$bob_pane" kill "$kill_id")"
 assert_contains "$kill_out" "killed killid" "kill by id confirms"
 who="$(muxa_as "$bob_pane" who)"
@@ -1199,7 +1114,7 @@ case "$who" in
   *) ok "kill by id removes from who" ;;
 esac
 if pane_exists "$killid_pane"; then
-  bad "kill by id removes the tmux pane" "pane $killid_pane still exists (unregister would leave it)"
+  bad "kill by id removes the tmux pane" "pane $killid_pane still exists"
 else
   ok "kill by id removes the tmux pane"
 fi
@@ -1324,7 +1239,6 @@ help_nobr="$(PATH="$nobr_path" muxa help)"
 assert_contains "$help_nobr" "muxa send" "help works with br absent from PATH"
 assert_contains "$help_nobr" "muxa dispatch" "help mentions dispatch"
 assert_contains "$help_nobr" "muxa kill" "help mentions kill"
-assert_contains "$help_nobr" "leave pane running" "help keeps unregister as leave-pane-running"
 case "$help_nobr" in
   *"muxa jobs"*|*"muxa preflight"*) bad "help does not mention jobs or preflight" "out=$help_nobr" ;;
   *) ok "help does not mention jobs or preflight" ;;
