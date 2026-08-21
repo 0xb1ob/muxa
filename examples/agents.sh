@@ -13,7 +13,7 @@ fi
 tmux new-session -d -s "$SESSION" -c "$ROOT" -n claude "export PATH='$ROOT/bin:\$PATH' MUXA_NAME=claude; exec claude"
 sleep 0.3
 claude_pane="$(tmux list-panes -t "$SESSION:claude" -F '#{pane_id}')"
-TMUX_PANE="$claude_pane" muxa register --name claude --kind claude --deliver hook >/dev/null
+TMUX_PANE="$claude_pane" muxa register --name claude --kind claude >/dev/null
 
 if command -v agent >/dev/null; then
   TMUX_PANE="$claude_pane" muxa spawn --name cursor --kind cursor -- \

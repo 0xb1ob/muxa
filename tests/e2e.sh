@@ -65,7 +65,7 @@ pane_text() {
 }
 
 dump() {
-  tmux_e list-panes -a -F '#{window_name} id=#{pane_id} cmd=#{pane_current_command} name=#{@muxa_name} parent=#{@muxa_parent} muxid=#{@muxa_id} state=#{@muxa_state}' \
+  tmux_e list-panes -a -F '#{window_name} id=#{pane_id} cmd=#{pane_current_command} name=#{@muxa_name} parent=#{@muxa_parent} muxid=#{@muxa_id}' \
     >"$ART/panes.txt" 2>/dev/null || true
   muxa who >"$ART/who.txt" 2>/dev/null || true
   pane_text "$(pane_by_name claude)" >"$ART/claude.pane" 2>/dev/null || true
@@ -137,10 +137,18 @@ wait_registered() {
 wait_state() {
   local name="$1" want="$2" seconds="$3" i=0 got
   while [ "$i" -lt "$seconds" ]; do
-    got="$(muxa who 2>/dev/null | awk -v n="$name" '$1==n { print $5; exit }')"
-    if [ "$got" = "$want" ]; then
-      return 0
-    fi
+    got="$(muxa who --json 2>/dev/null | python3 -c '
+import json, sys
+name, want = sys.argv[1], sys.argv[2]
+try:
+    rows = json.loads(sys.stdin.read() or "[]")
+except Exception:
+    sys.exit(1)
+for row in rows:
+    if row.get("name") == name and row.get("state") == want:
+        sys.exit(0)
+sys.exit(1)
+' "$name" "$want")" && return 0
     sleep 1
     i=$((i + 1))
   done
@@ -180,7 +188,7 @@ fi
 printf 'claude=%s\nagent=%s\nomp=%s\n' "$CLAUDE_BIN" "$AGENT_BIN" "$OMP_BIN"
 
 ctl_pane="$(tmux_e list-panes -t "$SESSION:ctl" -F '#{pane_id}')"
-muxa_as "$ctl_pane" register --name human --kind generic --deliver inject >/dev/null
+muxa_as "$ctl_pane" register --name human --kind generic >/dev/null
 
 printf 'waiting up to %ss for claude SessionStart…\n' "$BOOT_S"
 if wait_registered claude "$BOOT_S"; then
@@ -205,7 +213,7 @@ else
 fi
 
 spawn_p="$(muxa_as "$claude_pane" spawn --name pi --kind pi -- \
-  "$OMP_BIN" --approval-mode=yolo -e "$ROOT/hooks/pi/muxa.ts" --cwd="$ROOT" 2>&1 || true)"
+  "$OMP_BIN" --approval-mode=yolo --cwd="$ROOT" 2>&1 || true)"
 printf 'spawn pi: %s\n' "$spawn_p"
 if printf '%s\n' "$spawn_p" | grep -q 'spawned pi'; then
   ok "claude spawned pi child"
@@ -273,23 +281,17 @@ printf '%s\n' "$sent" | grep -Eq 'delivered|queued' && ok "parent → pi send ($
 wait_pane_has "$cursor_pane" "$inject_u" 20 && ok "cursor TUI shows parent inject" || bad "cursor TUI shows parent inject" "$(pane_text "$cursor_pane" | tail -n 40)"
 wait_pane_has "$pi_pane" "$inject_p" 20 && ok "pi TUI shows parent inject" || bad "pi TUI shows parent inject" "$(pane_text "$pi_pane" | tail -n 40)"
 
-# A-path: idle hook panes are injected even after Stop has proven the drain.
+# A-path: idle panes are injected even after a first brief has landed.
 wait_state cursor idle 30 || true
-cursor_hook_ok="$(tmux_e display-message -t "$cursor_pane" -p '#{@muxa_hook_ok}' 2>/dev/null || true)"
 a_path="MUXA_A_PATH_$TOKEN"
-if [ "$cursor_hook_ok" = "1" ]; then
-  sent="$(muxa_as "$claude_pane" send --no-reply cursor "$a_path" 2>&1 || true)"
-  if printf '%s\n' "$sent" | grep -q broker; then
-    ok "A-path: idle send enqueues on broker"
-  else
-    bad "A-path: idle send enqueues on broker" "$sent"
-  fi
-  wait_pane_has "$cursor_pane" "$a_path" 15 && ok "A-path: body is pasted immediately" \
-    || bad "A-path: body is pasted immediately" "$(pane_text "$cursor_pane" | tail -n 20)"
+sent="$(muxa_as "$claude_pane" send --no-reply cursor "$a_path" 2>&1 || true)"
+if printf '%s\n' "$sent" | grep -q broker; then
+  ok "A-path: idle send enqueues on broker"
 else
-  ok "A-path skipped (cursor @muxa_hook_ok not yet 1)"
-  ok "A-path paste skipped"
+  bad "A-path: idle send enqueues on broker" "$sent"
 fi
+wait_pane_has "$cursor_pane" "$a_path" 15 && ok "A-path: body is pasted immediately" \
+  || bad "A-path: body is pasted immediately" "$(pane_text "$cursor_pane" | tail -n 20)"
 
 # B-live: copy-mode must queue, must not ghost-flush, deliver after cancel.
 b_live="MUXA_B_LIVE_$TOKEN"

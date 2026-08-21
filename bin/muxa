@@ -10,7 +10,7 @@ usage() {
   cat <<'EOF'
 muxa — message other AI CLIs in this tmux server
 
-  muxa register [--name NAME] [--id ID] [--parent NAME] [--kind claude|cursor|pi|generic] [--deliver hook|inject]
+  muxa register [--name NAME] [--id ID] [--parent NAME] [--kind claude|cursor|pi|generic]
   muxa spawn [--name NAME] [--kind KIND] [--cwd DIR] [--split] [--window] -- COMMAND...
                                 spawn flags must precede -- or the command word
                                 omit --name to get a unique adjective-noun alias (swift-oak)
@@ -22,19 +22,19 @@ muxa — message other AI CLIs in this tmux server
                                 stdout: {"name","id","pane","cwd","state":"dispatched","from","to"}
                                 broker waits until the CLI has drawn, gone quiet, and looks free
                                 if it never becomes ready: [muxa] from=broker in the parent, child unbriefed
-  muxa who [--json]                 roster (tmux pane options, CLI session id, cwd, STATUS)
+  muxa who [--json]                 roster (tmux pane options, cwd, STATUS; STATE from broker drawing)
   muxa whoami                       this pane's alias
   muxa unregister NAME|ID           clear muxa registration; leave pane running
   muxa id                           this pane's unique muxa id
-  muxa session                      this pane's CLI session/conversation id (empty until reported)
+  muxa session                      empty (CLI session id is not tracked)
   muxa parent                       this pane's parent alias (empty if root)
   muxa children                     direct children of this pane
   muxa tail NAME [-n N]             one-shot pane capture (visible; -n last N lines of history)
   muxa send [--json] [--no-reply] NAME TEXT  enqueue on the pane-mail broker (parent↔child only)
   muxa send [--json] --all TEXT     every parent/child pane (not siblings or other roots)
   muxa broker [start|status|stop]   user-level paste broker (unix socket + file queue)
-  muxa state idle|busy|blocked      presence (hooks call this)
-  muxa hook EVENT [--format FMT] [--kind KIND]
+  muxa hook session-start [--kind KIND]
+                                optional root self-registration; spawned panes are already registered
   muxa version
 
 Reachability: a parent may message its children; a child may message its
@@ -51,14 +51,6 @@ forbid() { printf 'muxa: %s\n' "$*" >&2; exit 4; }
 
 need_tmux() {
   [ -n "${TMUX:-}" ] || [ -n "${MUXA_TMUX_SOCKET:-}" ] || { printf 'muxa: not in tmux (hard requirement)\n' >&2; exit 3; }
-}
-
-# Hooks for IDE-hosted sessions run outside tmux (no TMUX/TMUX_PANE).
-# The default socket is enough; do not require being inside a pane.
-tmux_reachable() {
-  [ -n "${TMUX:-}" ] && return 0
-  [ -n "${MUXA_TMUX_SOCKET:-}" ] && return 0
-  tmux_do list-sessions >/dev/null 2>&1
 }
 
 tmux_do() {
@@ -137,12 +129,12 @@ new_muxa_id() {
   python3 -c 'import uuid; print(uuid.uuid4().hex[:12])'
 }
 
-# pane_id  name  id  parent  kind  state  deliver  where  session  cwd  command
+# pane_id  name  id  parent  kind  where  cwd  command
 # tmux <=3.4 rewrites literal tab bytes in -F output to "_", which breaks
 # tab-delimited parsing on some platforms (e.g. Ubuntu CI runners). "||"
 # survives unmodified and won't appear in any of these fields in practice.
 roster_lines() {
-  tmux_do list-panes -a -F '#{pane_id}||#{@muxa_name}||#{@muxa_id}||#{@muxa_parent}||#{@muxa_kind}||#{@muxa_state}||#{@muxa_deliver}||#{session_name}:#{window_index}.#{pane_index}||#{@muxa_session}||#{pane_current_path}||#{pane_current_command}' 2>/dev/null \
+  tmux_do list-panes -a -F '#{pane_id}||#{@muxa_name}||#{@muxa_id}||#{@muxa_parent}||#{@muxa_kind}||#{session_name}:#{window_index}.#{pane_index}||#{pane_current_path}||#{pane_current_command}' 2>/dev/null \
     | awk -F '\\|\\|' '$2 != "" { print }'
 }
 
@@ -185,6 +177,16 @@ pane_who_status() {
     esac
   fi
   printf '%s' "$st"
+}
+
+# STATE is the broker's drawing list, not a hook-written pane option.
+# drawing → busy; otherwise idle. blocked is gone: nothing observes it.
+pane_who_state() {
+  local pane="$1" drawing="$2"
+  case " $drawing " in
+    *" $pane "*) printf 'busy' ;;
+    *) printf 'idle' ;;
+  esac
 }
 
 # Best-effort: never start a broker, never fail who. Empty if the socket is down.
@@ -268,125 +270,6 @@ EOF
 
 pane_is_registered() {
   [ -n "$1" ] && [ -n "$(pane_fmt "$1" '#{@muxa_name}')" ]
-}
-
-find_pane_by_session() {
-  local sid="$1" line
-  [ -n "$sid" ] || return 1
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    [ "$(printf '%s\n' "$line" | field 9)" = "$sid" ] || continue
-    printf '%s' "$(printf '%s\n' "$line" | field 1)"
-    return 0
-  done <<EOF
-$(roster_lines)
-EOF
-  return 1
-}
-
-# Prefer a hook-deliver root (empty parent) at $1, especially kind=cursor.
-# IDE-hosted Cursor hooks have no TMUX_PANE; the registered launch pane's
-# cwd matches CURSOR_PROJECT_DIR / PWD.
-find_hook_pane_by_cwd() {
-  local want="$1" line pane kind deliver parent cwd best="" cursor_root=""
-  [ -n "$want" ] || return 1
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    cwd="$(printf '%s\n' "$line" | field 10)"
-    [ "$cwd" = "$want" ] || continue
-    pane="$(printf '%s\n' "$line" | field 1)"
-    parent="$(printf '%s\n' "$line" | field 4)"
-    kind="$(printf '%s\n' "$line" | field 5)"
-    deliver="$(printf '%s\n' "$line" | field 7)"
-    [ "$deliver" = "hook" ] || continue
-    if [ -z "$parent" ] && [ "$kind" = "cursor" ]; then
-      cursor_root="$pane"
-      break
-    fi
-    if [ -z "$parent" ] && [ -z "$best" ]; then
-      best="$pane"
-    fi
-  done <<EOF
-$(roster_lines)
-EOF
-  if [ -n "$cursor_root" ]; then
-    printf '%s' "$cursor_root"
-    return 0
-  fi
-  if [ -n "$best" ]; then
-    printf '%s' "$best"
-    return 0
-  fi
-  return 1
-}
-
-# Resolve the pane a hook event belongs to. Never use the tmux client's
-# active pane (display-message without -t): IDE hooks inherit TMUX but
-# not TMUX_PANE, so that would be whichever pane the human is watching.
-hook_target_pane() {
-  local sid="$1" event="${2:-}" pane="" sess=""
-  if [ -n "${MUXA_PANE:-}" ] && pane_is_registered "$MUXA_PANE"; then
-    printf '%s' "$MUXA_PANE"
-    return 0
-  fi
-  # In-pane CLI session-start: this process IS the pane. Pin it before
-  # conversation_id lookup so a previous @muxa_session cannot steal us.
-  if [ "$event" = "session-start" ] && [ -n "${TMUX_PANE:-}" ]; then
-    printf '%s' "$TMUX_PANE"
-    return 0
-  fi
-  if pane="$(find_pane_by_session "$sid")" && [ -n "$pane" ]; then
-    printf '%s' "$pane"
-    return 0
-  fi
-  if [ -n "${TMUX_PANE:-}" ] && pane_is_registered "$TMUX_PANE"; then
-    sess="$(pane_fmt "$TMUX_PANE" '#{@muxa_session}')"
-    if [ -z "$sid" ] || [ -z "$sess" ] || [ "$sess" = "$sid" ]; then
-      printf '%s' "$TMUX_PANE"
-      return 0
-    fi
-  fi
-  if pane="$(find_hook_pane_by_cwd "${CURSOR_PROJECT_DIR:-}")" && [ -n "$pane" ]; then
-    printf '%s' "$pane"
-    return 0
-  fi
-  if pane="$(find_hook_pane_by_cwd "${PWD:-}")" && [ -n "$pane" ]; then
-    printf '%s' "$pane"
-    return 0
-  fi
-  if pane="$(find_hook_pane_by_cwd "${CLAUDE_PROJECT_DIR:-}")" && [ -n "$pane" ]; then
-    printf '%s' "$pane"
-    return 0
-  fi
-  return 1
-}
-
-parse_hook_payload() {
-  python3 -c '
-import json, sys
-raw = sys.stdin.read()
-sid = status = ""
-try:
-    data = json.loads(raw) if raw.strip() else {}
-except Exception:
-    data = {}
-if isinstance(data, dict):
-    for key in ("session_id", "sessionId", "conversation_id"):
-        val = data.get(key)
-        if val is None:
-            continue
-        text = str(val).strip()
-        if text:
-            sid = text
-            break
-    status = str(data.get("status") or "").strip()
-print(sid)
-print(status)
-'
-}
-
-cursor_session_env() {
-  python3 -c 'import json, sys; print(json.dumps({"env": {"MUXA_PANE": sys.argv[1], "TMUX_PANE": sys.argv[1]}}))' "$1"
 }
 
 name_parent() {
@@ -492,51 +375,6 @@ detect_kind() {
   printf 'generic'
 }
 
-# Pick @muxa_kind for a hook. Process argv wins over a conflicting --kind
-# flag; a live registration is kept when the hook would flip CLI family
-# without evidence (e.g. claude SessionStart on a cursor-agent pane).
-resolve_hook_kind() {
-  local pane="$1" hook_kind="${2:-}" existing detected
-  detected="$(detect_kind "$pane")"
-  existing="$(pane_fmt "$pane" '#{@muxa_kind}')"
-  if [ -n "$hook_kind" ] && [ "$detected" != "generic" ] && [ "$hook_kind" != "$detected" ]; then
-    printf '%s' "$detected"
-    return
-  fi
-  # Keep a live CLI-family registration when the hook would flip families
-  # without process evidence (e.g. claude SessionStart on a cursor pane).
-  if [ -n "$existing" ] && [ "$existing" != "generic" ] \
-     && [ -n "$hook_kind" ] && [ "$hook_kind" != "$existing" ]; then
-    if [ "$detected" = "generic" ] || [ "$detected" = "$existing" ]; then
-      printf '%s' "$existing"
-      return
-    fi
-  fi
-  if [ -n "$hook_kind" ]; then
-    printf '%s' "$hook_kind"
-    return
-  fi
-  if [ "$detected" != "generic" ]; then
-    printf '%s' "$detected"
-    return
-  fi
-  if [ -n "$existing" ]; then
-    printf '%s' "$existing"
-    return
-  fi
-  printf 'generic'
-}
-
-# Cursor stop may paste into the tmux pane when the composer is idle. Test
-# panes register --kind cursor on cat(1); detect_kind stays generic unless
-# MUXA_STOP_INJECT=1. Live Agent panes run agent/cursor-agent.
-default_deliver() {
-  case "$1" in
-    claude|cursor|pi) printf 'hook' ;;
-    *) printf 'inject' ;;
-  esac
-}
-
 sanitize_name() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-*//;s/-*$//'
 }
@@ -589,17 +427,6 @@ set_pane_title() {
   tmux_do select-pane -t "$1" -T "$2" 2>/dev/null || true
 }
 
-apply_cli_session() {
-  local pane="$1" sid="$2" name short
-  [ -n "$sid" ] || return 0
-  set_pane_opt "$pane" @muxa_session "$sid"
-  name="$(pane_fmt "$pane" '#{@muxa_name}')"
-  short="$(printf '%s' "$sid" | cut -c1-8)"
-  if [ -n "$name" ]; then
-    set_pane_title "$pane" "$name · $short"
-  fi
-}
-
 default_name() {
   local pane="$1" existing
   if [ -n "${MUXA_NAME:-}" ]; then
@@ -642,18 +469,16 @@ format_one() {
 
 cmd_register() {
   need_tmux
-  local pane name kind deliver parent id
+  local pane name kind parent id
   pane="$(this_pane)"
   name=""
   kind=""
-  deliver=""
   parent=""
   id=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
       --kind) kind="$2"; shift 2 ;;
-      --deliver) deliver="$2"; shift 2 ;;
       --parent) parent="$2"; shift 2 ;;
       --id) id="$2"; shift 2 ;;
       *) die "register: unknown arg $1" ;;
@@ -662,14 +487,12 @@ cmd_register() {
   [ -n "$name" ] || name="$(default_name "$pane")"
   [ -n "$name" ] || die "could not derive a name; pass --name"
   [ -n "$kind" ] || kind="$(detect_kind "$pane")"
-  [ -n "$deliver" ] || deliver="$(default_deliver "$kind")"
   [ -n "$parent" ] || parent="${MUXA_PARENT:-}"
   [ -n "$parent" ] || parent="$(pane_fmt "$pane" '#{@muxa_parent}')"
   [ -n "$id" ] || id="${MUXA_ID:-}"
   [ -n "$id" ] || id="$(pane_fmt "$pane" '#{@muxa_id}')"
   [ -n "$id" ] || id="$(new_muxa_id)"
   case "$kind" in claude|cursor|pi|generic) ;; *) die "bad kind $kind" ;; esac
-  case "$deliver" in hook|inject) ;; *) die "bad deliver $deliver" ;; esac
   if name_taken_by_other "$name" "$pane"; then
     die "name '$name' already registered on another pane"
   fi
@@ -685,38 +508,34 @@ cmd_register() {
   set_pane_opt "$pane" @muxa_name "$name"
   set_pane_opt "$pane" @muxa_id "$id"
   set_pane_opt "$pane" @muxa_kind "$kind"
-  set_pane_opt "$pane" @muxa_deliver "$deliver"
-  set_pane_opt "$pane" @muxa_state idle
   if [ -n "$parent" ]; then
     set_pane_opt "$pane" @muxa_parent "$parent"
   else
     unset_pane_opt "$pane" @muxa_parent
   fi
   set_pane_title "$pane" "$name"
-  if [ "$deliver" != "hook" ]; then
-    unset_pane_opt "$pane" @muxa_hook_ok
-  fi
   if [ -n "$parent" ]; then
-    printf 'registered %s id=%s parent=%s kind=%s deliver=%s pane=%s\n' \
-      "$name" "$id" "$parent" "$kind" "$deliver" "$pane"
+    printf 'registered %s id=%s parent=%s kind=%s pane=%s\n' \
+      "$name" "$id" "$parent" "$kind" "$pane"
   else
-    printf 'registered %s id=%s parent=- kind=%s deliver=%s pane=%s\n' \
-      "$name" "$id" "$kind" "$deliver" "$pane"
+    printf 'registered %s id=%s parent=- kind=%s pane=%s\n' \
+      "$name" "$id" "$kind" "$pane"
   fi
 }
 
 cmd_who_json() {
-  local line kind cwd cmd status pane drawing
+  local line kind cwd cmd status state pane drawing
   drawing="$(broker_drawing_ids)"
   {
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       pane="$(printf '%s\n' "$line" | field 1)"
       kind="$(printf '%s\n' "$line" | field 5)"
-      cwd="$(printf '%s\n' "$line" | field 10)"
-      cmd="$(printf '%s\n' "$line" | field 11)"
+      cwd="$(printf '%s\n' "$line" | field 7)"
+      cmd="$(printf '%s\n' "$line" | field 8)"
       status="$(pane_who_status "$kind" "$cwd" "$cmd" "$pane" "$drawing")"
-      printf '%s||%s\n' "$line" "$status"
+      state="$(pane_who_state "$pane" "$drawing")"
+      printf '%s||%s||%s\n' "$line" "$status" "$state"
     done <<EOF
 $(roster_lines)
 EOF
@@ -732,17 +551,17 @@ for raw in sys.stdin:
     if not raw:
         continue
     p = raw.split("||")
-    p.extend([""] * (12 - len(p)))
+    p.extend([""] * (10 - len(p)))
     rows.append({
         "name": p[1],
         "id": p[2],
         "parent": n(p[3]),
         "kind": p[4],
-        "state": p[5],
+        "state": p[9],
         "pane": p[0],
-        "session": n(p[8]),
-        "cwd": p[9],
-        "status": p[11],
+        "session": None,
+        "cwd": p[6],
+        "status": p[8],
     })
 json.dump(rows, sys.stdout, separators=(",", ":"), ensure_ascii=False)
 sys.stdout.write("\n")
@@ -763,29 +582,29 @@ cmd_who() {
     cmd_who_json
     return
   fi
-  printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-8s %-16s %s\n' \
-    NAME ID SESSION PARENT KIND STATE STATUS DELIVER PANE WHERE CWD
-  local line kind cwd cmd status name pane drawing
+  printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-16s %s\n' \
+    NAME ID SESSION PARENT KIND STATE STATUS PANE WHERE CWD
+  local line kind cwd cmd status state name pane drawing
   drawing="$(broker_drawing_ids)"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     pane="$(printf '%s\n' "$line" | field 1)"
     kind="$(printf '%s\n' "$line" | field 5)"
-    cwd="$(printf '%s\n' "$line" | field 10)"
-    cmd="$(printf '%s\n' "$line" | field 11)"
+    cwd="$(printf '%s\n' "$line" | field 7)"
+    cmd="$(printf '%s\n' "$line" | field 8)"
     status="$(pane_who_status "$kind" "$cwd" "$cmd" "$pane" "$drawing")"
+    state="$(pane_who_state "$pane" "$drawing")"
     name="$(printf '%s\n' "$line" | field 2)"
-    printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-8s %-16s %s\n' \
+    printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-16s %s\n' \
       "$name" \
       "$(printf '%s\n' "$line" | field 3)" \
-      "$(printf '%s\n' "$line" | field 9)" \
+      "" \
       "$(printf '%s\n' "$line" | field 4)" \
       "$kind" \
-      "$(printf '%s\n' "$line" | field 6)" \
+      "$state" \
       "$status" \
-      "$(printf '%s\n' "$line" | field 7)" \
       "$(printf '%s\n' "$line" | field 1)" \
-      "$(printf '%s\n' "$line" | field 8)" \
+      "$(printf '%s\n' "$line" | field 6)" \
       "$cwd"
   done <<EOF
 $(roster_lines)
@@ -872,7 +691,7 @@ cmd_id() {
 
 cmd_session() {
   need_tmux
-  printf '%s\n' "$(pane_fmt "$(this_pane)" '#{@muxa_session}')"
+  printf '\n'
 }
 
 cmd_parent() {
@@ -893,16 +712,6 @@ cmd_children() {
   done <<EOF
 $(roster_lines)
 EOF
-}
-
-cmd_state() {
-  need_tmux
-  local st="${1:-}"
-  case "$st" in
-    idle|busy|blocked) ;;
-    *) die "state must be idle|busy|blocked" ;;
-  esac
-  set_pane_opt "$(this_pane)" @muxa_state "$st"
 }
 
 broker_bin_path() {
@@ -1229,8 +1038,8 @@ warn_occupied_spawn_cwd() {
     parent="$(printf '%s\n' "$line" | field 4)"
     [ -n "$parent" ] || continue
     kind="$(printf '%s\n' "$line" | field 5)"
-    cwd="$(printf '%s\n' "$line" | field 10)"
-    cmd="$(printf '%s\n' "$line" | field 11)"
+    cwd="$(printf '%s\n' "$line" | field 7)"
+    cmd="$(printf '%s\n' "$line" | field 8)"
     [ -n "$cwd" ] || continue
     [ "$(pane_status "$kind" "$cwd" "$cmd")" = "live" ] || continue
     other_real="$(abs_dir "$cwd")" || continue
@@ -1424,8 +1233,6 @@ spawn_child() {
   set_pane_opt "$child" @muxa_id "$id"
   set_pane_opt "$child" @muxa_parent "$parent"
   set_pane_opt "$child" @muxa_kind "$kind"
-  set_pane_opt "$child" @muxa_deliver "$(default_deliver "$kind")"
-  set_pane_opt "$child" @muxa_state idle
   set_pane_title "$child" "$name"
   SPAWN_NAME="$name"
   SPAWN_ID="$id"
@@ -1440,13 +1247,13 @@ hook_register_pane() {
   local saved="${TMUX_PANE:-}"
   TMUX_PANE="$pane"
   if [ -n "${MUXA_NAME:-}" ] && [ -n "${MUXA_PARENT:-}" ]; then
-    cmd_register --name "$MUXA_NAME" --kind "$kind" --deliver hook --parent "$MUXA_PARENT" >/dev/null
+    cmd_register --name "$MUXA_NAME" --kind "$kind" --parent "$MUXA_PARENT" >/dev/null
   elif [ -n "${MUXA_NAME:-}" ]; then
-    cmd_register --name "$MUXA_NAME" --kind "$kind" --deliver hook >/dev/null
+    cmd_register --name "$MUXA_NAME" --kind "$kind" >/dev/null
   elif [ -n "${MUXA_PARENT:-}" ]; then
-    cmd_register --kind "$kind" --deliver hook --parent "$MUXA_PARENT" >/dev/null
+    cmd_register --kind "$kind" --parent "$MUXA_PARENT" >/dev/null
   else
-    cmd_register --kind "$kind" --deliver hook >/dev/null
+    cmd_register --kind "$kind" >/dev/null
   fi
   if [ -n "$saved" ]; then
     TMUX_PANE="$saved"
@@ -1455,80 +1262,37 @@ hook_register_pane() {
   fi
 }
 
+# Optional root self-registration. Spawned panes are already registered by
+# spawn; TMUX_PANE is enough — no stdin payload, no resolution ladder.
+# Leftover presence events (busy/idle/blocked/stop/session-end) no-op so
+# previously merged per-CLI hooks do not fail closed on upgrade.
 cmd_hook() {
-  tmux_reachable || { printf 'muxa: not in tmux (hard requirement)\n' >&2; exit 3; }
+  need_tmux
   local event="${1:-}"
   shift || true
-  local format="claude" kind="" session_id="" status="" pane="" meta name
+  local kind="" pane
   while [ $# -gt 0 ]; do
     case "$1" in
-      --format) format="$2"; shift 2 ;;
       --kind) kind="$2"; shift 2 ;;
+      --format) shift 2 ;;
       *) shift ;;
     esac
   done
-  if [ -t 0 ]; then
-    session_id=""
-    status=""
-  else
-    meta="$(parse_hook_payload)"
-    session_id="$(printf '%s\n' "$meta" | awk 'NR==1 { print; exit }')"
-    status="$(printf '%s\n' "$meta" | awk 'NR==2 { print; exit }')"
+  if [ ! -t 0 ]; then
+    cat >/dev/null
   fi
   case "$event" in
     session-start|SessionStart|sessionStart) event="session-start" ;;
-    session-end|SessionEnd|sessionEnd) event="session-end" ;;
-    busy|PreToolUse|preToolUse) event="busy" ;;
-    blocked|PermissionRequest) event="blocked" ;;
-    idle|afterAgentResponse) event="idle" ;;
-    stop|Stop|session_stop) event="stop" ;;
+    session-end|SessionEnd|sessionEnd|busy|PreToolUse|preToolUse|blocked|PermissionRequest|idle|afterAgentResponse|stop|Stop|session_stop)
+      return 0
+      ;;
+    "") die "hook: event required" ;;
+    *) die "hook: unknown event $event" ;;
   esac
-  pane="$(hook_target_pane "$session_id" "$event")" || pane=""
-  case "$event" in
-    session-start)
-      [ -n "$pane" ] || return 0
-      kind="$(resolve_hook_kind "$pane" "$kind")"
-      hook_register_pane "$pane" "$kind"
-      if [ -n "$session_id" ]; then
-        apply_cli_session "$pane" "$session_id"
-      fi
-      set_pane_opt "$pane" @muxa_state idle
-      if [ "$kind" = "cursor" ]; then
-        cursor_session_env "$pane"
-      fi
-      ;;
-    session-end)
-      [ -n "$pane" ] || return 0
-      clear_muxa_registration "$pane"
-      ;;
-    busy)
-      [ -n "$pane" ] || return 0
-      set_pane_opt "$pane" @muxa_state busy
-      if [ -n "$session_id" ]; then
-        apply_cli_session "$pane" "$session_id"
-      fi
-      ;;
-    blocked)
-      [ -n "$pane" ] || return 0
-      set_pane_opt "$pane" @muxa_state blocked
-      ;;
-    idle)
-      [ -n "$pane" ] || return 0
-      set_pane_opt "$pane" @muxa_state idle
-      ;;
-    stop)
-      [ -n "$pane" ] || return 0
-      name="$(pane_fmt "$pane" '#{@muxa_name}')"
-      if [ -z "$name" ]; then
-        kind="$(resolve_hook_kind "$pane" "$kind")"
-        hook_register_pane "$pane" "$kind"
-      fi
-      set_pane_opt "$pane" @muxa_state idle
-      ;;
-    *)
-      die "hook: unknown event $event"
-      ;;
-  esac
+  pane="$(this_pane)"
+  pane_is_registered "$pane" && return 0
+  [ -n "$kind" ] || kind="$(detect_kind "$pane")"
+  hook_register_pane "$pane" "$kind"
 }
 
 main() {
@@ -1550,7 +1314,6 @@ main() {
     children) cmd_children "$@" ;;
     send) cmd_send "$@" ;;
     broker) cmd_broker "$@" ;;
-    state) cmd_state "$@" ;;
     hook) cmd_hook "$@" ;;
     *)
       usage >&2

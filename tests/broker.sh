@@ -114,8 +114,8 @@ muxa_as() {
   TMUX_PANE="$pane" muxa "$@"
 }
 
-muxa_as "$parent_pane" register --name parent --kind generic --deliver inject >/dev/null
-muxa_as "$child_pane" register --name child --kind generic --deliver inject --parent parent >/dev/null
+muxa_as "$parent_pane" register --name parent --kind generic >/dev/null
+muxa_as "$child_pane" register --name child --kind generic --parent parent >/dev/null
 
 wait_capture() {
   local pane="$1" needle="$2" tries="${3:-40}" cap
@@ -306,7 +306,7 @@ esac
 tmux -L "$SOCK" split-window -v -t muxa:parent "$composer_loop"
 sleep 0.5
 composer_pane="$(tmux -L "$SOCK" list-panes -t muxa:parent -F '#{pane_id} #{pane_top}' | sort -k2,2n | awk 'END{print $1}')"
-muxa_as "$composer_pane" register --name composer --kind generic --deliver inject --parent parent >/dev/null
+muxa_as "$composer_pane" register --name composer --kind generic --parent parent >/dev/null
 cap_e0="$(tmux -L "$SOCK" capture-pane -p -t "$composer_pane")"
 # Check the border glyph too: if the box does not render, the rest of this
 # case fails as a mysterious delivery timeout instead of naming the cause.
@@ -529,7 +529,7 @@ esac
 tmux -L "$SOCK" new-window -t muxa -n ticker "while true; do echo DRAWING_TICK; sleep 0.15; done"
 sleep 0.4
 ticker_pane="$(tmux -L "$SOCK" list-panes -t muxa:ticker -F '#{pane_id}' | head -1)"
-muxa_as "$ticker_pane" register --name ticker --kind generic --deliver inject --parent parent >/dev/null
+muxa_as "$ticker_pane" register --name ticker --kind generic --parent parent >/dev/null
 # Drawing report window is 1s; wait for %output to land in the hub.
 sleep 1.2
 who_tick="$(muxa_as "$parent_pane" who)"
@@ -538,15 +538,22 @@ st_tick="${st_tick#"${st_tick%%[![:space:]]*}"}"
 st_tick="${st_tick%"${st_tick##*[![:space:]]}"}"
 [ "$st_tick" = "drawing" ] && ok "who STATUS is drawing for a pane emitting %output" \
   || bad "who STATUS is drawing for a pane emitting %output" "status=$st_tick who=$who_tick"
+st_state="$(printf '%s\n' "$who_tick" | awk '$1=="ticker" { print substr($0, 96, 8); exit }')"
+st_state="${st_state#"${st_state%%[![:space:]]*}"}"
+st_state="${st_state%"${st_state##*[![:space:]]}"}"
+[ "$st_state" = "busy" ] && ok "who STATE is busy for a pane emitting %output" \
+  || bad "who STATE is busy for a pane emitting %output" "state=$st_state who=$who_tick"
 who_tickj="$(muxa_as "$parent_pane" who --json)"
 python3 -c '
 import json, sys
 rows = json.loads(sys.stdin.read())
-st = next((r.get("status") for r in rows if r.get("name")=="ticker"), None)
-sys.exit(0 if st=="drawing" else 1)
+row = next((r for r in rows if r.get("name")=="ticker"), None)
+st = row.get("status") if row else None
+state = row.get("state") if row else None
+sys.exit(0 if st=="drawing" and state=="busy" else 1)
 ' <<<"$who_tickj" \
-  && ok "who --json status is drawing for a pane emitting %output" \
-  || bad "who --json status is drawing for a pane emitting %output" "json=$who_tickj"
+  && ok "who --json status is drawing and state is busy for a pane emitting %output" \
+  || bad "who --json status is drawing and state is busy for a pane emitting %output" "json=$who_tickj"
 
 # --- C: broker down + binary hidden → fail closed, nothing pasted ---
 muxa_as "$parent_pane" broker stop >/dev/null || true

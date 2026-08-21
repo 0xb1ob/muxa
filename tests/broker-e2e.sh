@@ -77,9 +77,9 @@ muxa_as() {
 }
 
 log "\$ $ROOT/bin/muxa register --name e2e-parent (pane $parent_pane)"
-muxa_as "$parent_pane" register --name e2e-parent --kind generic --deliver inject | tee -a "$LOG"
+muxa_as "$parent_pane" register --name e2e-parent --kind generic | tee -a "$LOG"
 log "\$ muxa register --name e2e-child --parent e2e-parent (pane $child_pane)"
-muxa_as "$child_pane" register --name e2e-child --kind generic --deliver inject --parent e2e-parent | tee -a "$LOG"
+muxa_as "$child_pane" register --name e2e-child --kind generic --parent e2e-parent | tee -a "$LOG"
 log "\$ muxa broker start"
 muxa_as "$parent_pane" broker start | tee -a "$LOG"
 

@@ -24,12 +24,11 @@ git_ident() {
 seed_muxa_tree() {
   local dest="$1"
   mkdir -p "$dest/bin" "$dest/skills/muxa-parent" "$dest/skills/muxa-worker" \
-    "$dest/hooks/pi" "$dest/tests"
+    "$dest/tests"
   cp "$ROOT/install.sh" "$dest/install.sh"
   cp "$ROOT/bin/muxa" "$dest/bin/muxa"
   cp "$ROOT/skills/muxa-parent/SKILL.md" "$dest/skills/muxa-parent/SKILL.md"
   cp "$ROOT/skills/muxa-worker/SKILL.md" "$dest/skills/muxa-worker/SKILL.md"
-  cp "$ROOT/hooks/pi/muxa.ts" "$dest/hooks/pi/muxa.ts"
   : >"$dest/tests/run.sh"
   printf 'before-squash\n' >"$dest/MARKER"
   chmod +x "$dest/bin/muxa" "$dest/install.sh" "$dest/tests/run.sh"
