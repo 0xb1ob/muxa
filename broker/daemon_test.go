@@ -240,6 +240,63 @@ func TestDaemonLogsStrandedPendingOnShutdown(t *testing.T) {
 	t.Fatalf("restart did not re-adopt the pending queue:\n%s", logs)
 }
 
+func TestDaemonPrunesStaleQueueOnStartup(t *testing.T) {
+	bin := buildBroker(t)
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "broker.sock")
+	pidPath := filepath.Join(dir, "broker.pid")
+	logPath := filepath.Join(dir, "broker.log")
+
+	q, err := OpenQueue(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	writeQueueJSON(t, filepath.Join(dir, "done", "stale.json"), now.Add(-25*time.Hour))
+	writeQueueJSON(t, filepath.Join(dir, "failed", "stale.json"), now.Add(-8*24*time.Hour))
+	_ = q
+
+	starter := exec.Command(bin)
+	starter.Env = append(os.Environ(),
+		"MUXA_BROKER_DIR="+dir,
+		"MUXA_BROKER_SOCK="+sock,
+		"MUXA_BROKER_PID="+pidPath,
+		"MUXA_BROKER_LOG="+logPath,
+		"MUXA_TMUX_BIN="+filepath.Join(dir, "no-such-tmux"),
+		"MUXA_BROKER_FOREGROUND=0",
+		daemonEnv+"=0",
+	)
+	starter.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if b, err := starter.CombinedOutput(); err != nil {
+		t.Fatalf("start broker: %v\n%s", err, b)
+	}
+	if !waitSocket(sock, 5*time.Second) {
+		t.Fatal("daemon never opened the socket")
+	}
+	pid := readPIDFile(t, pidPath)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGTERM) })
+
+	deadline := time.Now().Add(5 * time.Second)
+	var logs string
+	for time.Now().Before(deadline) {
+		b, _ := os.ReadFile(logPath)
+		logs = string(b)
+		if strings.Contains(logs, "pruned 1 done, 1 failed/unknown") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(logs, "pruned 1 done, 1 failed/unknown") {
+		t.Fatalf("startup did not log prune pass:\n%s", logs)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "done", "stale.json")); !os.IsNotExist(err) {
+		t.Fatalf("stale done entry was not pruned: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "failed", "stale.json")); !os.IsNotExist(err) {
+		t.Fatalf("stale failed entry was not pruned: %v", err)
+	}
+}
+
 // TestDaemonRefusesSecondOwner is the daemon-side half of the single-owner
 // invariant. bin/muxa's start lock is the first line of defence, but it can be
 // bypassed — two starters racing a bind, a lock reaped as stale, or someone

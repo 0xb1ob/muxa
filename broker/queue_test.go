@@ -68,3 +68,62 @@ func TestQueueUnknownIsNotPending(t *testing.T) {
 		t.Fatalf("counts pending=%d done=%d failed=%d unknown=%d err=%v", p, d, f, u, err)
 	}
 }
+
+func writeQueueJSON(t *testing.T, path string, mtime time.Time) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(`{"id":"x"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestQueuePrune(t *testing.T) {
+	dir := t.TempDir()
+	q, err := OpenQueue(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	oldDone := now.Add(-25 * time.Hour)
+	freshDone := now.Add(-1 * time.Hour)
+	oldFailed := now.Add(-8 * 24 * time.Hour)
+	freshFailed := now.Add(-1 * 24 * time.Hour)
+	oldUnknown := now.Add(-10 * 24 * time.Hour)
+
+	writeQueueJSON(t, filepath.Join(dir, "done", "stale.json"), oldDone)
+	writeQueueJSON(t, filepath.Join(dir, "done", "fresh.json"), freshDone)
+	writeQueueJSON(t, filepath.Join(dir, "failed", "stale.json"), oldFailed)
+	writeQueueJSON(t, filepath.Join(dir, "failed", "fresh.json"), freshFailed)
+	writeQueueJSON(t, filepath.Join(dir, "unknown", "stale.json"), oldUnknown)
+
+	doneN, failedN, unknownN, err := q.Prune(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doneN != 1 || failedN != 1 || unknownN != 1 {
+		t.Fatalf("prune counts done=%d failed=%d unknown=%d", doneN, failedN, unknownN)
+	}
+	for _, keep := range []string{
+		filepath.Join(dir, "done", "fresh.json"),
+		filepath.Join(dir, "failed", "fresh.json"),
+	} {
+		if _, err := os.Stat(keep); err != nil {
+			t.Fatalf("expected %s to survive prune: %v", keep, err)
+		}
+	}
+	for _, gone := range []string{
+		filepath.Join(dir, "done", "stale.json"),
+		filepath.Join(dir, "failed", "stale.json"),
+		filepath.Join(dir, "unknown", "stale.json"),
+	} {
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
+			t.Fatalf("expected %s pruned, stat err=%v", gone, err)
+		}
+	}
+	p, d, f, u, err := q.Counts()
+	if err != nil || p != 0 || d != 1 || f != 1 || u != 0 {
+		t.Fatalf("counts after prune pending=%d done=%d failed=%d unknown=%d err=%v", p, d, f, u, err)
+	}
+}
