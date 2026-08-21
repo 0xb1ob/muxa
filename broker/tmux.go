@@ -135,3 +135,9 @@ func (t *TMUX) Free(pane string) (bool, error) {
 	}
 	return LooksFree(cap), nil
 }
+
+// CaptureHistory is the visible grid plus scrollback. Confirmation may find a
+// payload here after a TUI has scrolled it off the live view.
+func (t *TMUX) CaptureHistory(pane string) (string, error) {
+	return t.Run([]string{"capture-pane", "-p", "-S", "-", "-t", pane}, nil)
+}

@@ -96,7 +96,7 @@ func main() {
 		sock, os.Getpid(), processGroup(), deadline, poll, quiet)
 	// A restart re-adopts whatever the previous owner had not delivered;
 	// say so, so "queued" with no "delivered" is never a silent hole.
-	if n, _, _, err := q.Counts(); err == nil && n > 0 {
+	if n, _, _, _, err := q.Counts(); err == nil && n > 0 {
 		log.Printf("re-adopted %d pending from %s", n, filepath.Join(dir, "pending"))
 	}
 
@@ -110,7 +110,7 @@ func main() {
 	// files are durable, so nothing is lost either way — but it must be in
 	// the log, not inferred from an empty tail.
 	d.Tick()
-	if n, _, _, err := q.Counts(); err != nil {
+	if n, _, _, _, err := q.Counts(); err != nil {
 		log.Printf("shutdown signal=%s: queue count failed: %v", sig, err)
 	} else if n > 0 {
 		log.Printf("shutdown signal=%s: %d pending left in %s (re-adopted on next start)",
