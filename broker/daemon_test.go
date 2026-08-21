@@ -240,6 +240,94 @@ func TestDaemonLogsStrandedPendingOnShutdown(t *testing.T) {
 	t.Fatalf("restart did not re-adopt the pending queue:\n%s", logs)
 }
 
+// TestDaemonRefusesSecondOwner is the daemon-side half of the single-owner
+// invariant. bin/muxa's start lock is the first line of defence, but it can be
+// bypassed — two starters racing a bind, a lock reaped as stale, or someone
+// running the binary by hand. A second daemon must not unlink the live owner's
+// socket, rebind it, and start racing over pending/.
+func TestDaemonRefusesSecondOwner(t *testing.T) {
+	bin := buildBroker(t)
+	dir := shortTempDir(t)
+	sock := filepath.Join(dir, "broker.sock")
+	pidPath := filepath.Join(dir, "broker.pid")
+	logPath := filepath.Join(dir, "broker.log")
+
+	start := func() ([]byte, error) {
+		c := exec.Command(bin)
+		c.Env = append(os.Environ(),
+			"MUXA_BROKER_DIR="+dir,
+			"MUXA_BROKER_SOCK="+sock,
+			"MUXA_BROKER_PID="+pidPath,
+			"MUXA_BROKER_LOG="+logPath,
+			"MUXA_BROKER_FOREGROUND=0",
+			daemonEnv+"=0",
+		)
+		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		return c.CombinedOutput()
+	}
+
+	if b, err := start(); err != nil {
+		t.Fatalf("first start: %v\n%s", err, b)
+	}
+	if !waitSocket(sock, 5*time.Second) {
+		t.Fatal("first daemon never opened the socket")
+	}
+	first := readPIDFile(t, pidPath)
+	t.Cleanup(func() { _ = syscall.Kill(first, syscall.SIGTERM) })
+
+	// No shell lock anywhere in this path: the binary itself must refuse.
+	if b, err := start(); err != nil {
+		t.Fatalf("second start should exit 0 once the queue has an owner: %v\n%s", err, b)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var logs string
+	for time.Now().Before(deadline) {
+		b, _ := os.ReadFile(logPath)
+		logs = string(b)
+		if strings.Contains(logs, "already owns") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(logs, "already owns") {
+		t.Fatalf("second daemon did not refuse the claimed queue:\n%s", logs)
+	}
+	if n := strings.Count(logs, "listening"); n != 1 {
+		t.Fatalf("want exactly 1 daemon bound, got %d:\n%s", n, logs)
+	}
+	if got := readPIDFile(t, pidPath); got != first {
+		t.Fatalf("pidfile moved from the live owner %d to %d", first, got)
+	}
+	if err := syscall.Kill(first, 0); err != nil {
+		t.Fatalf("first owner %d died: %v", first, err)
+	}
+	if !pingSocket(sock) {
+		t.Fatal("first owner stopped answering after a second start")
+	}
+
+	// Once the owner is gone the lock must be free again, or every later
+	// start would refuse and sends would fail closed forever.
+	_ = syscall.Kill(first, syscall.SIGTERM)
+	for i := 0; i < 100; i++ {
+		if err := syscall.Kill(first, 0); err != nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if b, err := start(); err != nil {
+		t.Fatalf("restart after the owner exited: %v\n%s", err, b)
+	}
+	if !waitSocket(sock, 5*time.Second) {
+		b, _ := os.ReadFile(logPath)
+		t.Fatalf("no daemon took the freed queue:\n%s", b)
+	}
+	third := readPIDFile(t, pidPath)
+	t.Cleanup(func() { _ = syscall.Kill(third, syscall.SIGTERM) })
+	if third == first {
+		t.Fatal("pidfile still points at the dead owner")
+	}
+}
+
 // TestDaemonResolvesRelativeDir covers a relative MUXA_BROKER_DIR. The daemon
 // runs with cwd=/ so it does not pin the caller's worktree; if it re-resolved
 // the path itself it would try to open /<dir> and die on a read-only root,

@@ -373,6 +373,80 @@ else
 fi
 sleep 0.2
 
+# --- I: a concurrent auto-start must not race the first daemon's bind ---
+# ensure_broker used to drop start.lock as soon as it had backgrounded the
+# broker, but the daemon re-execs with setsid and binds a moment later. In that
+# gap a second starter took the lock, deleted broker.sock/broker.pid, and ran a
+# second daemon against the same dir — two owners polling one pending/. The
+# shim below binds late so the gap is wide on purpose; without the fix this
+# logs two "listening" lines.
+muxa_as "$parent_pane" broker stop >/dev/null 2>&1 || true
+sleep 0.3
+race_shim="$HOME_ISO/slow-broker"
+cat >"$race_shim" <<SHIM
+#!/bin/sh
+sleep 2
+exec "$ROOT/bin/muxa-broker" "\$@"
+SHIM
+chmod +x "$race_shim"
+: >"$MUXA_BROKER_DIR/broker.log"
+rm -f "$MUXA_BROKER_SOCK" "$MUXA_BROKER_PID"
+rmdir "$MUXA_BROKER_DIR/start.lock" 2>/dev/null || true
+( MUXA_BROKER_BIN="$race_shim" muxa_as "$parent_pane" broker start >/dev/null 2>&1 ) &
+race_a=$!
+# Mid-gap: the shim has not exec'd the real binary yet, so nothing is bound.
+# The lock must still be held here — that is the whole fix. Asserting the held
+# lock rather than racing a second starter keeps this deterministic; the
+# destructive window (a non-owner deleting a *live* socket) is only a few
+# hundred ms wide and would make the test flaky either way.
+sleep 0.8
+if muxa_as "$parent_pane" broker status >/dev/null 2>&1; then
+  bad "I precondition: daemon not yet bound mid-gap" "socket already answering"
+else
+  ok "I precondition: daemon not yet bound mid-gap"
+fi
+if [ -d "$MUXA_BROKER_DIR/start.lock" ]; then
+  ok "I start.lock is held until the daemon answers"
+else
+  bad "I start.lock is held until the daemon answers" \
+      "lock already released while nothing was bound — a second starter could now delete the socket and pidfile of the daemon coming up"
+fi
+# A second starter arriving in the gap must not be able to claim the lock.
+if mkdir "$MUXA_BROKER_DIR/start.lock" 2>/dev/null; then
+  bad "I a second starter cannot claim the lock mid-gap" "took the lock"
+  rmdir "$MUXA_BROKER_DIR/start.lock" 2>/dev/null || true
+else
+  ok "I a second starter cannot claim the lock mid-gap"
+fi
+( MUXA_BROKER_BIN="$race_shim" muxa_as "$parent_pane" broker start >/dev/null 2>&1 ) &
+race_b=$!
+wait "$race_a" "$race_b" 2>/dev/null || true
+sleep 0.5
+owners="$(grep -c 'listening' "$MUXA_BROKER_DIR/broker.log" 2>/dev/null || true)"
+[ "$owners" = 1 ] && ok "I concurrent starts leave exactly one queue owner" \
+  || bad "I concurrent starts leave exactly one queue owner" \
+         "listening lines=$owners log: $(cat "$MUXA_BROKER_DIR/broker.log" 2>/dev/null)"
+race_pid="$(cat "$MUXA_BROKER_PID" 2>/dev/null || true)"
+if [ -n "$race_pid" ] && kill -0 "$race_pid" 2>/dev/null; then
+  ok "I the surviving owner is the one in the pidfile"
+else
+  bad "I the surviving owner is the one in the pidfile" "pid=${race_pid:-none}"
+fi
+if [ -d "$MUXA_BROKER_DIR/start.lock" ]; then
+  bad "I start.lock is released once the daemon is up" "lock still held"
+else
+  ok "I start.lock is released once the daemon is up"
+fi
+# The queue must still work through a real daemon afterwards.
+tok_i="BRKI_$$"
+settle "$child_pane"
+muxa_as "$parent_pane" send child "$tok_i" >/dev/null
+cap_i="$(wait_capture "$child_pane" "$tok_i" 60 || true)"
+case "$cap_i" in
+  *"$tok_i"*) ok "I the single owner still delivers" ;;
+  *) bad "I the single owner still delivers" "cap: $cap_i" ;;
+esac
+
 # --- C: broker down + binary hidden → fail closed, nothing pasted ---
 muxa_as "$parent_pane" broker stop >/dev/null || true
 sleep 0.1

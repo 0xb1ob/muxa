@@ -838,7 +838,7 @@ sys.exit(0 if resp.get("ok") else 1)
 # setsid(1), so the escape has to come from the binary. Do not write $! here —
 # it is the forking parent, which exits in milliseconds.
 ensure_broker() {
-  local bin i lock runbin
+  local bin i lock runbin held=0 rc=1
   if [ "${MUXA_BROKER:-1}" = "0" ]; then
     return 1
   fi
@@ -854,6 +854,7 @@ ensure_broker() {
     rmdir "$lock" 2>/dev/null || true
   fi
   if mkdir "$lock" 2>/dev/null; then
+    held=1
     runbin="$BROKER_DIR/muxa-broker"
     if ! cp "$bin" "$runbin"; then
       rmdir "$lock" 2>/dev/null || true
@@ -880,15 +881,28 @@ ensure_broker() {
     MUXA_BROKER_DAEMONIZED=0 \
       nohup "$runbin" >>"$BROKER_DIR/broker.log" 2>&1 &
     disown 2>/dev/null || true
-    rmdir "$lock" 2>/dev/null || true
   fi
+  # Hold the lock across the wait, not just the launch. The daemon re-execs
+  # with setsid and only binds the socket a moment later; releasing at launch
+  # leaves a gap in which a second starter takes the lock, deletes
+  # broker.sock/broker.pid out from under the daemon coming up, and runs a
+  # second one against the same MUXA_BROKER_DIR — two owners polling one
+  # pending/. A starter that did not get the lock never touches those files;
+  # it only waits for whoever holds it. muxa-broker also flocks the queue, so
+  # a bypassed lock still cannot produce a second owner.
   i=0
   while [ "$i" -lt 120 ]; do
-    broker_ping && return 0
+    if broker_ping; then
+      rc=0
+      break
+    fi
     sleep 0.05
     i=$((i + 1))
   done
-  return 1
+  if [ "$held" -eq 1 ]; then
+    rmdir "$lock" 2>/dev/null || true
+  fi
+  return "$rc"
 }
 
 broker_enqueue() {

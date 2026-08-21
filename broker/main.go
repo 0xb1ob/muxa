@@ -47,6 +47,16 @@ func main() {
 	// be explicit: a stray SIGHUP must not end the queue.
 	signal.Ignore(syscall.SIGHUP)
 
+	// Claim the queue before touching the socket or the pidfile, so a second
+	// daemon cannot unlink a live owner's socket and start racing it over
+	// pending/. Exit 0: the queue has an owner, which is all the caller wanted.
+	owner, err := lockQueue(filepath.Join(dir, "owner.lock"))
+	if err != nil {
+		log.Printf("another broker already owns %s (%v); exiting", dir, err)
+		return
+	}
+	defer owner.Close()
+
 	q, err := OpenQueue(dir)
 	if err != nil {
 		log.Fatal(err)
