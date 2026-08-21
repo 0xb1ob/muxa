@@ -17,6 +17,11 @@ muxa — message other AI CLIs in this tmux server
                                 default: split into a tiled grid in this window (--window for a new window)
                                 child cwd: --cwd, else process PWD, else this pane's path
                                 warns on stderr if a live registered worker already has that cwd
+  muxa dispatch [--name NAME] [--cwd DIR] [--brief-file F] -- COMMAND...
+                                spawn + first brief (stdin or --brief-file, never a positional string)
+                                stdout: {"name","id","pane","cwd","state":"dispatched","from","to"}
+                                broker waits until the CLI has drawn, gone quiet, and looks free
+                                if it never becomes ready: [muxa] from=broker in the parent, child unbriefed
   muxa who [--json]                 roster (tmux pane options, CLI session id, cwd, STATUS)
   muxa whoami                       this pane's alias
   muxa unregister NAME|ID           clear muxa registration; leave pane running
@@ -1017,12 +1022,16 @@ ensure_broker() {
 }
 
 broker_enqueue() {
-  local id="$1" pane="$2" from="$3" to="$4" text="$5"
+  local id="$1" pane="$2" from="$3" to="$4" text="$5" kind="${6:-}" parent_pane="${7:-}"
   [ -n "${BROKER_SOCK:-}" ] || broker_setup_paths
-  python3 - "$BROKER_SOCK" "$id" "$pane" "$from" "$to" "$text" <<'PY'
+  python3 - "$BROKER_SOCK" "$id" "$pane" "$from" "$to" "$text" "$kind" "$parent_pane" <<'PY'
 import json, socket, sys
-sockpath, mid, pane, frm, to, text = sys.argv[1:7]
+sockpath, mid, pane, frm, to, text, kind, parent_pane = sys.argv[1:9]
 req = {"op": "enqueue", "id": mid, "pane": pane, "from": frm, "to": to, "text": text}
+if kind:
+    req["kind"] = kind
+if parent_pane:
+    req["parent_pane"] = parent_pane
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.settimeout(3)
 s.connect(sockpath)
@@ -1241,6 +1250,76 @@ EOF
 }
 
 cmd_spawn() {
+  spawn_child "$@"
+  printf 'spawned %s id=%s parent=%s kind=%s pane=%s cwd=%s\n' \
+    "$SPAWN_NAME" "$SPAWN_ID" "$SPAWN_PARENT" "$SPAWN_KIND" "$SPAWN_PANE" "$SPAWN_CWD"
+}
+
+# Spawn + enqueue the first brief. stdout is JSON (send --json shape plus
+# name/cwd/state). The broker waits until the child has drawn, gone quiet,
+# and LooksFree — then pastes. A CLI that never becomes ready fails to the
+# parent as [muxa] from=broker; the brief is not timeout-pasted into the child.
+cmd_dispatch() {
+  need_tmux
+  local brief_file="" brief id text parent_pane
+  local args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --brief-file)
+        [ $# -ge 2 ] || die "dispatch: --brief-file requires a path"
+        brief_file="$2"
+        shift 2
+        ;;
+      --)
+        args+=("$@")
+        break
+        ;;
+      *)
+        args+=("$1")
+        shift
+        ;;
+    esac
+  done
+  if [ -n "$brief_file" ]; then
+    [ -f "$brief_file" ] || die "dispatch: --brief-file is not a file: $brief_file"
+    brief="$(cat "$brief_file")"
+  else
+    if [ -t 0 ]; then
+      die "dispatch: brief required (--brief-file FILE or stdin)"
+    fi
+    brief="$(cat)"
+  fi
+  [ -n "$(printf '%s' "$brief" | tr -d '[:space:]')" ] || die "dispatch: empty brief"
+  set --
+  if [ ${#args[@]} -gt 0 ]; then
+    set -- "${args[@]}"
+  fi
+  spawn_child "$@"
+  parent_pane="$(this_pane)"
+  text="$(format_one "$SPAWN_PARENT" "" "$brief")"
+  id="$(date +%s)-$$-$(printf '%05d' "$RANDOM")"
+  if [ "${MUXA_BROKER:-1}" = "0" ]; then
+    die "broker is required (MUXA_BROKER=0 is not supported)"
+  fi
+  ensure_broker || die "broker unreachable (could not start muxa-broker)"
+  broker_enqueue "$id" "$SPAWN_PANE" "$SPAWN_PARENT" "$SPAWN_NAME" "$text" "dispatch" "$parent_pane" \
+    || die "broker enqueue failed"
+  python3 -c '
+import json, sys
+json.dump({
+    "name": sys.argv[1],
+    "id": sys.argv[2],
+    "pane": sys.argv[3],
+    "cwd": sys.argv[4],
+    "state": "dispatched",
+    "from": sys.argv[5],
+    "to": sys.argv[1],
+}, sys.stdout, separators=(",", ":"), ensure_ascii=False)
+sys.stdout.write("\n")
+' "$SPAWN_NAME" "$id" "$SPAWN_PANE" "$SPAWN_CWD" "$SPAWN_PARENT"
+}
+
+spawn_child() {
   need_tmux
   local pane name kind new_window=0 parent id cwd cwd_flag="" sess quoted child cmdpath
   local explicit_cmd=0 cmd arg
@@ -1348,7 +1427,12 @@ cmd_spawn() {
   set_pane_opt "$child" @muxa_deliver "$(default_deliver "$kind")"
   set_pane_opt "$child" @muxa_state idle
   set_pane_title "$child" "$name"
-  printf 'spawned %s id=%s parent=%s kind=%s pane=%s cwd=%s\n' "$name" "$id" "$parent" "$kind" "$child" "$cwd"
+  SPAWN_NAME="$name"
+  SPAWN_ID="$id"
+  SPAWN_PANE="$child"
+  SPAWN_CWD="$cwd"
+  SPAWN_KIND="$kind"
+  SPAWN_PARENT="$parent"
 }
 
 hook_register_pane() {
@@ -1455,6 +1539,7 @@ main() {
     version|-v|--version) printf '%s\n' "$VERSION" ;;
     register) cmd_register "$@" ;;
     spawn) cmd_spawn "$@" ;;
+    dispatch) cmd_dispatch "$@" ;;
     who|ls|roster) cmd_who "$@" ;;
     tail) cmd_tail "$@" ;;
     unregister) cmd_unregister "$@" ;;

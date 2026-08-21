@@ -18,6 +18,7 @@ type Deliverer struct {
 	pastes   []string          // test hook: pane ids pasted, in order
 	prev     map[string]string // last capture-pane per pane, for two-signal
 	held     map[string]bool   // already logged "holding past deadline"
+	drew     map[string]bool   // pane has shown visible content (dispatch ready)
 }
 
 func NewDeliverer(q *Queue, t *TMUX, poll time.Duration) *Deliverer {
@@ -32,6 +33,7 @@ func NewDeliverer(q *Queue, t *TMUX, poll time.Duration) *Deliverer {
 		inflight: map[string]bool{},
 		prev:     map[string]string{},
 		held:     map[string]bool{},
+		drew:     map[string]bool{},
 	}
 }
 
@@ -101,9 +103,17 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		log.Printf("free %s: %v", m.Pane, err)
 		free = false
 	}
+	if m.isDispatch() && !d.sawDraw(m.Pane) {
+		// Cold CLI: empty capture LooksFree, but nothing has painted yet.
+		free = false
+	}
 	if !free {
 		if now >= m.DeadlineUnix {
-			d.noteHeld(m)
+			if m.isDispatch() {
+				d.failDispatch(m)
+			} else {
+				d.noteHeld(m)
+			}
 		}
 		return
 	}
@@ -143,6 +153,40 @@ func (d *Deliverer) noteHeld(m *Msg) {
 	d.held[m.ID] = true
 	d.mu.Unlock()
 	log.Printf("holding %s → %s id=%s (pane not free after deadline; left queued)", m.From, m.To, m.ID)
+}
+
+func (d *Deliverer) failDispatch(m *Msg) {
+	log.Printf("dispatch failed %s → %s id=%s (never ready; left unbriefed)", m.From, m.To, m.ID)
+	_ = d.Q.MarkFailed(m)
+	if m.ParentPane == "" {
+		return
+	}
+	fail := &Msg{
+		Pane:         m.ParentPane,
+		From:         "broker",
+		To:           m.From,
+		Text:         dispatchFailText(m),
+		DeadlineUnix: d.now().Add(24 * time.Hour).Unix(),
+	}
+	if err := d.Q.Put(fail); err != nil {
+		log.Printf("dispatch fail notify %s: %v", m.ID, err)
+	}
+}
+
+func dispatchFailText(m *Msg) string {
+	return "[muxa] from=broker\n" +
+		"dispatch failed: " + m.To + " pane=" + m.Pane + " never became ready before deadline\n" +
+		"id=" + m.ID + "\n" +
+		"Do not reply.\n"
+}
+
+func (d *Deliverer) sawDraw(pane string) bool {
+	if d.Ctrl != nil && d.Ctrl.EverDrew(pane) {
+		return true
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.drew[pane]
 }
 
 // canPaste is the single paste gate for both the poll loop and control-mode
@@ -190,8 +234,15 @@ func (d *Deliverer) observe(pane string) (parserFree, twoFree bool, err error) {
 	d.mu.Lock()
 	prev := d.prev[pane]
 	d.prev[pane] = snap.Capture
+	if visibleContent(snap.Capture) {
+		d.drew[pane] = true
+	}
 	d.mu.Unlock()
 	return LooksFree(snap.Capture), TwoSignalFree(prev, snap.Capture, snap.CursorY, snap.CursorX), nil
+}
+
+func visibleContent(capture string) bool {
+	return strings.TrimSpace(stripANSI(capture)) != ""
 }
 
 func (d *Deliverer) confirmed(m *Msg) bool {
