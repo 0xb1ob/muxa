@@ -113,13 +113,20 @@ func TestDaemonSurvivesCallerProcessGroupKill(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGTERM) })
 
-	// The whole point: a different session, so no caller-scoped signal reaches it.
-	sid, err := syscall.Getsid(pid)
+	// The whole point: its own process group, so no caller-scoped signal
+	// reaches it. setsid makes the daemon a group leader, hence pgid == pid.
+	dpgid, err := syscall.Getpgid(pid)
 	if err != nil {
-		t.Fatalf("getsid(%d): %v", pid, err)
+		t.Fatalf("getpgid(%d): %v", pid, err)
 	}
-	if mine, _ := syscall.Getsid(0); sid == mine {
-		t.Fatalf("daemon stayed in the test's session %d", sid)
+	if dpgid != pid {
+		t.Fatalf("daemon pgid=%d pid=%d: not a group leader, so it did not setsid", dpgid, pid)
+	}
+	if dpgid == pgid {
+		t.Fatalf("daemon stayed in the starter's process group %d", pgid)
+	}
+	if mine, _ := syscall.Getpgid(0); dpgid == mine {
+		t.Fatalf("daemon stayed in the test's process group %d", mine)
 	}
 
 	// Signal the starter's entire process group, the way a tool-call teardown does.

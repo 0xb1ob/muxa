@@ -66,8 +66,8 @@ func main() {
 	stop := make(chan struct{})
 	go d.Loop(stop)
 	go s.Serve()
-	log.Printf("listening %s pid=%d sid=%d deadline=%s poll=%s",
-		sock, os.Getpid(), sessionID(), deadline, poll)
+	log.Printf("listening %s pid=%d pgid=%d deadline=%s poll=%s",
+		sock, os.Getpid(), processGroup(), deadline, poll)
 	// A restart re-adopts whatever the previous owner had not delivered;
 	// say so, so "queued" with no "delivered" is never a silent hole.
 	if n, _, _, err := q.Counts(); err == nil && n > 0 {
@@ -94,14 +94,16 @@ func main() {
 	}
 }
 
-// sessionID reports our session id, so the log proves the daemon detached
-// from whichever shell ran `muxa send`.
-func sessionID() int {
-	sid, err := syscall.Getsid(0)
+// processGroup reports our process group, so the log proves the daemon
+// detached from whichever shell ran `muxa send`: after setsid it leads its own
+// group, so pgid == pid. syscall.Getsid is darwin-only, and the group is the
+// thing a caller-scoped signal would target anyway.
+func processGroup() int {
+	pgid, err := syscall.Getpgid(0)
 	if err != nil {
 		return 0
 	}
-	return sid
+	return pgid
 }
 
 // abs resolves p against the current cwd, leaving it alone if that fails.

@@ -230,9 +230,11 @@ sleep 0.5
 composer_pane="$(tmux -L "$SOCK" list-panes -t muxa:parent -F '#{pane_id} #{pane_top}' | sort -k2,2n | awk 'END{print $1}')"
 muxa_as "$composer_pane" register --name composer --kind generic --deliver inject --parent parent >/dev/null
 cap_e0="$(tmux -L "$SOCK" capture-pane -p -t "$composer_pane")"
+# Check the border glyph too: if the box does not render, the rest of this
+# case fails as a mysterious delivery timeout instead of naming the cause.
 case "$cap_e0" in
-  *"Composer 2.5 Fast"*) ok "E composer pane painted its box" ;;
-  *) bad "E composer pane painted its box" "cap: $cap_e0" ;;
+  *"Composer 2.5 Fast"*"▀"*|*"▀"*"Composer 2.5 Fast"*) ok "E composer pane painted its box" ;;
+  *) bad "E composer pane painted its box (half-block borders missing?)" "cap: $cap_e0" ;;
 esac
 tok_e="BRKE_$$"
 start_e="$(date +%s)"
