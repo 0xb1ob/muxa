@@ -55,8 +55,6 @@ paste into a busy pane just because the clock ran out. After paste,
 collapse) was visible; if the pane went busy without that, the message is
 filed `unknown/` and is not retried. If the
 broker is down, `muxa send` exits non-zero and pastes nothing.
-`MUXA_BROKER=0` is an error — it does not restore the old bash delivery
-stack.
 
 The broker daemonizes itself with `setsid(2)` and owns its pidfile. That is
 load-bearing, not tidiness: `nohup … & disown` leaves the process in the
@@ -165,7 +163,7 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 | Command | What |
 | --- | --- |
 | `muxa register [--name --id --parent --kind]` | Set pane identity (optional; spawn already does this for children) |
-| `muxa spawn [--name NAME] [--cwd DIR] [--split] [--window] -- CMD` | Split a child pane into a tiled grid in the parent's window. Child cwd is `--cwd`, else process `$PWD`, else the parent pane path. Warns on stderr if a live worker already has that cwd (does not refuse). Omit `--name` for a unique `adjective-noun` alias. `--window` for a dedicated window; `--split` is compat |
+| `muxa spawn [--name NAME] [--cwd DIR] [--window] -- CMD` | Split a child pane into a tiled grid in the parent's window. Child cwd is `--cwd`, else process `$PWD`, else the parent pane path. Warns on stderr if a live worker already has that cwd (does not refuse). Omit `--name` for a unique `adjective-noun` alias. `--window` for a dedicated window |
 | `muxa dispatch [--name NAME] [--cwd DIR] [--brief-file F] -- CMD` | Spawn + first brief. Brief on stdin or `--brief-file`. stdout `{"name","id","pane","cwd","state":"dispatched","from","to"}`. Broker waits for drawn-then-quiet-and-free; never-ready mails `[muxa] from=broker` to the parent |
 | `muxa who` | Roster (name, id, session, parent, cwd, STATE, STATUS, …) |
 | `muxa who --json` | Same roster as objects (`parent`/`session` are `null` when empty; `state` is `idle`/`busy` from the broker drawing list). Requires `muxa-broker` on disk: `bin/muxa` delegates JSON encoding to the broker CLI (`who-json`), not to a daemon RPC, but the binary must exist and be executable |
@@ -195,7 +193,6 @@ helper (`tests/jsonhelper/`); it is not installed.
 
 | Variable | Default | What |
 | --- | --- | --- |
-| `MUXA_BROKER` | `1` | `0` is an error (broker is required) |
 | `MUXA_BROKER_DIR` | `<runtime>/broker` | File-backed queue + pidfile + log |
 | `MUXA_BROKER_SOCK` | `$MUXA_BROKER_DIR/broker.sock` | Unix socket |
 | `MUXA_BROKER_PID` | `$MUXA_BROKER_DIR/broker.pid` | Pidfile |

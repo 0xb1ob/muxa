@@ -15,6 +15,7 @@ esac
 # darwin 25+ aborts a test binary without LC_UUID; only the external linker emits it.
 "$GO" test "${ldflags[@]}" "$ROOT/broker"
 "$GO" test "${ldflags[@]}" "$ROOT/tests/jsonhelper"
+"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-broker" "$ROOT/broker"
 "$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-test-json" "$ROOT/tests/jsonhelper"
 if [ "$(uname -s)" = Darwin ]; then
   xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true

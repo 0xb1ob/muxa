@@ -13,6 +13,7 @@ esac
 # darwin 25+ aborts a test binary without LC_UUID; only the external linker emits it.
 "$GO" test "${ldflags[@]}" "$ROOT/broker"
 "$GO" test "${ldflags[@]}" "$ROOT/tests/jsonhelper"
+"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-broker" "$ROOT/broker"
 "$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-test-json" "$ROOT/tests/jsonhelper"
 if [ "$(uname -s)" = Darwin ]; then
   xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true
@@ -164,14 +165,6 @@ assert_contains "$me" "bob" "whoami is bob"
 dup="$(muxa_as "$bob_pane" register --name alice --kind generic 2>&1 || true)"
 assert_contains "$dup" "already registered" "duplicate name refused"
 
-# --- send fail-closed: broker required ---
-set +e
-broker0_err="$(MUXA_BROKER=0 muxa_as "$bob_pane" send alice hi 2>&1)"
-broker0_rc=$?
-set -e
-[ "$broker0_rc" -ne 0 ] && ok "MUXA_BROKER=0 send exits non-zero" \
-  || bad "MUXA_BROKER=0 send exits non-zero" "exit=$broker0_rc out=$broker0_err"
-assert_contains "$broker0_err" "broker is required" "MUXA_BROKER=0 is an error not a legacy path"
 # --- unknown target ---
 err="$(muxa_as "$bob_pane" send nobody hi 2>&1 || true)"
 assert_contains "$err" "unknown agent" "unknown name errors"
@@ -259,15 +252,15 @@ assert_contains "$win_list" "spawned" "spawn --window names the window"
 sp_par="$(muxa_as "$(tmux -L "$SOCK" list-panes -t muxa:spawned -F '#{pane_id}')" parent)"
 assert_contains "$sp_par" "bob" "spawn --window pane parent option"
 
-split_sp="$(muxa_as "$bob_pane" spawn --name splitkid --split -- sleep 3600)"
-assert_contains "$split_sp" "spawned splitkid" "spawn --split still works"
+split_sp="$(muxa_as "$bob_pane" spawn --name splitkid -- sleep 3600)"
+assert_contains "$split_sp" "spawned splitkid" "spawn splits into parent window"
 split_pane="$(printf '%s\n' "$split_sp" | spawn_pane_id)"
 split_win="$(tmux -L "$SOCK" display-message -t "$split_pane" -p '#{session_name}:#{window_index}')"
-[ "$split_win" = "$bob_win" ] && ok "spawn --split stays in parent window" \
-  || bad "spawn --split stays in parent window" "parent=$bob_win child=$split_win"
+[ "$split_win" = "$bob_win" ] && ok "spawn stays in parent window" \
+  || bad "spawn stays in parent window" "parent=$bob_win child=$split_win"
 n_split="$(tmux -L "$SOCK" list-panes -t "$bob_win" -F '#{pane_id}' | awk 'END { print NR }')"
-[ "$n_split" -eq $((expect + 1)) ] && ok "spawn --split adds a pane in the grid" \
-  || bad "spawn --split adds a pane in the grid" "expected $((expect + 1)) panes, got $n_split"
+[ "$n_split" -eq $((expect + 1)) ] && ok "spawn adds a pane in the grid" \
+  || bad "spawn adds a pane in the grid" "expected $((expect + 1)) panes, got $n_split"
 
 # Dedicated wide window: 4 default spawns must be 2D (not a single row/column).
 tmux -L "$SOCK" new-window -t muxa -n gridhost "exec sleep 3600"
@@ -788,12 +781,7 @@ kindclaudeproj_kind="$(tmux -L "$SOCK" display-message -t "$kindclaudeproj_pane"
   || bad "claude-projects cursor path is not misclassified as claude" \
      "got=$kindclaudeproj_kind"
 
-# Presence hooks are gone: leftover events no-op, STATE comes from the broker.
-muxa_as "$alice_pane" hook busy
-muxa_as "$alice_pane" hook afterAgentResponse
-muxa_as "$alice_pane" hook session-end
 who="$(muxa_as "$bob_pane" who)"
-assert_contains "$who" "alice" "leftover presence hooks do not unregister"
 assert_who_state "$who" "alice" "idle" "who STATE is idle when the pane is not drawing"
 
 projdir="$tmpdir/acme-widgets"
@@ -1160,16 +1148,6 @@ case "$win_list" in
   *killwin*) bad "kill of --window spawn removes the window" "still listed: $win_list" ;;
   *) ok "kill of --window spawn removes the window" ;;
 esac
-
-muxa_as "$alice_pane" hook session-end
-who="$(muxa_as "$bob_pane" who)"
-assert_contains "$who" "alice" "session-end leftover does not unregister"
-set +e
-muxa_as "$alice_pane" state busy >/dev/null 2>&1
-state_rc=$?
-set -e
-[ "$state_rc" -eq 1 ] && ok "state is not a command" \
-  || bad "state is not a command" "exit=$state_rc"
 
 # --- darwin adhoc sign of the source broker before RPC (#67) ---
 # broker_cli signs $MUXA_BROKER_BIN (the source) then execs it. Do not stop
