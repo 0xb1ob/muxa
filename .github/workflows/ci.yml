@@ -25,5 +25,10 @@ jobs:
           go-version: "1.21"
       - name: Run tests
         run: |
-          go test ./broker/
+          # darwin 25+ requires LC_UUID on the test binary; linux is unaffected.
+          if [ "$(uname -s)" = Darwin ]; then
+            go test -ldflags=-linkmode=external ./broker/
+          else
+            go test ./broker/
+          fi
           tests/run.sh && tests/tmux-facts.sh && tests/install.sh && tests/broker.sh

@@ -102,7 +102,10 @@ verified against that release's `SHA256SUMS`, and installed next to `muxa`
 Pin with `MUXA_BROKER_VERSION=<tag>`, or point at your own build with
 `MUXA_BROKER_URL=…`. `.github/workflows/release.yml` builds and attaches the
 assets for every tag (darwin builds use the external linker so the Mach-O has
-`LC_UUID`, which darwin 25+ requires).
+`LC_UUID`, which darwin 25+ requires). The same flag is required for
+`go test` on darwin: the internal linker omits `LC_UUID` from `broker.test`,
+and dyld aborts before any test runs. `tests/run.sh` and `tests/broker.sh`
+pass `-ldflags=-linkmode=external` on Darwin; linux is unchanged.
 
 From a git checkout (development):
 
@@ -176,7 +179,9 @@ tests/tmux-facts.sh   # version-sensitive tmux behaviour muxa depends on
 ```
 
 Needs `tmux`, `python3`, and — for the broker tests only, not for install —
-Go 1.21+. Uses a private tmux socket, not your session.
+Go 1.21+. On darwin 25+, `go test` must use `-ldflags=-linkmode=external`
+(same LC_UUID requirement as the release broker build). Uses a private tmux
+socket, not your session.
 `muxa jobs` tests also need [`br`](https://github.com/Dicklesworthstone/beads_rust) on `PATH`.
 
 ## Environment

@@ -10,6 +10,8 @@ ldflags=()
 case "$(uname -s)" in
   Darwin) ldflags=(-ldflags=-linkmode=external) ;;
 esac
+# darwin 25+ aborts a test binary without LC_UUID; only the external linker emits it.
+"$GO" test "${ldflags[@]}" "$ROOT/broker"
 "$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-broker" "$ROOT/broker"
 if [ "$(uname -s)" = Darwin ]; then
   xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true
