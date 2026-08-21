@@ -12,10 +12,14 @@ case "$(uname -s)" in
 esac
 # darwin 25+ aborts a test binary without LC_UUID; only the external linker emits it.
 "$GO" test "${ldflags[@]}" "$ROOT/broker"
+"$GO" test "${ldflags[@]}" "$ROOT/tests/jsonhelper"
 "$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-broker" "$ROOT/broker"
+"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-test-json" "$ROOT/tests/jsonhelper"
 if [ "$(uname -s)" = Darwin ]; then
   xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true
   codesign -s - --force --timestamp=none "$ROOT/bin/muxa-broker" 2>/dev/null || true
+  xattr -c "$ROOT/bin/muxa-test-json" 2>/dev/null || true
+  codesign -s - --force --timestamp=none "$ROOT/bin/muxa-test-json" 2>/dev/null || true
 fi
 
 for skill in muxa-parent muxa-worker; do
@@ -99,20 +103,20 @@ same_dir() {
 }
 
 who_json_get() {
-  printf '%s' "$1" | muxa-broker json-get "$2" "$3"
+  printf '%s' "$1" | muxa-test-json json-get "$2" "$3"
 }
 
 who_json_is_null() {
   local rc
   set +e
-  printf '%s' "$1" | muxa-broker json-get "$2" "$3" >/dev/null
+  printf '%s' "$1" | muxa-test-json json-get "$2" "$3" >/dev/null
   rc=$?
   set -e
   [ "$rc" -eq 3 ]
 }
 
 json_get() {
-  printf '%s' "$1" | muxa-broker json-get "$2"
+  printf '%s' "$1" | muxa-test-json json-get "$2"
 }
 
 pyc="$(grep -c python3 "$ROOT/bin/muxa" || true)"
@@ -161,21 +165,13 @@ assert_contains "$me" "bob" "whoami is bob"
 dup="$(muxa_as "$bob_pane" register --name alice --kind generic 2>&1 || true)"
 assert_contains "$dup" "already registered" "duplicate name refused"
 
-# --- send fail-closed: broker required ---
-set +e
-broker0_err="$(MUXA_BROKER=0 muxa_as "$bob_pane" send alice hi 2>&1)"
-broker0_rc=$?
-set -e
-[ "$broker0_rc" -ne 0 ] && ok "MUXA_BROKER=0 send exits non-zero" \
-  || bad "MUXA_BROKER=0 send exits non-zero" "exit=$broker0_rc out=$broker0_err"
-assert_contains "$broker0_err" "broker is required" "MUXA_BROKER=0 is an error not a legacy path"
 # --- unknown target ---
 err="$(muxa_as "$bob_pane" send nobody hi 2>&1 || true)"
 assert_contains "$err" "unknown agent" "unknown name errors"
 
 # --- unique ids ---
-id_a="$(muxa_as "$alice_pane" id)"
-id_b="$(muxa_as "$bob_pane" id)"
+id_a="$(tmux -L "$SOCK" display-message -p -t "$alice_pane" '#{@muxa_id}')"
+id_b="$(tmux -L "$SOCK" display-message -p -t "$bob_pane" '#{@muxa_id}')"
 [ -n "$id_a" ] && [ -n "$id_b" ] && [ "$id_a" != "$id_b" ] && ok "ids unique" || bad "ids unique" "a=$id_a b=$id_b"
 
 # --- parent/child ACL ---
@@ -192,9 +188,6 @@ who="$(muxa_as "$bob_pane" who)"
 assert_contains "$who" "carol" "who lists child carol"
 par="$(muxa_as "$carol_pane" parent)"
 assert_contains "$par" "bob" "carol parent is bob"
-kids="$(muxa_as "$bob_pane" children)"
-assert_contains "$kids" "carol" "bob children include carol"
-assert_contains "$kids" "dave" "bob children include dave"
 
 sent="$(muxa_as "$bob_pane" send carol 'from-parent')"
 assert_contains "$sent" "queued bob → carol" "parent → child allowed"
@@ -210,16 +203,6 @@ assert_contains "$sib" "forbidden" "sibling send refused"
 sib2="$(muxa_as "$alice_pane" send carol 'nope' 2>&1 || true)"
 assert_contains "$sib2" "forbidden" "sibling alice → carol refused"
 
-# --- send --all dedupes duplicate roster names ---
-saved_dave_name="$(tmux -L "$SOCK" display-message -p -t "$dave_pane" '#{@muxa_name}')"
-tmux -L "$SOCK" set-option -p -t "$dave_pane" @muxa_name carol
-marker="send-all-dedupe-$$"
-all_out="$(muxa_as "$bob_pane" send --no-reply --all "$marker")"
-count="$(printf '%s\n' "$all_out" | grep -c "queued bob → carol" || true)"
-tmux -L "$SOCK" set-option -p -t "$dave_pane" @muxa_name "$saved_dave_name"
-[ "$count" -eq 1 ] && ok "send --all dedupes duplicate roster names" \
-  || bad "send --all dedupes duplicate roster names" "expected 1 enqueue, count=$count out=$all_out"
-
 tmux -L "$SOCK" new-window -t muxa -n eve "exec sleep 3600"
 sleep 0.2
 eve_pane="$(tmux -L "$SOCK" list-panes -t muxa:eve -F '#{pane_id}')"
@@ -233,9 +216,6 @@ assert_contains "$r2r2" "forbidden" "root → other root refused"
 
 root_to_child="$(muxa_as "$eve_pane" send carol 'nope' 2>&1 || true)"
 assert_contains "$root_to_child" "forbidden" "unrelated root → child refused"
-
-none="$(muxa_as "$eve_pane" send --all 'nope')"
-assert_contains "$none" "no reachable peers" "root --all has no peers"
 
 # --- spawn (default: split into parent window, tiled grid) ---
 bob_win="$(tmux -L "$SOCK" display-message -t "$bob_pane" -p '#{session_name}:#{window_index}')"
@@ -272,15 +252,15 @@ assert_contains "$win_list" "spawned" "spawn --window names the window"
 sp_par="$(muxa_as "$(tmux -L "$SOCK" list-panes -t muxa:spawned -F '#{pane_id}')" parent)"
 assert_contains "$sp_par" "bob" "spawn --window pane parent option"
 
-split_sp="$(muxa_as "$bob_pane" spawn --name splitkid --split -- sleep 3600)"
-assert_contains "$split_sp" "spawned splitkid" "spawn --split still works"
+split_sp="$(muxa_as "$bob_pane" spawn --name splitkid -- sleep 3600)"
+assert_contains "$split_sp" "spawned splitkid" "spawn splits into parent window"
 split_pane="$(printf '%s\n' "$split_sp" | spawn_pane_id)"
 split_win="$(tmux -L "$SOCK" display-message -t "$split_pane" -p '#{session_name}:#{window_index}')"
-[ "$split_win" = "$bob_win" ] && ok "spawn --split stays in parent window" \
-  || bad "spawn --split stays in parent window" "parent=$bob_win child=$split_win"
+[ "$split_win" = "$bob_win" ] && ok "spawn stays in parent window" \
+  || bad "spawn stays in parent window" "parent=$bob_win child=$split_win"
 n_split="$(tmux -L "$SOCK" list-panes -t "$bob_win" -F '#{pane_id}' | awk 'END { print NR }')"
-[ "$n_split" -eq $((expect + 1)) ] && ok "spawn --split adds a pane in the grid" \
-  || bad "spawn --split adds a pane in the grid" "expected $((expect + 1)) panes, got $n_split"
+[ "$n_split" -eq $((expect + 1)) ] && ok "spawn adds a pane in the grid" \
+  || bad "spawn adds a pane in the grid" "expected $((expect + 1)) panes, got $n_split"
 
 # Dedicated wide window: 4 default spawns must be 2D (not a single row/column).
 tmux -L "$SOCK" new-window -t muxa -n gridhost "exec sleep 3600"
@@ -801,16 +781,8 @@ kindclaudeproj_kind="$(tmux -L "$SOCK" display-message -t "$kindclaudeproj_pane"
   || bad "claude-projects cursor path is not misclassified as claude" \
      "got=$kindclaudeproj_kind"
 
-# Presence hooks are gone: leftover events no-op, STATE comes from the broker.
-muxa_as "$alice_pane" hook busy
-muxa_as "$alice_pane" hook afterAgentResponse
-muxa_as "$alice_pane" hook session-end
 who="$(muxa_as "$bob_pane" who)"
-assert_contains "$who" "alice" "leftover presence hooks do not unregister"
 assert_who_state "$who" "alice" "idle" "who STATE is idle when the pane is not drawing"
-got_sess="$(muxa_as "$alice_pane" session)"
-[ -z "$got_sess" ] && ok "muxa session is empty (CLI session id is not tracked)" \
-  || bad "muxa session is empty (CLI session id is not tracked)" "got: $got_sess"
 
 projdir="$tmpdir/acme-widgets"
 mkdir -p "$projdir"
@@ -874,8 +846,8 @@ assert_contains "$who_hdr" "STATE" "who header has STATE"
 assert_contains "$who_hdr" "STATUS" "who header has STATUS"
 
 whoj="$(muxa_as "$bob_pane" who --json)"
-if [ "$(printf '%s' "$whoj" | muxa-broker json-type)" = "array" ] \
-  && printf '%s' "$whoj" | muxa-broker json-keys name id parent kind state pane session cwd status; then
+if [ "$(printf '%s' "$whoj" | muxa-test-json json-type)" = "array" ] \
+  && printf '%s' "$whoj" | muxa-test-json json-keys name id parent kind state pane session cwd status; then
   ok "who --json is an array of roster objects"
 else
   bad "who --json is an array of roster objects" "got: $whoj"
@@ -918,7 +890,7 @@ while IFS= read -r n; do
     shape_bad="${shape_bad}${n}.session!=null; "
   fi
 done <<EOF
-$(printf '%s' "$whoj" | muxa-broker json-values name)
+$(printf '%s' "$whoj" | muxa-test-json json-values name)
 EOF
 [ -z "$shape_bad" ] && ok "who --json fail-closed: state idle|busy, status live|drawing|ghost, session null" \
   || bad "who --json fail-closed: state idle|busy, status live|drawing|ghost, session null" "$shape_bad"
@@ -932,7 +904,7 @@ while IFS= read -r n; do
     if [ -n "$occ" ]; then occ="$occ,$n"; else occ="$n"; fi
   fi
 done <<EOF
-$(printf '%s' "$whoj" | muxa-broker json-values name)
+$(printf '%s' "$whoj" | muxa-test-json json-values name)
 EOF
 [ "$occ" = "projagent" ] && ok "who --json occupancy consumes cwd+status with no awk" \
   || bad "who --json occupancy consumes cwd+status with no awk" "got: $occ"
@@ -952,7 +924,7 @@ else
 fi
 
 jsent="$(muxa_as "$bob_pane" send --json carol json-body)"
-if printf '%s' "$jsent" | muxa-broker json-keys id pane from to \
+if printf '%s' "$jsent" | muxa-test-json json-keys id pane from to \
   && [ "$(json_get "$jsent" from)" = "bob" ] \
   && [ "$(json_get "$jsent" to)" = "carol" ]; then
   pane_js="$(json_get "$jsent" pane)"
@@ -983,7 +955,7 @@ esc_spawn="$(muxa_as "$bob_pane" spawn --window --name escrecv -- bash -c "$esc_
 esc_recv_pane="$(printf '%s\n' "$esc_spawn" | awk '{ sub(/^pane=/,"",$6); print $6 }')"
 sleep 0.4
 jsent_esc="$(muxa_as "$bob_pane" send --json escrecv "$body")"
-if printf '%s' "$jsent_esc" | muxa-broker json-keys id pane from to \
+if printf '%s' "$jsent_esc" | muxa-test-json json-keys id pane from to \
   && [ "$(json_get "$jsent_esc" to)" = "escrecv" ]; then
   ok "send --json stays valid when the body has quote, backslash, newline"
 else
@@ -1014,37 +986,10 @@ case "$esc_cap" in
   *) bad "enqueue delivers body with quote, backslash, newline" "cap: $esc_cap" ;;
 esac
 
-allj="$(muxa_as "$bob_pane" send --json --all json-all-body)"
-all_tos="$(printf '%s' "$allj" | muxa-broker json-values to)"
-all_froms="$(printf '%s' "$allj" | muxa-broker json-values from)"
-if [ "$(printf '%s' "$allj" | muxa-broker json-type)" = "array" ] \
-  && printf '%s' "$allj" | muxa-broker json-keys id pane from to; then
-  case "$all_tos" in
-    *carol*)
-      case "$all_tos" in
-        *alice*)
-          case "$all_froms" in
-            *bob*) ok "send --all --json is an array of enqueues" ;;
-            *) bad "send --all --json is an array of enqueues" "from=$all_froms got: $allj" ;;
-          esac
-          ;;
-        *) bad "send --all --json is an array of enqueues" "got: $allj" ;;
-      esac
-      ;;
-    *) bad "send --all --json is an array of enqueues" "got: $allj" ;;
-  esac
-else
-  bad "send --all --json is an array of enqueues" "got: $allj"
-fi
-
-nonej="$(muxa_as "$eve_pane" send --json --all json-none)"
-[ "$nonej" = "[]" ] && ok "send --all --json with no peers is []" \
-  || bad "send --all --json with no peers is []" "got: $nonej"
-
 tok_disp="DISPJ_$$"
 disp_loop='while true; do printf "ready> "; read -r _ || break; done'
 disp_out="$(printf 'dispatch-body-%s\n' "$tok_disp" | muxa_as "$bob_pane" dispatch --window --name dispkid -- bash -c "$disp_loop")"
-if printf '%s' "$disp_out" | muxa-broker json-keys name id pane cwd state from to \
+if printf '%s' "$disp_out" | muxa-test-json json-keys name id pane cwd state from to \
   && [ "$(json_get "$disp_out" name)" = "dispkid" ] \
   && [ "$(json_get "$disp_out" to)" = "dispkid" ] \
   && [ "$(json_get "$disp_out" from)" = "bob" ] \
@@ -1122,45 +1067,6 @@ set -e
 [ "$tail_code" -eq 2 ] && ok "tail unknown exits 2" \
   || bad "tail unknown exits 2" "exit=$tail_code"
 
-# --- unregister ---
-tmux -L "$SOCK" new-window -t muxa -n unreg "exec sleep 3600"
-sleep 0.2
-unreg_pane="$(tmux -L "$SOCK" list-panes -t muxa:unreg -F '#{pane_id}')"
-muxa_as "$unreg_pane" register --name dropme --kind generic >/dev/null
-unreg_out="$(muxa_as "$bob_pane" unregister dropme)"
-assert_contains "$unreg_out" "unregistered dropme" "unregister by name confirms"
-who="$(muxa_as "$bob_pane" who)"
-case "$who" in
-  *dropme*) bad "unregister by name removes from who" "still listed: $who" ;;
-  *) ok "unregister by name removes from who" ;;
-esac
-
-tmux -L "$SOCK" new-window -t muxa -n unreg2 "exec sleep 3600"
-sleep 0.2
-unreg2_pane="$(tmux -L "$SOCK" list-panes -t muxa:unreg2 -F '#{pane_id}')"
-muxa_as "$unreg2_pane" register --name dropid --kind generic >/dev/null
-drop_id="$(muxa_as "$unreg2_pane" id)"
-unreg_out="$(muxa_as "$bob_pane" unregister "$drop_id")"
-assert_contains "$unreg_out" "unregistered dropid" "unregister by id confirms"
-who="$(muxa_as "$bob_pane" who)"
-case "$who" in
-  *dropid*) bad "unregister by id removes from who" "still listed: $who" ;;
-  *) ok "unregister by id removes from who" ;;
-esac
-
-set +e
-muxa_as "$bob_pane" unregister nobody 2>/dev/null
-unreg_code=$?
-set -e
-[ "$unreg_code" -eq 2 ] && ok "unregister unknown exits 2" \
-  || bad "unregister unknown exits 2" "exit=$unreg_code"
-
-if pane_exists "$unreg_pane"; then
-  ok "unregister leaves the tmux pane running"
-else
-  bad "unregister leaves the tmux pane running" "pane $unreg_pane gone"
-fi
-
 # --- kill ---
 tmux -L "$SOCK" new-window -t muxa -n killme "exec sleep 3600"
 sleep 0.2
@@ -1190,7 +1096,7 @@ tmux -L "$SOCK" new-window -t muxa -n killid "exec sleep 3600"
 sleep 0.2
 killid_pane="$(tmux -L "$SOCK" list-panes -t muxa:killid -F '#{pane_id}')"
 muxa_as "$killid_pane" register --name killid --kind generic >/dev/null
-kill_id="$(muxa_as "$killid_pane" id)"
+kill_id="$(tmux -L "$SOCK" display-message -p -t "$killid_pane" '#{@muxa_id}')"
 kill_out="$(muxa_as "$bob_pane" kill "$kill_id")"
 assert_contains "$kill_out" "killed killid" "kill by id confirms"
 who="$(muxa_as "$bob_pane" who)"
@@ -1199,7 +1105,7 @@ case "$who" in
   *) ok "kill by id removes from who" ;;
 esac
 if pane_exists "$killid_pane"; then
-  bad "kill by id removes the tmux pane" "pane $killid_pane still exists (unregister would leave it)"
+  bad "kill by id removes the tmux pane" "pane $killid_pane still exists"
 else
   ok "kill by id removes the tmux pane"
 fi
@@ -1243,16 +1149,6 @@ case "$win_list" in
   *) ok "kill of --window spawn removes the window" ;;
 esac
 
-muxa_as "$alice_pane" hook session-end
-who="$(muxa_as "$bob_pane" who)"
-assert_contains "$who" "alice" "session-end leftover does not unregister"
-set +e
-muxa_as "$alice_pane" state busy >/dev/null 2>&1
-state_rc=$?
-set -e
-[ "$state_rc" -eq 1 ] && ok "state is not a command" \
-  || bad "state is not a command" "exit=$state_rc"
-
 # --- darwin adhoc sign of the source broker before RPC (#67) ---
 # broker_cli signs $MUXA_BROKER_BIN (the source) then execs it. Do not stop
 # the isolated test daemon: who --json still RPCs the source for encoding.
@@ -1269,7 +1165,7 @@ rc_unsigned=$?
 set -e
 export MUXA_BROKER_BIN="$saved_bin_sign"
 if [ "$rc_unsigned" -eq 0 ] \
-  && [ "$(printf '%s' "$who_unsigned" | muxa-broker json-type)" = "array" ]; then
+  && [ "$(printf '%s' "$who_unsigned" | muxa-test-json json-type)" = "array" ]; then
   ok "who --json RPC works through an unsigned source broker (isolated daemon untouched)"
 else
   bad "who --json RPC works through an unsigned source broker (isolated daemon untouched)" \
@@ -1311,8 +1207,8 @@ nobr_path="$ROOT/bin:$nobr_bin:/usr/bin:/bin"
 who_nobr="$(PATH="$nobr_path" muxa_as "$bob_pane" who)"
 assert_contains "$who_nobr" "bob" "who works with br absent from PATH"
 whoj_nopy="$(PATH="$nobr_path" muxa_as "$bob_pane" who --json)"
-if [ "$(printf '%s' "$whoj_nopy" | PATH="$nobr_path" muxa-broker json-type)" = "array" ] \
-  && printf '%s' "$whoj_nopy" | PATH="$nobr_path" muxa-broker json-keys name id parent kind state pane session cwd status; then
+if [ "$(printf '%s' "$whoj_nopy" | PATH="$nobr_path" muxa-test-json json-type)" = "array" ] \
+  && printf '%s' "$whoj_nopy" | PATH="$nobr_path" muxa-test-json json-keys name id parent kind state pane session cwd status; then
   ok "who --json works when python3 would fail if invoked"
 else
   bad "who --json works when python3 would fail if invoked" "got: $whoj_nopy"
@@ -1324,7 +1220,6 @@ help_nobr="$(PATH="$nobr_path" muxa help)"
 assert_contains "$help_nobr" "muxa send" "help works with br absent from PATH"
 assert_contains "$help_nobr" "muxa dispatch" "help mentions dispatch"
 assert_contains "$help_nobr" "muxa kill" "help mentions kill"
-assert_contains "$help_nobr" "leave pane running" "help keeps unregister as leave-pane-running"
 case "$help_nobr" in
   *"muxa jobs"*|*"muxa preflight"*) bad "help does not mention jobs or preflight" "out=$help_nobr" ;;
   *) ok "help does not mention jobs or preflight" ;;

@@ -55,8 +55,6 @@ paste into a busy pane just because the clock ran out. After paste,
 collapse) was visible; if the pane went busy without that, the message is
 filed `unknown/` and is not retried. If the
 broker is down, `muxa send` exits non-zero and pastes nothing.
-`MUXA_BROKER=0` is an error — it does not restore the old bash delivery
-stack.
 
 The broker daemonizes itself with `setsid(2)` and owns its pidfile. That is
 load-bearing, not tidiness: `nohup … & disown` leaves the process in the
@@ -72,17 +70,9 @@ straight:
   silence (a busy agent draws, an idle one does not); two-signal
   quiescence AND empty at the hardware cursor. The bottom line is
   user-configurable, so no fixed prompt/status model can be correct.
-- **Typed-in-box conjunct (parser remnant)** — the only signal that can
-  see unsubmitted human input in a Cursor Agent composer. A `▄`/`▀` box
-  with non-faint, non-reverse text (or a visible row with no faint run)
-  waits. No box → vacuously true, free-detection decides. MUST NOT be
-  used to decide a pane is at a prompt, or to model spinners / interrupt
-  phrases / status chrome. It cannot currently be deleted: hardware
-  cursor, second-capture frame diff, and control-mode silence are all
-  blind to a half-typed Cursor composer (`cursor_x=0` in both idle and
-  typed, `t1==t2` in both, `%output` goes quiet after a pause). The one
-  untested idea is a stateful observer that tracks "composer went
-  non-empty and has not submitted" across `%output` events.
+- **Known sharp edge (muxa#79)** — half-typed unsubmitted input in a Cursor
+  Agent composer is invisible to free-detection. Etiquette: do not leave
+  half-typed input in worker panes.
 
 tmux user options are the roster (`@muxa_name`, `@muxa_kind`, `@muxa_parent`,
 `@muxa_id`). `muxa who` STATE is the broker's drawing list (`busy` if the
@@ -173,18 +163,14 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 | Command | What |
 | --- | --- |
 | `muxa register [--name --id --parent --kind]` | Set pane identity (optional; spawn already does this for children) |
-| `muxa spawn [--name NAME] [--cwd DIR] [--split] [--window] -- CMD` | Split a child pane into a tiled grid in the parent's window. Child cwd is `--cwd`, else process `$PWD`, else the parent pane path. Warns on stderr if a live worker already has that cwd (does not refuse). Omit `--name` for a unique `adjective-noun` alias. `--window` for a dedicated window; `--split` is compat |
+| `muxa spawn [--name NAME] [--cwd DIR] [--window] -- CMD` | Split a child pane into a tiled grid in the parent's window. Child cwd is `--cwd`, else process `$PWD`, else the parent pane path. Warns on stderr if a live worker already has that cwd (does not refuse). Omit `--name` for a unique `adjective-noun` alias. `--window` for a dedicated window |
 | `muxa dispatch [--name NAME] [--cwd DIR] [--brief-file F] -- CMD` | Spawn + first brief. Brief on stdin or `--brief-file`. stdout `{"name","id","pane","cwd","state":"dispatched","from","to"}`. Broker waits for drawn-then-quiet-and-free; never-ready mails `[muxa] from=broker` to the parent |
 | `muxa who` | Roster (name, id, session, parent, cwd, STATE, STATUS, …) |
-| `muxa who --json` | Same roster as objects (`parent`/`session` are `null` when empty; `state` is `idle`/`busy` from the broker drawing list) |
+| `muxa who --json` | Same roster as objects (`parent`/`session` are `null` when empty; `state` is `idle`/`busy` from the broker drawing list). Requires `muxa-broker` on disk: `bin/muxa` delegates JSON encoding to the broker CLI (`who-json`), not to a daemon RPC, but the binary must exist and be executable |
 | `muxa tail NAME [-n N]` | One-shot pane read (visible grid, or last N lines of history) |
-| `muxa unregister NAME\|ID` | Clear muxa registration; leave pane running |
 | `muxa kill NAME\|ID` | Remove the pane (`kill-pane`); gone from `muxa who` |
-| `muxa session` | Empty (CLI session id is not tracked) |
-| `muxa children` | Direct children of this pane |
 | `muxa send NAME TEXT` | Enqueue on the broker (parent↔child). Auto-starts the daemon if the socket is dead; fails closed if it cannot |
-| `muxa send --json NAME TEXT` | Same enqueue; stdout is `{"id","pane","from","to"}` (`--all` → array) |
-| `muxa send --all TEXT` | Every parent/child pane (not siblings or other roots) |
+| `muxa send --json NAME TEXT` | Same enqueue; stdout is `{"id","pane","from","to"}` |
 | `muxa broker [start\|status\|stop]` | User-level paste broker (unix socket + file queue) |
 | `muxa hook session-start [--kind KIND]` | Optional root self-registration (`TMUX_PANE` only) |
 
@@ -194,22 +180,19 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 tests/run.sh          # identity / spawn
 tests/broker.sh       # broker integration (isolated tmux + dummy prompts)
 tests/tmux-facts.sh   # version-sensitive tmux behaviour muxa depends on
-tests/e2e.sh --capture-fixtures
-                      # harvest .ansi + cursor .meta + .t2.ansi (~250ms later)
-tests/record-composer-fixtures.sh
-                      # recapture Cursor Agent (splash/idle/typed/busy/trust)
+tests/e2e.sh          # live agent-CLI smoke (optional)
 ```
 
 Needs `tmux`. Broker tests also need Go 1.21+ (not required to install
 muxa). On darwin 25+, `go test` must use `-ldflags=-linkmode=external`
 (same LC_UUID requirement as the release broker build). Uses a private tmux
-socket, not your session.
+socket, not your session. Shell tests build a test-only `muxa-test-json`
+helper (`tests/jsonhelper/`); it is not installed.
 
 ## Environment
 
 | Variable | Default | What |
 | --- | --- | --- |
-| `MUXA_BROKER` | `1` | `0` is an error (broker is required) |
 | `MUXA_BROKER_DIR` | `<runtime>/broker` | File-backed queue + pidfile + log |
 | `MUXA_BROKER_SOCK` | `$MUXA_BROKER_DIR/broker.sock` | Unix socket |
 | `MUXA_BROKER_PID` | `$MUXA_BROKER_DIR/broker.pid` | Pidfile |

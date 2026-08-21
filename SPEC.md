@@ -45,6 +45,12 @@ which. `muxa who --json` is the same roster as objects (`name`, `id`,
 `parent` is JSON `null`. `session` is always JSON `null` (CLI conversation
 ids are not tracked). Default `muxa who` has no DELIVER column.
 
+`who --json` reads tmux pane options only; it does not talk to the broker
+daemon. It still requires the `muxa-broker` binary: `bin/muxa` pipes roster
+rows to the broker CLI subcommand `who-json` for encoding (same helper used
+by `send --json`). Install always ships that binary; command-post occupancy
+checks therefore depend on it being present even though no socket RPC occurs.
+
 `muxa tail NAME [-n N]` is a one-shot pane read so a parent never has to
 call `tmux capture-pane`. With no `-n` it prints the visible grid; `-n N`
 prints the last N lines of history plus the visible grid, ignoring trailing
@@ -71,15 +77,10 @@ and remain reachable via `muxa send`:
 `pane_current_command` (e.g. `2.1.233` for Claude) is not treated as a
 shell.
 
-`muxa unregister NAME|ID` clears `@muxa_name`, `@muxa_id`, `@muxa_parent`,
-`@muxa_kind` (and leftover options from older installs), resets
-the pane title, and leaves the tmux pane running. Lookup prefers an exact
-name match, then a 12-hex id match. Unknown targets exit 2.
-
-`muxa kill NAME|ID` is the `kill-pane` counterpart of spawn. Same lookup
-and unknown-target exit 2 as unregister. It removes the pane; `muxa who`
-does not list it afterwards. It does not take a job id. `unregister` stays
-identity-only so existing callers do not start killing panes.
+`muxa kill NAME|ID` is the `kill-pane` counterpart of spawn. Lookup prefers
+an exact name match, then a 12-hex id match. Unknown targets exit 2. It
+removes the pane; `muxa who` does not list it afterwards. It does not take
+a job id.
 
 Names are unique per tmux server. Duplicate register fails. Ids are unique
 even when two panes run the same CLI on the same project.
@@ -94,8 +95,7 @@ direction follows pane count
 (`cols = ceil(sqrt(n+1))`: a complete rectangle starts a new row with
 `split-window -v`, otherwise a column with `-h`) so successive children fill
 a 2D grid rather than a single row. Then `select-layout tiled` on the window.
-`--window` opens a dedicated tmux window instead. `--split` is accepted for
-compatibility (split is the default). If a live registered worker already
+`--window` opens a dedicated tmux window instead. If a live registered worker already
 occupies that start directory (same physical path, including a worktree),
 spawn prints a warning on stderr and still creates the pane. Ghosts and
 roots occupying the path do not warn; name conflicts still fail as today.
@@ -113,8 +113,7 @@ a shell still as `pane_pid`) registers as `cursor` and stays `cursor` after
 a later Claude `SessionStart`. If the pane is already registered, the hook
 does not rename or re-parent it; it may correct `@muxa_kind` only when
 process evidence says so, and must not flip a live `claude`/`cursor`/`pi`
-registration to a different family without that evidence. Presence events
-(`busy` / `idle` / `blocked` / `stop`) are not part of muxa.
+registration to a different family without that evidence.
 
 ## Reachability
 
@@ -125,15 +124,12 @@ muxa does not know about orchestrators. It only enforces a tree:
 - child → sibling or unrelated: forbidden (exit 4)
 - roots (no parent) → other roots: forbidden (exit 4)
 
-`muxa send --all` sends only to reachable panes.
-
 ## Delivery
 
 `muxa send` talks to **muxa-broker** over a unix socket. The broker is
 required. If `ensure_broker` or enqueue fails, send exits non-zero and
 does not paste. There is no paste-buffer fallback, no maildir
-`write_mail` path, and no Stop-hook drain for send. `MUXA_BROKER=0` is
-an error, not a switch back to the old bash delivery stack.
+`write_mail` path, and no Stop-hook drain for send.
 
 ```
 send(name, body):
@@ -219,46 +215,16 @@ user-configurable, so no fixed prompt/status model can be correct:
    pair; control-mode silence already covers quiescence, and empty-at-cursor
    is the remaining half.
 
-**Typed-in-box is a bounded remnant, not a prompt model.** If the capture
-contains a composer box (a row of `▄` above a row of `▀` with at least one
-row between them), any text between the borders that is neither faint
-(SGR 2) nor the reverse-video cursor (SGR 7) is unsubmitted human input →
-not free. A visible row with no faint run is also typed (one character
-under the block cursor). No box → the conjunct is vacuously true and
-free-detection decides.
-
-This remnant MAY be used only to protect unsubmitted composer input. It
-MUST NOT be used to decide that a pane is at a prompt, and MUST NOT model
-anything chrome-shaped (spinners, `esc to interrupt` / `ctrl+c to stop`,
-status footers, bottom-line prompt markers). Those were a chrome model;
-they are deleted. Default-foreground hint text inside the box
-(Claude's `Image in clipboard · ctrl+v to paste`) is indistinguishable
-from typing and is treated as typed: the cost is a delayed paste, not
-lost input. Capture must keep `-e`; without SGR a faint placeholder is
-the same bytes as typed text.
-
-**Why the remnant cannot currently be deleted.** It is the only signal
-that can see a human's unsubmitted input in a Cursor Agent composer.
-Three candidates for a third free-detection signal were tried and all
-three are blind to that input:
-
-- Hardware cursor position (muxa#44): `cursor-idle` and `cursor-typed`
-  fixtures are identical, `cursor_x=0` in both. Cursor Agent parks the
-  cursor on the blank row below the `cwd · branch` splash footer.
-- Second-capture frame diff (muxa#44): both snapshots are internally
-  static, `t1==t2` in both.
-- Control-mode silence (muxa#46): typing emits `%output` (a redraw of the
-  box containing `→ hello`), then after a pause `%output` stops — the
-  same silence as an empty idle composer.
-
-Pasting over someone mid-prompt is worse than a slow brief, so the
-conjunct stays until a signal exists that can see that input.
-
-**Untested, out of scope here.** A stateful observer that tracks
-"composer went non-empty and has not submitted" across `%output` events,
-rather than sampling a point in time. Do not implement that in this
-change; it is the one idea a future attempt should start from. `muxa-broker
--check-pane %id` prints the typed-in-box and two-signal verdicts.
+**Known sharp edge (muxa#44, accepted muxa#79).** Cursor Agent draws typed
+input inside its composer box and parks the hardware cursor on the blank
+row below the splash footer. Two-signal, control-mode silence, and hardware
+cursor position are all blind to half-typed unsubmitted input there — the
+same quiescence and empty-at-cursor as an idle composer. Pasting over
+someone mid-prompt is recoverable in seconds when the human is at that
+pane; the ~700-line typed-in-box parser that closed that hole was dropped
+as poor ROI for a lightweight tool. **Etiquette:** do not leave half-typed
+input in worker panes. `muxa-broker -check-pane %id` prints the two-signal
+verdict.
 
 Retry until the pane is actually free. `MUXA_BROKER_DEADLINE` (default 600)
 is how long a *dead* pane is retried before the message is failed; a live
@@ -267,7 +233,7 @@ NOT timeout-fallback paste: two fallbacks into one busy composer overwrite
 each other, both get filed as `done/`, and the agent never sees the first.
 After a paste, confirmation has three outcomes: **delivered** (payload or
 Cursor's `[Pasted text +N lines]` collapse is visible), **pending-safe-retry**
-(pane still free — typed-in-box empty and cursor row still empty/prompt),
+(pane still free — cursor row still empty/prompt),
 and **unknown-no-retry** (the pane went busy or started drawing but the
 payload is not in the visible grid — Cursor collapses long pastes and
 scrolls them off). Unknown MUST NOT retry: a duplicate first brief re-runs
@@ -288,8 +254,6 @@ process inside a tmux pane. There is no hook-resolution ladder.
 `TMUX_PANE` if it is not already registered. Spawned panes skip identity
 creation; a leftover hook still must not overwrite their kind to a
 different CLI family without process/argv evidence. Stdin is ignored.
-Leftover presence events (`busy`, `idle`, `blocked`, `stop`,
-`session-end`) exit 0 and change nothing.
 
 Native continue payloads are not used. Incoming mail is a user turn
 pasted by the broker:
@@ -310,41 +274,35 @@ turn.
 
 ```
 muxa send <name> <text…>
-muxa send --all <text…>
 muxa send --no-reply <name> <text…>
 muxa send --json <name> <text…>
 muxa who
 muxa who --json
 muxa tail <name> [-n N]
-muxa unregister <name|id>
 muxa kill <name|id>
 muxa whoami
-muxa id
-muxa session
 muxa parent
-muxa children
 muxa spawn [--name worker] [--cwd DIR] [--window] -- command…
 muxa dispatch [--name NAME] [--cwd DIR] [--brief-file F] -- command…
 muxa hook session-start [--kind KIND]
 muxa broker [start|status|stop]
 ```
 
-`muxa send --json` prints `{"id","pane","from","to"}` (an array of those
-objects for `--all`) so a fire-and-forget caller can correlate a later
-failure turn with the enqueue. Human send output is unchanged without
-`--json`.
+`muxa send --json` prints `{"id","pane","from","to"}` so a fire-and-forget
+caller can correlate a later failure turn with the enqueue. Human send
+output is unchanged without `--json`.
 
 `muxa dispatch` prints `{"name","id","pane","cwd","state":"dispatched","from","to"}`
 and exits 0 once the pane exists and the brief is queued. The broker then
 waits until the child has drawn, gone quiet, and is free (broker
-free-detection plus the typed-in-box conjunct), and pastes
+free-detection), and pastes
 once. A CLI that never becomes ready produces a `[muxa] from=broker` turn
 in the parent; the brief is not pasted into the child. Brief on stdin or
 `--brief-file`, never a positional string. No worktree, lease, retry
 policy, or job id.
 
 Exit 0 on queued. Exit 2 if the name is unknown (including
-`muxa unregister`, `muxa kill`, and `muxa tail`) or the broker cannot be started/enqueued. Exit 3 if not
+`muxa kill` and `muxa tail`) or the broker cannot be started/enqueued. Exit 3 if not
 running under tmux when tmux is required. Exit 4 if the send is forbidden
 by reachability.
 
@@ -363,6 +321,9 @@ A `[muxa]` prefix means a broker-pasted turn. Do nothing new on a
 repeat you already handled.
 
 Role instructions live in the **muxa-parent** and **muxa-worker** skills.
+
+Do not leave half-typed input in worker panes — the broker cannot see
+unsubmitted Cursor Agent composer text (muxa#79).
 
 ## muxa / command-post boundary
 

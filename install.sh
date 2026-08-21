@@ -270,18 +270,12 @@ fi
 # Skills: on-demand, not MCP. Progressive disclosure = fewer tokens.
 # Global so any project can load muxa-parent / muxa-worker.
 rm -rf "$HOME/.cursor/skills/muxa" "$HOME/.claude/skills/muxa" "$HOME/.agents/skills/muxa"
-rm -rf "$HOME/.cursor/skills/muxa-orchestrator" "$HOME/.claude/skills/muxa-orchestrator" "$HOME/.agents/skills/muxa-orchestrator"
 for skill in muxa-parent muxa-worker; do
   for dest in "$HOME/.cursor/skills/$skill" "$HOME/.claude/skills/$skill" "$HOME/.agents/skills/$skill"; do
     mkdir -p "$dest"
     cp "$ROOT/skills/$skill/SKILL.md" "$dest/SKILL.md"
   done
 done
-
-# Presence/hooks are gone. Do not merge per-CLI hook JSON. Spawn registers
-# children; a root that starts by hand may call `muxa hook session-start` or
-# `muxa register`. Leftover `muxa hook busy|idle|stop` entries no-op.
-rm -f "$HOME/.omp/agent/extensions/muxa.ts" "$HOME/.pi/agent/extensions/muxa.ts"
 
 echo
 echo "muxa $("$BIN/muxa" version) -> $BIN/muxa  (repo $ROOT)"

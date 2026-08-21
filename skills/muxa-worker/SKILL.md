@@ -51,6 +51,8 @@ Stay in this cwd. Do not `cd` here, to the parent's checkout, or to a path from 
 
 Silence is default. Reply only with a question, a result, or a blocker. Never ack. Stop after two ping-pongs unless a decision is still open.
 
+Do not leave half-typed input in this pane — the broker cannot see unsubmitted composer text (muxa#79).
+
 ## Done
 
 Follow any completion steps from the brief, then `muxa send "$(muxa parent)" "…"` with the result or blocker.

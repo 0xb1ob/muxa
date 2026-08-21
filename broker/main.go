@@ -20,13 +20,12 @@ func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "ping", "status", "drawing", "enqueue",
-			"json-object", "json-array", "who-json",
-			"json-type", "json-keys", "json-get", "json-values":
+			"json-object", "json-array", "who-json":
 			os.Exit(runCLI(os.Args[1:]))
 		}
 	}
 
-	checkPane := flag.String("check-pane", "", "print parser and two-signal verdicts for a tmux pane and exit")
+	checkPane := flag.String("check-pane", "", "print two-signal verdict for a tmux pane and exit")
 	flag.Parse()
 	if *checkPane != "" {
 		if err := checkPaneVerdicts(*checkPane); err != nil {
@@ -196,11 +195,11 @@ func writePID(path string) error {
 func checkPaneVerdicts(pane string) error {
 	t := NewTMUX()
 	if t.PaneDead(pane) {
-		fmt.Printf("pane=%s dead=1 parser=WAIT two-signal=WAIT\n", pane)
+		fmt.Printf("pane=%s dead=1 two-signal=WAIT\n", pane)
 		return nil
 	}
 	if t.InMode(pane) {
-		fmt.Printf("pane=%s in_mode=1 parser=WAIT two-signal=WAIT\n", pane)
+		fmt.Printf("pane=%s in_mode=1 two-signal=WAIT\n", pane)
 		return nil
 	}
 	a, err := t.Snapshot(pane)
@@ -212,10 +211,9 @@ func checkPaneVerdicts(pane string) error {
 	if err != nil {
 		return err
 	}
-	parser := LooksFree(b.Capture)
 	two := TwoSignalFree(a.Capture, b.Capture, b.CursorY, b.CursorX)
-	fmt.Printf("pane=%s cursor_y=%d cursor_x=%d quiescent=%v parser=%s two-signal=%s\n",
-		pane, b.CursorY, b.CursorX, a.Capture == b.Capture, freeWord(parser), freeWord(two))
+	fmt.Printf("pane=%s cursor_y=%d cursor_x=%d quiescent=%v two-signal=%s\n",
+		pane, b.CursorY, b.CursorX, a.Capture == b.Capture, freeWord(two))
 	return nil
 }
 

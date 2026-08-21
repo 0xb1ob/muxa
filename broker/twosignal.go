@@ -25,12 +25,12 @@ type Snapshot struct {
 // empty composer, so a drawing pane must WAIT even when the cursor row is
 // blank.
 //
-// Known hole (muxa#44): Cursor Agent draws typed input inside the composer
-// box and leaves the hardware cursor on the blank row below the splash
-// footer. cursor-idle and cursor-typed are both quiescent and both empty at
-// that cursor, so this rule cannot tell them apart. The typed-in-box
-// conjunct in LooksFree is the paste-gate half that can; do not "fix" the
-// hole by re-entering chrome modelling here.
+// Known hole (muxa#44, accepted muxa#79): Cursor Agent draws typed input
+// inside the composer box and leaves the hardware cursor on the blank row
+// below the splash footer. cursor-idle and cursor-typed are both quiescent
+// and both empty at that cursor, so this rule cannot tell them apart. Do
+// not "fix" the hole by re-entering chrome modelling here; agents must not
+// leave half-typed input in worker panes.
 func TwoSignalFree(prev, cur string, cursorY, cursorX int) bool {
 	if prev == "" || prev != cur {
 		return false

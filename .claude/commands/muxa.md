@@ -8,11 +8,10 @@ Run **one** Bash command:
 
 - Roster: `muxa who` / `muxa who --json`
 - Pane read: `muxa tail <name>` (one-shot; never a poll)
-- Kill pane: `muxa kill <name>` (removes the pane; `unregister` leaves it)
+- Kill pane: `muxa kill <name>` (removes the pane)
 - Send: `muxa send <name> <text from the rest of this invocation>`
 - Send JSON: `muxa send --json <name> <text>` (queued id + pane)
 - Dispatch: `muxa dispatch [--name NAME] [--cwd DIR] [--brief-file F] -- CMD…` (brief on stdin or `--brief-file`; stdout JSON)
-- Broadcast: `muxa send --all <text>`
 - No reply wanted: `muxa send --no-reply <name> <text>`
 
 Do not poll. Incoming `[muxa]` turns are already delivered.
