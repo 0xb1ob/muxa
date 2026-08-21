@@ -41,7 +41,6 @@ muxa uses surfaces the CLIs already pay for:
 
 - **Bash / Shell** — already in the tool list. `muxa send` is one call.
 - **Skills / slash commands** — loaded on demand, not as always-on tools.
-- **Hooks** — register the pane and report idle/busy. Not a mail path.
 - **The prompt itself** — an idle agent is already blocked on stdin. The broker's `paste-buffer` + Enter is typing, not a new protocol.
 
 ### Delivery (the part everyone gets wrong)
@@ -78,8 +77,10 @@ Both are CLI-agnostic: the composer rule reads terminal attributes and box
 chrome, never a Claude/Cursor/pi string. Without it, every agent CLI's idle
 pane read as busy and every first brief waited out the full deadline.
 
-tmux user options are the roster (`@muxa_name`, `@muxa_kind`, `@muxa_state`,
-`@muxa_deliver`, `@muxa_session`). `tmux list-panes` is service discovery.
+tmux user options are the roster (`@muxa_name`, `@muxa_kind`, `@muxa_parent`,
+`@muxa_id`). `muxa who` STATE is the broker's drawing list (`busy` if the
+pane is emitting `%output`, else `idle`). `tmux list-panes` is service
+discovery.
 The broker's file queue is the send path. Pane titles are CLI-owned.
 
 Spec: [SPEC.md](SPEC.md).
@@ -93,9 +94,12 @@ curl -fsSL https://raw.githubusercontent.com/0xb1ob/muxa/main/install.sh | bash
 ```
 
 That clones this repo into `~/.muxa`, symlinks `muxa` onto `~/.local/bin`,
-merges user-level hooks, and copies the **muxa-parent** and **muxa-worker**
+and copies the **muxa-parent** and **muxa-worker**
 skills to `~/.cursor/skills`, `~/.claude/skills`, and `~/.agents/skills`.
-Re-run the same curl to refresh `~/.muxa` from `origin/main` and update skills/hooks.
+Re-run the same curl to refresh `~/.muxa` from `origin/main` and update skills.
+Install does not merge per-CLI hook config. A new agent CLI needs zero wiring
+files. Spawned panes are registered by `muxa spawn`. A root started by hand
+can `muxa register` or `muxa hook session-start`.
 
 **Go is not an install dependency.** `muxa-broker` is downloaded as a GitHub
 release asset (`muxa-broker-<os>-<arch>` for darwin/linux × amd64/arm64),
@@ -119,10 +123,11 @@ tests/e2e.sh          # real Claude Code + Cursor Agent + Oh My Pi in tmux
                       # --capture-fixtures writes .ansi + .meta + .t2.ansi
 ```
 
-This repo also ships project-scoped hooks for working on muxa itself:
+This repo ships an optional project-scoped `session-start` for working on
+muxa itself (a root that starts by hand). Spawned panes do not need it:
 
-- `.claude/settings.json` → `scripts/muxa-hook.sh`
-- `.cursor/hooks.json` → `scripts/muxa-hook.sh`
+- `.claude/settings.json` → `scripts/muxa-hook.sh session-start`
+- `.cursor/hooks.json` → `scripts/muxa-hook.sh session-start`
 
 Put `bin/` on `PATH` inside the tmux panes (or use `examples/agents.sh`).
 
@@ -135,7 +140,7 @@ muxa spawn --name pi -- omp
 muxa spawn --window --name solo -- agent   # dedicated window (old default)
 ```
 
-Hooks register the pane on session start. Confirm:
+Hooks are not required for spawned panes. Confirm:
 
 ```bash
 muxa who
@@ -160,19 +165,19 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 
 | Command | What |
 | --- | --- |
-| `muxa register [--name --id --parent --kind --deliver]` | Set pane identity (hooks do this) |
+| `muxa register [--name --id --parent --kind]` | Set pane identity (optional; spawn already does this for children) |
 | `muxa spawn [--name NAME] [--cwd DIR] [--split] [--window] -- CMD` | Split a child pane into a tiled grid in the parent's window. Child cwd is `--cwd`, else process `$PWD`, else the parent pane path. Warns on stderr if a live worker already has that cwd (does not refuse). Omit `--name` for a unique `adjective-noun` alias. `--window` for a dedicated window; `--split` is compat |
-| `muxa who` | Roster (name, id, session, parent, cwd, STATUS, …) |
-| `muxa who --json` | Same roster as objects (`parent`/`session` are `null` when empty) |
+| `muxa who` | Roster (name, id, session, parent, cwd, STATE, STATUS, …) |
+| `muxa who --json` | Same roster as objects (`parent`/`session` are `null` when empty; `state` is `idle`/`busy` from the broker drawing list) |
 | `muxa tail NAME [-n N]` | One-shot pane read (visible grid, or last N lines of history) |
 | `muxa unregister NAME\|ID` | Clear muxa registration; leave pane running |
-| `muxa session` | This pane's CLI session/conversation id |
+| `muxa session` | Empty (CLI session id is not tracked) |
 | `muxa children` | Direct children of this pane |
 | `muxa send NAME TEXT` | Enqueue on the broker (parent↔child). Auto-starts the daemon if the socket is dead; fails closed if it cannot |
 | `muxa send --json NAME TEXT` | Same enqueue; stdout is `{"id","pane","from","to"}` (`--all` → array) |
 | `muxa send --all TEXT` | Every parent/child pane (not siblings or other roots) |
 | `muxa broker [start\|status\|stop]` | User-level paste broker (unix socket + file queue) |
-| `muxa hook EVENT` | Register / presence (not a mail drain) |
+| `muxa hook session-start [--kind KIND]` | Optional root self-registration (`TMUX_PANE` only) |
 
 ## Tests
 

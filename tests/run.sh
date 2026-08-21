@@ -97,10 +97,10 @@ muxa_as() {
 }
 
 # --- register + who ---
-reg_b="$(muxa_as "$bob_pane" register --name bob --kind generic --deliver inject)"
+reg_b="$(muxa_as "$bob_pane" register --name bob --kind generic)"
 assert_contains "$reg_b" "registered bob" "register bob"
 
-reg_a="$(muxa_as "$alice_pane" register --name alice --kind generic --deliver inject --parent bob)"
+reg_a="$(muxa_as "$alice_pane" register --name alice --kind generic --parent bob)"
 assert_contains "$reg_a" "registered alice" "register alice"
 assert_contains "$reg_a" "parent=bob" "alice is bob's child"
 
@@ -111,7 +111,7 @@ assert_contains "$who" "bob" "who lists bob"
 me="$(muxa_as "$bob_pane" whoami)"
 assert_contains "$me" "bob" "whoami is bob"
 
-dup="$(muxa_as "$bob_pane" register --name alice --kind generic --deliver inject 2>&1 || true)"
+dup="$(muxa_as "$bob_pane" register --name alice --kind generic 2>&1 || true)"
 assert_contains "$dup" "already registered" "duplicate name refused"
 
 # --- send fail-closed: broker required ---
@@ -138,8 +138,8 @@ sleep 0.2
 carol_pane="$(tmux -L "$SOCK" list-panes -t muxa:carol -F '#{pane_id}')"
 dave_pane="$(tmux -L "$SOCK" list-panes -t muxa:dave -F '#{pane_id}')"
 
-muxa_as "$carol_pane" register --name carol --kind generic --deliver inject --parent bob >/dev/null
-muxa_as "$dave_pane" register --name dave --kind generic --deliver inject --parent bob >/dev/null
+muxa_as "$carol_pane" register --name carol --kind generic --parent bob >/dev/null
+muxa_as "$dave_pane" register --name dave --kind generic --parent bob >/dev/null
 
 who="$(muxa_as "$bob_pane" who)"
 assert_contains "$who" "carol" "who lists child carol"
@@ -176,7 +176,7 @@ tmux -L "$SOCK" set-option -p -t "$dave_pane" @muxa_name "$saved_dave_name"
 tmux -L "$SOCK" new-window -t muxa -n eve "exec sleep 3600"
 sleep 0.2
 eve_pane="$(tmux -L "$SOCK" list-panes -t muxa:eve -F '#{pane_id}')"
-muxa_as "$eve_pane" register --name eve --kind generic --deliver inject >/dev/null
+muxa_as "$eve_pane" register --name eve --kind generic >/dev/null
 
 r2r="$(muxa_as "$eve_pane" send bob 'nope' 2>&1 || true)"
 assert_contains "$r2r" "forbidden" "root → root refused"
@@ -240,7 +240,7 @@ tmux -L "$SOCK" new-window -t muxa -n gridhost "exec sleep 3600"
 sleep 0.2
 grid_pane="$(tmux -L "$SOCK" list-panes -t muxa:gridhost -F '#{pane_id}')"
 tmux -L "$SOCK" resize-window -t muxa:gridhost -x 200 -y 40 2>/dev/null || true
-muxa_as "$grid_pane" register --name gridhost --kind generic --deliver inject >/dev/null
+muxa_as "$grid_pane" register --name gridhost --kind generic >/dev/null
 grid_win="$(tmux -L "$SOCK" display-message -t "$grid_pane" -p '#{session_name}:#{window_index}')"
 
 muxa_as "$grid_pane" spawn --name g1 -- sleep 3600 >/dev/null
@@ -446,7 +446,7 @@ assert_contains "$occ_err" "already has live worker" "symlink to occupied cwd wa
 tmux -L "$SOCK" new-window -d -t muxa -n occroot -c "$occ_root" "exec sleep 3600"
 sleep 0.2
 occroot_pane="$(tmux -L "$SOCK" list-panes -t muxa:occroot -F '#{pane_id}' | head -1)"
-muxa_as "$occroot_pane" register --name occroot --kind generic --deliver inject >/dev/null
+muxa_as "$occroot_pane" register --name occroot --kind generic >/dev/null
 occ_spawn "$tmpdir/occ-root.err" --cwd "$occ_root" --name occ-fromroot -- sleep 3600
 [ "$occ_code" -eq 0 ] && ok "spawn into a root's cwd exits 0" \
   || bad "spawn into a root's cwd exits 0" "exit=$occ_code out=$occ_out err=$occ_err"
@@ -461,7 +461,7 @@ mkdir -p "$ghost_dir"
 tmux -L "$SOCK" new-window -d -t muxa -n occghost -c "$ghost_dir" "exec zsh"
 sleep 0.2
 occghost_pane="$(tmux -L "$SOCK" list-panes -t muxa:occghost -F '#{pane_id}' | head -1)"
-muxa_as "$occghost_pane" register --name occghost --kind cursor --deliver hook --parent bob >/dev/null
+muxa_as "$occghost_pane" register --name occghost --kind cursor --parent bob >/dev/null
 who="$(muxa_as "$bob_pane" who)"
 assert_who_status "$who" "occghost" "ghost" "cursor+shell occupant is ghost"
 occ_spawn "$tmpdir/occ-ghost.err" --cwd "$ghost_dir" --name occ-afterghost -- sleep 3600
@@ -500,10 +500,25 @@ esac
 # --- kind detection: cursor-agent node vs claude SessionStart ---
 who_kind_for() {
   local who="$1" name="$2" k
-  k="$(printf '%s\n' "$who" | awk -v n="$name" '$1==n { print $5; exit }')"
+  k="$(printf '%s\n' "$who" | awk -v n="$name" '$1==n { print substr($0, 87, 8); exit }')"
   k="${k#"${k%%[![:space:]]*}"}"
   k="${k%"${k##*[![:space:]]}"}"
   printf '%s' "$k"
+}
+
+who_state_for() {
+  local who="$1" name="$2" s
+  s="$(printf '%s\n' "$who" | awk -v n="$name" '$1==n { print substr($0, 96, 8); exit }')"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+assert_who_state() {
+  local who="$1" name="$2" want="$3" label="$4"
+  local got
+  got="$(who_state_for "$who" "$name")"
+  [ "$got" = "$want" ] && ok "$label" || bad "$label" "name=$name want=$want got=$got"
 }
 
 kind_fakebin="$tmpdir/kind-fakebin"
@@ -539,8 +554,7 @@ case "$kindnode_cmd" in
     ok "cursor-agent stub foreground is $kindnode_cmd (argv classifies cursor)"
     ;;
 esac
-printf '%s' '{"session_id":"node-cursor-1"}' \
-  | muxa_as "$kindnode_pane" hook session-start --kind claude >/dev/null
+muxa_as "$kindnode_pane" register --name kind-node >/dev/null
 kindnode_kind="$(tmux -L "$SOCK" display-message -t "$kindnode_pane" -p '#{@muxa_kind}')"
 [ "$kindnode_kind" = "cursor" ] && ok "node cursor-agent path registers as cursor" \
   || bad "node cursor-agent path registers as cursor" "got=$kindnode_kind"
@@ -549,25 +563,26 @@ tmux -L "$SOCK" new-window -t muxa -n kindclaude \
   "$kind_fakebin/claude"
 sleep 0.2
 kindclaude_pane="$(tmux -L "$SOCK" list-panes -t muxa:kindclaude -F '#{pane_id}' | head -1)"
-printf '%s' '{"session_id":"claude-sess-1"}' \
-  | muxa_as "$kindclaude_pane" hook session-start --kind claude >/dev/null
+muxa_as "$kindclaude_pane" hook session-start --kind claude >/dev/null
 kindclaude_kind="$(tmux -L "$SOCK" display-message -t "$kindclaude_pane" -p '#{@muxa_kind}')"
-[ "$kindclaude_kind" = "claude" ] && ok "claude pane stays claude on SessionStart" \
-  || bad "claude pane stays claude on SessionStart" "got=$kindclaude_kind"
+[ "$kindclaude_kind" = "claude" ] && ok "session-start registers an unregistered pane" \
+  || bad "session-start registers an unregistered pane" "got=$kindclaude_kind"
+kindclaude_name="$(tmux -L "$SOCK" display-message -t "$kindclaude_pane" -p '#{@muxa_name}')"
+[ -n "$kindclaude_name" ] && ok "session-start assigns a name" \
+  || bad "session-start assigns a name" "name empty"
 
-# Spawned cursor child must not flip to claude when a stray claude hook fires.
+# Spawned cursor child must not flip when a leftover session-start fires.
 spawn_agent="$(muxa_as "$bob_pane" spawn --name kind-agent -- "$kind_fakebin/agent")"
 assert_contains "$spawn_agent" "kind=cursor" "spawn agent infers cursor kind"
 kind_agent_pane="$(printf '%s\n' "$spawn_agent" | spawn_pane_id)"
-printf '%s' '{"session_id":"spawn-agent-1"}' \
-  | muxa_as "$kind_agent_pane" hook session-start --kind claude >/dev/null
+muxa_as "$kind_agent_pane" hook session-start --kind claude >/dev/null
 kind_agent_kind="$(tmux -L "$SOCK" display-message -t "$kind_agent_pane" -p '#{@muxa_kind}')"
-[ "$kind_agent_kind" = "cursor" ] && ok "spawned cursor survives claude SessionStart" \
-  || bad "spawned cursor survives claude SessionStart" "got=$kind_agent_kind"
+[ "$kind_agent_kind" = "cursor" ] && ok "spawned cursor survives leftover session-start" \
+  || bad "spawned cursor survives leftover session-start" "got=$kind_agent_kind"
 who_kind="$(muxa_as "$bob_pane" who)"
 [ "$(who_kind_for "$who_kind" "kind-agent")" = "cursor" ] \
-  && ok "who KIND matches cursor foreground after stray hook" \
-  || bad "who KIND matches cursor foreground after stray hook" \
+  && ok "who KIND matches cursor foreground after leftover hook" \
+  || bad "who KIND matches cursor foreground after leftover hook" \
      "got=$(who_kind_for "$who_kind" "kind-agent")"
 
 mkdir -p "$kind_fakebin/has-component" "$kind_fakebin/docker-compose"
@@ -585,8 +600,7 @@ tmux -L "$SOCK" new-window -t muxa -n kindcomp \
   "$kind_fakebin/has-component/run"
 sleep 0.2
 kindcomp_pane="$(tmux -L "$SOCK" list-panes -t muxa:kindcomp -F '#{pane_id}' | head -1)"
-printf '%s' '{"session_id":"comp-1"}' \
-  | muxa_as "$kindcomp_pane" hook session-start --kind generic >/dev/null
+muxa_as "$kindcomp_pane" register --name kind-comp >/dev/null
 kindcomp_kind="$(tmux -L "$SOCK" display-message -t "$kindcomp_pane" -p '#{@muxa_kind}')"
 [ "$kindcomp_kind" = "generic" ] && ok "component path does not classify as pi" \
   || bad "component path does not classify as pi" "got=$kindcomp_kind"
@@ -595,8 +609,7 @@ tmux -L "$SOCK" new-window -t muxa -n kindcompose \
   "$kind_fakebin/docker-compose/run"
 sleep 0.2
 kindcompose_pane="$(tmux -L "$SOCK" list-panes -t muxa:kindcompose -F '#{pane_id}' | head -1)"
-printf '%s' '{"session_id":"compose-1"}' \
-  | muxa_as "$kindcompose_pane" hook session-start --kind generic >/dev/null
+muxa_as "$kindcompose_pane" register --name kind-compose >/dev/null
 kindcompose_kind="$(tmux -L "$SOCK" display-message -t "$kindcompose_pane" -p '#{@muxa_kind}')"
 [ "$kindcompose_kind" = "generic" ] && ok "compose path does not classify as pi" \
   || bad "compose path does not classify as pi" "got=$kindcompose_kind"
@@ -610,11 +623,10 @@ tmux -L "$SOCK" new-window -t muxa -n kindomp \
   "$kind_fakebin/omp"
 sleep 0.2
 kindomp_pane="$(tmux -L "$SOCK" list-panes -t muxa:kindomp -F '#{pane_id}' | head -1)"
-printf '%s' '{"session_id":"omp-1"}' \
-  | muxa_as "$kindomp_pane" hook session-start --kind pi >/dev/null
+muxa_as "$kindomp_pane" hook session-start --kind pi >/dev/null
 kindomp_kind="$(tmux -L "$SOCK" display-message -t "$kindomp_pane" -p '#{@muxa_kind}')"
-[ "$kindomp_kind" = "pi" ] && ok "omp executable still classifies as pi" \
-  || bad "omp executable still classifies as pi" "got=$kindomp_kind"
+[ "$kindomp_kind" = "pi" ] && ok "session-start --kind pi registers as pi" \
+  || bad "session-start --kind pi registers as pi" "got=$kindomp_kind"
 
 mkdir -p "$kind_fakebin/claude-projects/cursor-agent"
 cat > "$kind_fakebin/claude-projects/cursor-agent/node" <<'EOF'
@@ -642,45 +654,30 @@ tmux -L "$SOCK" new-window -t muxa -n kindclaudeproj \
   "$kind_fakebin/claude-projects/cursor-agent/node"
 sleep 0.2
 kindclaudeproj_pane="$(tmux -L "$SOCK" list-panes -t muxa:kindclaudeproj -F '#{pane_id}' | head -1)"
-tmux -L "$SOCK" set-option -p -t "$kindclaudeproj_pane" @muxa_kind cursor
-tmux -L "$SOCK" set-option -p -t "$kindclaudeproj_pane" @muxa_name kind-claudeproj
-printf '%s' '{"session_id":"claudeproj-1"}' \
-  | muxa_as "$kindclaudeproj_pane" hook session-start --kind claude >/dev/null
+muxa_as "$kindclaudeproj_pane" register --name kind-claudeproj >/dev/null
 kindclaudeproj_kind="$(tmux -L "$SOCK" display-message -t "$kindclaudeproj_pane" -p '#{@muxa_kind}')"
 [ "$kindclaudeproj_kind" = "cursor" ] \
   && ok "claude-projects cursor path is not misclassified as claude" \
   || bad "claude-projects cursor path is not misclassified as claude" \
      "got=$kindclaudeproj_kind"
 
-# --- CLI session id mapping ---
-printf '%s' '{"session_id":"cli-sess-123"}' | muxa_as "$alice_pane" hook session-start --kind generic
-sid="$(tmux -L "$SOCK" display-message -p -t "$alice_pane" '#{@muxa_session}')"
-[ "$sid" = "cli-sess-123" ] && ok "session-start stores @muxa_session" \
-  || bad "session-start stores @muxa_session" "got: $sid"
-
-who="$(muxa_as "$bob_pane" who)"
-assert_contains "$who" "cli-sess-123" "who shows session id"
-
-# --- Cursor session-start pins MUXA_PANE for later IDE hooks ---
-cursor_env="$(printf '%s' '{"session_id":"cursor-conv-1"}' | muxa_as "$alice_pane" hook session-start --kind cursor)"
-assert_contains "$cursor_env" '"MUXA_PANE"' "cursor session-start emits MUXA_PANE env"
-assert_contains "$cursor_env" "$alice_pane" "cursor session-start env names this pane"
-
-# --- afterAgentResponse clears stuck busy ---
-muxa_as "$alice_pane" state busy
+# Presence hooks are gone: leftover events no-op, STATE comes from the broker.
+muxa_as "$alice_pane" hook busy
 muxa_as "$alice_pane" hook afterAgentResponse
-aar_st="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_state}')"
-[ "$aar_st" = "idle" ] && ok "afterAgentResponse sets idle" \
-  || bad "afterAgentResponse sets idle" "state=$aar_st"
-printf '%s' '{"session_id":"cli-sess-123"}' | muxa_as "$alice_pane" hook session-start --kind generic >/dev/null
-muxa_as "$alice_pane" register --name alice --kind generic --deliver inject --parent bob >/dev/null
+muxa_as "$alice_pane" hook session-end
+who="$(muxa_as "$bob_pane" who)"
+assert_contains "$who" "alice" "leftover presence hooks do not unregister"
+assert_who_state "$who" "alice" "idle" "who STATE is idle when the pane is not drawing"
+got_sess="$(muxa_as "$alice_pane" session)"
+[ -z "$got_sess" ] && ok "muxa session is empty (CLI session id is not tracked)" \
+  || bad "muxa session is empty (CLI session id is not tracked)" "got: $got_sess"
 
 projdir="$tmpdir/acme-widgets"
 mkdir -p "$projdir"
 tmux -L "$SOCK" new-window -d -t muxa -n proj -c "$projdir" "exec sleep 3600"
 sleep 0.2
 proj_pane="$(tmux -L "$SOCK" list-panes -t muxa:proj -F '#{pane_id}' | head -1)"
-muxa_as "$proj_pane" register --name projagent --kind generic --deliver inject >/dev/null
+muxa_as "$proj_pane" register --name projagent --kind generic >/dev/null
 who="$(muxa_as "$bob_pane" who)"
 assert_contains "$who" "$projdir" "who shows pane cwd"
 assert_contains "$who" "CWD" "who header has CWD"
@@ -690,21 +687,21 @@ assert_contains "$who" "STATUS" "who header has STATUS"
 tmux -L "$SOCK" new-window -t muxa -n zshghost "exec zsh"
 sleep 0.2
 zsh_pane="$(tmux -L "$SOCK" list-panes -t muxa:zshghost -F '#{pane_id}')"
-muxa_as "$zsh_pane" register --name zsh-cursor --kind cursor --deliver hook >/dev/null
+muxa_as "$zsh_pane" register --name zsh-cursor --kind cursor >/dev/null
 who="$(muxa_as "$bob_pane" who)"
 assert_who_status "$who" "zsh-cursor" "ghost" "cursor+shell is ghost"
 
 tmux -L "$SOCK" new-window -t muxa -n zshpi "exec zsh"
 sleep 0.2
 zshpi_pane="$(tmux -L "$SOCK" list-panes -t muxa:zshpi -F '#{pane_id}')"
-muxa_as "$zshpi_pane" register --name zsh-pi --kind pi --deliver hook >/dev/null
+muxa_as "$zshpi_pane" register --name zsh-pi --kind pi >/dev/null
 who="$(muxa_as "$bob_pane" who)"
 assert_who_status "$who" "zsh-pi" "ghost" "pi+shell is ghost"
 
 tmux -L "$SOCK" new-window -t muxa -n zshgen "exec zsh"
 sleep 0.2
 zshgen_pane="$(tmux -L "$SOCK" list-panes -t muxa:zshgen -F '#{pane_id}')"
-muxa_as "$zshgen_pane" register --name zsh-generic --kind generic --deliver inject >/dev/null
+muxa_as "$zshgen_pane" register --name zsh-generic --kind generic >/dev/null
 who="$(muxa_as "$bob_pane" who)"
 assert_who_status "$who" "zsh-generic" "live" "generic+shell is live"
 
@@ -714,7 +711,7 @@ tmux -L "$SOCK" new-window -t muxa -n badcwd -c "$gone_dir" "exec sleep 3600"
 sleep 0.2
 badcwd_pane="$(tmux -L "$SOCK" list-panes -t muxa:badcwd -F '#{pane_id}')"
 rm -rf "$gone_dir"
-muxa_as "$badcwd_pane" register --name bad-cwd --kind generic --deliver inject >/dev/null
+muxa_as "$badcwd_pane" register --name bad-cwd --kind generic >/dev/null
 who="$(muxa_as "$bob_pane" who)"
 assert_who_status "$who" "bad-cwd" "ghost" "missing pane cwd is ghost"
 
@@ -754,6 +751,13 @@ case "$human_who" in
   \[*) bad "who default is not JSON" "got: $human_who" ;;
   *) ok "who default is not JSON" ;;
 esac
+who_hdr="$(printf '%s\n' "$human_who" | head -1)"
+case "$who_hdr" in
+  *DELIVER*) bad "who header has no DELIVER column" "got: $who_hdr" ;;
+  *) ok "who header has no DELIVER column" ;;
+esac
+assert_contains "$who_hdr" "STATE" "who header has STATE"
+assert_contains "$who_hdr" "STATUS" "who header has STATUS"
 
 whoj="$(muxa_as "$bob_pane" who --json)"
 python3 -c '
@@ -781,6 +785,10 @@ proj_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$
   || bad "who --json status is ghost for cursor+shell" "got: $(who_json_get "$whoj" zsh-cursor status 2>/dev/null || true)"
 [ "$(who_json_get "$whoj" projagent status)" = "live" ] && ok "who --json status is live for generic sleep" \
   || bad "who --json status is live for generic sleep" "got: $(who_json_get "$whoj" projagent status 2>/dev/null || true)"
+[ "$(who_json_get "$whoj" alice state)" = "idle" ] && ok "who --json state is idle when the pane is not drawing" \
+  || bad "who --json state is idle when the pane is not drawing" "got: $(who_json_get "$whoj" alice state 2>/dev/null || true)"
+who_json_is_null "$whoj" alice session && ok "who --json session is always null" \
+  || bad "who --json session is always null" "alice session not null"
 
 occ="$(python3 -c '
 import json, os, sys
@@ -835,7 +843,7 @@ nonej="$(muxa_as "$eve_pane" send --json --all json-none)"
 tmux -L "$SOCK" new-window -t muxa -n taildata "printf '%s\n' alpha-tail bravo-tail charlie-tail; exec sleep 3600"
 sleep 0.3
 tail_pane="$(tmux -L "$SOCK" list-panes -t muxa:taildata -F '#{pane_id}' | head -1)"
-muxa_as "$tail_pane" register --name tautest --kind generic --deliver inject --parent bob >/dev/null
+muxa_as "$tail_pane" register --name tautest --kind generic --parent bob >/dev/null
 tailed="$(muxa_as "$bob_pane" tail tautest)"
 assert_contains "$tailed" "alpha-tail" "tail captures visible pane"
 assert_contains "$tailed" "charlie-tail" "tail captures last visible line"
@@ -857,7 +865,7 @@ set -e
 tmux -L "$SOCK" new-window -t muxa -n unreg "exec sleep 3600"
 sleep 0.2
 unreg_pane="$(tmux -L "$SOCK" list-panes -t muxa:unreg -F '#{pane_id}')"
-muxa_as "$unreg_pane" register --name dropme --kind generic --deliver inject >/dev/null
+muxa_as "$unreg_pane" register --name dropme --kind generic >/dev/null
 unreg_out="$(muxa_as "$bob_pane" unregister dropme)"
 assert_contains "$unreg_out" "unregistered dropme" "unregister by name confirms"
 who="$(muxa_as "$bob_pane" who)"
@@ -869,7 +877,7 @@ esac
 tmux -L "$SOCK" new-window -t muxa -n unreg2 "exec sleep 3600"
 sleep 0.2
 unreg2_pane="$(tmux -L "$SOCK" list-panes -t muxa:unreg2 -F '#{pane_id}')"
-muxa_as "$unreg2_pane" register --name dropid --kind generic --deliver inject >/dev/null
+muxa_as "$unreg2_pane" register --name dropid --kind generic >/dev/null
 drop_id="$(muxa_as "$unreg2_pane" id)"
 unreg_out="$(muxa_as "$bob_pane" unregister "$drop_id")"
 assert_contains "$unreg_out" "unregistered dropid" "unregister by id confirms"
@@ -886,13 +894,15 @@ set -e
 [ "$unreg_code" -eq 2 ] && ok "unregister unknown exits 2" \
   || bad "unregister unknown exits 2" "exit=$unreg_code"
 
-got_sess="$(muxa_as "$alice_pane" session)"
-assert_contains "$got_sess" "cli-sess-123" "muxa session prints CLI session id"
-
 muxa_as "$alice_pane" hook session-end
-sid2="$(tmux -L "$SOCK" display-message -p -t "$alice_pane" '#{@muxa_session}')"
-[ -z "$sid2" ] && ok "session-end clears @muxa_session" \
-  || bad "session-end clears @muxa_session" "got: $sid2"
+who="$(muxa_as "$bob_pane" who)"
+assert_contains "$who" "alice" "session-end leftover does not unregister"
+set +e
+muxa_as "$alice_pane" state busy >/dev/null 2>&1
+state_rc=$?
+set -e
+[ "$state_rc" -eq 1 ] && ok "state is not a command" \
+  || bad "state is not a command" "exit=$state_rc"
 
 # --- jobs/preflight gone; muxa must not require br or git ---
 nobr_bin="$tmpdir/nobr-bin"

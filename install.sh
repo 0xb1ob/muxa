@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install muxa onto PATH and wire Claude Code / Cursor / Oh My Pi user hooks.
+# Install muxa onto PATH and copy muxa-parent / muxa-worker skills.
 #
 # Fresh machine (copy-paste):
 #   curl -fsSL https://raw.githubusercontent.com/0xb1ob/muxa/main/install.sh | bash
@@ -199,98 +199,10 @@ for skill in muxa-parent muxa-worker; do
   done
 done
 
-# Claude Code user hooks — merge without clobbering unrelated settings.
-python3 - "$HOME/.claude/settings.json" "$BIN/muxa" <<'PY'
-import json, os, sys
-path, muxa = sys.argv[1], sys.argv[2]
-os.makedirs(os.path.dirname(path), exist_ok=True)
-try:
-    with open(path) as f:
-        data = json.load(f)
-except FileNotFoundError:
-    data = {}
-except json.JSONDecodeError:
-    print("muxa-install: ~/.claude/settings.json is not JSON; skip Claude merge", file=sys.stderr)
-    sys.exit(0)
-
-cmd = muxa + " hook"
-hooks = data.setdefault("hooks", {})
-
-def cmd_entry(event, extra=""):
-    c = cmd + " " + event + extra
-    return [{"hooks": [{"type": "command", "command": c}]}]
-
-wanted = {
-    "SessionStart": cmd_entry("session-start", " --kind claude"),
-    "SessionEnd": cmd_entry("session-end"),
-    "PreToolUse": cmd_entry("busy"),
-    "PermissionRequest": cmd_entry("blocked"),
-    "Stop": cmd_entry("stop", " --format claude"),
-}
-
-changed = False
-for event, entries in wanted.items():
-    blob = json.dumps(hooks.get(event), sort_keys=True)
-    if "muxa hook" not in blob:
-        hooks[event] = entries + (hooks.get(event) or [])
-        changed = True
-if changed:
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
-    print("merged Claude Code hooks ->", path)
-else:
-    print("Claude Code hooks already mention muxa")
-PY
-
-# Cursor user hooks
-python3 - "$HOME/.cursor/hooks.json" "$BIN/muxa" <<'PY'
-import json, os, sys
-path, muxa = sys.argv[1], sys.argv[2]
-os.makedirs(os.path.dirname(path), exist_ok=True)
-try:
-    with open(path) as f:
-        data = json.load(f)
-except FileNotFoundError:
-    data = {"version": 1, "hooks": {}}
-except json.JSONDecodeError:
-    print("muxa-install: ~/.cursor/hooks.json is not JSON; skip Cursor merge", file=sys.stderr)
-    sys.exit(0)
-
-data.setdefault("version", 1)
-hooks = data.setdefault("hooks", {})
-wanted = {
-    "sessionStart": [{"command": muxa + " hook session-start --kind cursor"}],
-    "sessionEnd": [{"command": muxa + " hook session-end"}],
-    "preToolUse": [{"command": muxa + " hook busy"}],
-    "stop": [{"command": muxa + " hook stop --format cursor", "loop_limit": None}],
-    "afterAgentResponse": [{"command": muxa + " hook idle"}],
-}
-changed = False
-for event, entries in wanted.items():
-    blob = json.dumps(hooks.get(event), sort_keys=True)
-    if "muxa hook" not in blob:
-        hooks[event] = entries + (hooks.get(event) or [])
-        changed = True
-if changed:
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
-    print("merged Cursor hooks ->", path)
-else:
-    print("Cursor hooks already mention muxa")
-PY
-
-# Oh My Pi / pi extension (copy, do not merge JS)
-for dest in "$HOME/.omp/agent/extensions" "$HOME/.pi/agent/extensions"; do
-  mkdir -p "$dest"
-  cp "$ROOT/hooks/pi/muxa.ts" "$dest/muxa.ts"
-  echo "installed pi extension -> $dest/muxa.ts"
-done
+# Presence/hooks are gone. Do not merge per-CLI hook JSON. Spawn registers
+# children; a root that starts by hand may call `muxa hook session-start` or
+# `muxa register`. Leftover `muxa hook busy|idle|stop` entries no-op.
+rm -f "$HOME/.omp/agent/extensions/muxa.ts" "$HOME/.pi/agent/extensions/muxa.ts"
 
 echo
 echo "muxa $("$BIN/muxa" version) -> $BIN/muxa  (repo $ROOT)"

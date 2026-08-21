@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Project-scoped muxa hook entrypoint. Invoked by .claude/settings.json and
-# .cursor/hooks.json — never requires a global install.
+# Optional project-scoped session-start. Invoked by .claude/settings.json and
+# .cursor/hooks.json — never required for spawned panes.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="$ROOT/bin:$PATH"

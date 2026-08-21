@@ -18,11 +18,12 @@ muxa pays for the body once, as a user message, and nothing else.
 
 ## Actors
 
-- **tmux** is the process manager, roster, and presence store
+- **tmux** is the process manager and roster
 - **muxa-broker** is the delivery daemon: unix socket, file-backed queue,
   paste-buffer + Enter when the pane looks free. It is required for `muxa send`.
-- **CLI hooks** register panes and report presence (`idle`/`busy`/`blocked`).
-  They are not a mail drain. The broker is the only delivery path.
+  Control-mode `%output` silence is presence: a pane that is drawing is busy.
+- **`muxa hook session-start`** is optional root self-registration. Spawned
+  panes are already registered by `spawn`. Presence is not hook-reported.
 
 ## Identity
 
@@ -32,26 +33,30 @@ Each participating pane sets tmux user options:
 | --------------- | -------------------------------------------- |
 | `@muxa_name`    | unique alias (`coder`, `swift-oak`, …)       |
 | `@muxa_id`      | stable 12-hex id for this pane's registration |
-| `@muxa_session` | CLI session/conversation id; empty until the agent hook reports it |
 | `@muxa_parent`  | parent alias, empty if this pane is a root   |
 | `@muxa_kind`    | `claude` \| `cursor` \| `pi` \| `generic`    |
-| `@muxa_state`   | `idle` \| `busy` \| `blocked`                |
-| `@muxa_deliver` | `hook` \| `inject` (roster leftover; send always uses the broker) |
-| `@muxa_hook_ok` | leftover; not used for delivery |
-| `@muxa_unread`  | leftover option; not a mailbox counter |
 
 Roster is `tmux list-panes -a`. There is no registry file. `muxa who`
-prints that roster plus each pane's current working directory and a
-**STATUS** column so agents on the same tmux server, in different
-projects, can tell which is which. `muxa who --json` is the same roster
-as objects (`name`, `id`, `parent`, `kind`, `state`, `pane`, `session`,
-`cwd`, `status`). Empty `parent` and `session` are JSON `null`. Default
-`muxa who` is unchanged.
+prints that roster plus each pane's current working directory, a **STATE**
+column derived from the broker's drawing list, and a **STATUS** column so
+agents on the same tmux server, in different projects, can tell which is
+which. `muxa who --json` is the same roster as objects (`name`, `id`,
+`parent`, `kind`, `state`, `pane`, `session`, `cwd`, `status`). Empty
+`parent` is JSON `null`. `session` is always JSON `null` (CLI conversation
+ids are not tracked). Default `muxa who` has no DELIVER column.
 
 `muxa tail NAME [-n N]` is a one-shot pane read so a parent never has to
 call `tmux capture-pane`. With no `-n` it prints the visible grid; `-n N`
 prints the last N lines of history plus the visible grid, ignoring trailing
 blank rows. One read, never a poll. Unknown names exit 2.
+
+**STATE** is computed from the broker, not stored on the pane. No hook is
+required. `blocked` is not a value:
+
+| STATE | Meaning |
+| ----- | ------- |
+| `idle` | Pane is not in the broker's live drawing list |
+| `busy` | Pane has been emitting `%output` across a quiet window |
 
 **STATUS** is informational only; ghosts are not filtered from the roster
 and remain reachable via `muxa send`:
@@ -60,15 +65,14 @@ and remain reachable via `muxa send`:
 | ------ | ------- |
 | `live` | Pane cwd exists and (for `claude`/`cursor`/`pi`) the foreground process is not a shell |
 | `ghost` | Pane cwd is missing, or a `claude`/`cursor`/`pi` pane is sitting at a shell prompt (`zsh`, `bash`, `fish`, `sh`, `dash`, `ksh`) |
+| `drawing` | `live`, and the pane is in the broker's drawing list |
 
 `generic` panes at a shell are still `live`. A CLI version string in
 `pane_current_command` (e.g. `2.1.233` for Claude) is not treated as a
 shell.
 
-`muxa unregister NAME|ID` clears the same pane options as the
-`session-end` hook (`@muxa_name`, `@muxa_id`, `@muxa_parent`,
-`@muxa_kind`, `@muxa_state`, `@muxa_deliver`, `@muxa_session`,
-`@muxa_hook_ok`, `@muxa_unread`), resets
+`muxa unregister NAME|ID` clears `@muxa_name`, `@muxa_id`, `@muxa_parent`,
+`@muxa_kind` (and leftover options from older installs), resets
 the pane title, and leaves the tmux pane running. Lookup prefers an exact
 name match, then a 12-hex id match. Unknown targets exit 2.
 
@@ -93,9 +97,13 @@ roots occupying the path do not warn; name conflicts still fail as today.
 Sets `MUXA_PARENT` and records `@muxa_parent` before the child CLI boots. Omit `--name` to get a generated
 `adjective-noun` alias (`swift-oak`, `quiet-lark`, …), unique on the tmux
 roster. Explicit `--name` and `MUXA_NAME` still win. `@muxa_id` is muxa's
-registration id, not the CLI session id — that lives in `@muxa_session`
-once a `session-start` hook reports `session_id` / `sessionId` /
-`conversation_id`.
+registration id. Spawned panes do not need a hook to appear on the roster.
+
+A root pane started by hand may call `muxa hook session-start [--kind KIND]`
+(or `muxa register`). That hook needs no stdin payload and no pane-resolution
+ladder: `TMUX_PANE` is enough. If the pane is already registered, it is a
+no-op. Presence events (`busy` / `idle` / `blocked` / `stop`) are not part
+of muxa.
 
 ## Reachability
 
@@ -251,24 +259,13 @@ copy-mode (`#{pane_in_mode}`). Copy-mode is a silent-loss mode:
 the application, and tmux later flushes the held paste **without its
 Enter**, concatenated onto the next paste.
 
-IDE-hosted Cursor sessions are not a process in the registered pane.
-Their hooks often inherit `TMUX` but not `TMUX_PANE`, so `display-message`
-would resolve the *active* pane (a worker the human is watching) instead
-of the root. Hook events resolve the pane in this order: `MUXA_PANE`
-(pinned by Cursor `sessionStart` `env`), `@muxa_session` matching
-`conversation_id`, registered `TMUX_PANE` if its session matches, then a
-hook-deliver root whose cwd is `CURSOR_PROJECT_DIR` / `PWD`. Hooks may
-run outside tmux as long as the tmux server is reachable. Cursor
-`sessionStart` emits `{"env":{"MUXA_PANE":"%id","TMUX_PANE":"%id"}}` so
-later hooks stay pinned. `afterAgentResponse` sets `idle` so a missed
-Stop cannot leave the roster stuck `busy`. `status: aborted|error` sets
-`idle`.
+IDE-hosted Cursor sessions are not supported. Every agent runs as a
+process inside a tmux pane. There is no hook-resolution ladder.
 
-```
-hook stop / idle / afterAgentResponse:
-  resolve pane; set @muxa_state idle
-  do not claim, inject, or print a continue payload
-```
+`muxa hook session-start [--kind KIND]` registers the pane named by
+`TMUX_PANE` if it is not already registered. Spawned panes skip it.
+Stdin is ignored. Leftover presence events (`busy`, `idle`, `blocked`,
+`stop`, `session-end`) exit 0 and change nothing.
 
 Native continue payloads are not used. Incoming mail is a user turn
 pasted by the broker:
@@ -302,6 +299,7 @@ muxa session
 muxa parent
 muxa children
 muxa spawn [--name worker] [--cwd DIR] [--window] -- command…
+muxa hook session-start [--kind KIND]
 muxa broker [start|status|stop]
 ```
 
