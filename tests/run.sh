@@ -562,7 +562,8 @@ chmod +x "$kind_fakebin/claude"
 
 cat > "$kind_fakebin/agent" <<'EOF'
 #!/bin/sh
-exec sleep 3600
+# Keep this shell (and its script path) in argv; exec sleep drops agent on Linux.
+while sleep 3600; do :; done
 EOF
 chmod +x "$kind_fakebin/agent"
 

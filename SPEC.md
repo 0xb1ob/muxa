@@ -104,14 +104,11 @@ registration id. Spawned panes do not need a hook to appear on the roster.
 
 A root pane started by hand may call `muxa hook session-start [--kind KIND]`
 (or `muxa register`). That hook needs no stdin payload and no pane-resolution
-ladder: `TMUX_PANE` is enough. `--kind` is a hint. Process argv — including
-descendants of `#{pane_pid}` — wins when it identifies a CLI family, so a
-Cursor pane whose tmux command is `node` (agent / cursor-agent, often with
-a shell still as `pane_pid`) registers as `cursor` and stays `cursor` after
-a later Claude `SessionStart`. If the pane is already registered, the hook
-does not rename or re-parent it; it may correct `@muxa_kind` only when
-process evidence says so, and must not flip a live `claude`/`cursor`/`pi`
-registration to a different family without that evidence. Presence events (`busy`, `idle`, `blocked`, `stop`) are not part of muxa.
+ladder: `TMUX_PANE` is enough. `--kind` is a hint: process argv of `#{pane_pid}`
+and its direct children wins, otherwise `--kind`, otherwise keep existing
+`@muxa_kind`, otherwise `generic`. If the pane is already registered, the hook
+does not rename or re-parent it. Presence events (`busy`, `idle`, `blocked`,
+`stop`) are not part of muxa.
 
 `muxa hook` fails open. It runs from registrations inside agent harnesses,
 where a non-zero exit — 2 especially — denies the tool call or turn that
@@ -248,8 +245,7 @@ process inside a tmux pane. There is no hook-resolution ladder.
 
 `muxa hook session-start [--kind KIND]` registers the pane named by
 `TMUX_PANE` if it is not already registered. Spawned panes skip identity
-creation; a leftover hook still must not overwrite their kind to a
-different CLI family without process/argv evidence. Stdin is ignored.
+creation. Stdin is ignored.
 
 Native continue payloads are not used. Incoming mail is a user turn
 pasted by the broker:
