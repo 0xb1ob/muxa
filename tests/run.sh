@@ -21,8 +21,8 @@ fi
 for skill in muxa-parent muxa-worker; do
   src="$ROOT/skills/$skill/SKILL.md"
   [ -f "$src" ] || { echo "missing $src" >&2; exit 1; }
-  if grep -E 'tmux[[:space:]]+capture-pane' "$src" >/dev/null; then
-    echo "skill $src still invokes tmux capture-pane" >&2
+  if grep -E 'tmux[[:space:]]+(capture-pane|kill-pane)' "$src" >/dev/null; then
+    echo "skill $src still invokes tmux capture-pane or kill-pane" >&2
     exit 1
   fi
 done
@@ -126,6 +126,11 @@ muxa_as() {
   local pane="$1"
   shift
   TMUX_PANE="$pane" muxa "$@"
+}
+
+pane_exists() {
+  tmux -L "$SOCK" list-panes -a -F '#{pane_id}' 2>/dev/null \
+    | awk -v p="$1" '$1==p { found=1 } END { exit found ? 0 : 1 }'
 }
 
 # --- register + who ---
@@ -1021,6 +1026,89 @@ set -e
 [ "$unreg_code" -eq 2 ] && ok "unregister unknown exits 2" \
   || bad "unregister unknown exits 2" "exit=$unreg_code"
 
+if pane_exists "$unreg_pane"; then
+  ok "unregister leaves the tmux pane running"
+else
+  bad "unregister leaves the tmux pane running" "pane $unreg_pane gone"
+fi
+
+# --- kill ---
+tmux -L "$SOCK" new-window -t muxa -n killme "exec sleep 3600"
+sleep 0.2
+kill_pane="$(tmux -L "$SOCK" list-panes -t muxa:killme -F '#{pane_id}')"
+muxa_as "$kill_pane" register --name killme --kind generic >/dev/null
+kill_out="$(muxa_as "$bob_pane" kill killme)"
+assert_contains "$kill_out" "killed killme" "kill by name confirms"
+who="$(muxa_as "$bob_pane" who)"
+case "$who" in
+  *killme*) bad "kill by name removes from who" "still listed: $who" ;;
+  *) ok "kill by name removes from who" ;;
+esac
+whoj_kill="$(muxa_as "$bob_pane" who --json)"
+set +e
+who_json_get "$whoj_kill" killme status >/dev/null
+kill_json_rc=$?
+set -e
+[ "$kill_json_rc" -ne 0 ] && ok "kill by name removes from who --json" \
+  || bad "kill by name removes from who --json" "still listed: $whoj_kill"
+if pane_exists "$kill_pane"; then
+  bad "kill by name removes the tmux pane" "pane $kill_pane still exists"
+else
+  ok "kill by name removes the tmux pane"
+fi
+
+tmux -L "$SOCK" new-window -t muxa -n killid "exec sleep 3600"
+sleep 0.2
+killid_pane="$(tmux -L "$SOCK" list-panes -t muxa:killid -F '#{pane_id}')"
+muxa_as "$killid_pane" register --name killid --kind generic >/dev/null
+kill_id="$(muxa_as "$killid_pane" id)"
+kill_out="$(muxa_as "$bob_pane" kill "$kill_id")"
+assert_contains "$kill_out" "killed killid" "kill by id confirms"
+who="$(muxa_as "$bob_pane" who)"
+case "$who" in
+  *killid*) bad "kill by id removes from who" "still listed: $who" ;;
+  *) ok "kill by id removes from who" ;;
+esac
+
+set +e
+muxa_as "$bob_pane" kill nobody 2>/dev/null
+kill_code=$?
+set -e
+[ "$kill_code" -eq 2 ] && ok "kill unknown exits 2" \
+  || bad "kill unknown exits 2" "exit=$kill_code"
+
+killdead_sp="$(muxa_as "$bob_pane" spawn --name killdead -- false)"
+killdead_pane="$(printf '%s\n' "$killdead_sp" | spawn_pane_id)"
+sleep 0.3
+killdead_flag="$(tmux -L "$SOCK" display-message -t "$killdead_pane" -p '#{pane_dead}' 2>/dev/null || echo 0)"
+[ "$killdead_flag" = "1" ] && ok "kill target with remain-on-exit is a dead pane" \
+  || bad "kill target with remain-on-exit is a dead pane" "pane_dead=$killdead_flag"
+who="$(muxa_as "$bob_pane" who)"
+assert_contains "$who" "killdead" "dead remain-on-exit pane stays on who until kill"
+kill_out="$(muxa_as "$bob_pane" kill killdead)"
+assert_contains "$kill_out" "killed killdead" "kill removes a remain-on-exit dead pane"
+who="$(muxa_as "$bob_pane" who)"
+case "$who" in
+  *killdead*) bad "kill dead pane removes from who" "still listed: $who" ;;
+  *) ok "kill dead pane removes from who" ;;
+esac
+if pane_exists "$killdead_pane"; then
+  bad "kill dead pane removes the tmux pane" "pane $killdead_pane still exists"
+else
+  ok "kill dead pane removes the tmux pane"
+fi
+
+killwin_sp="$(muxa_as "$bob_pane" spawn --name killwin --window -- sleep 3600)"
+assert_contains "$killwin_sp" "spawned killwin" "kill --window fixture spawns"
+win_list="$(tmux -L "$SOCK" list-windows -F '#{window_name}')"
+assert_contains "$win_list" "killwin" "spawn --window fixture names the window"
+muxa_as "$bob_pane" kill killwin >/dev/null
+win_list="$(tmux -L "$SOCK" list-windows -F '#{window_name}')"
+case "$win_list" in
+  *killwin*) bad "kill of --window spawn removes the window" "still listed: $win_list" ;;
+  *) ok "kill of --window spawn removes the window" ;;
+esac
+
 muxa_as "$alice_pane" hook session-end
 who="$(muxa_as "$bob_pane" who)"
 assert_contains "$who" "alice" "session-end leftover does not unregister"
@@ -1060,6 +1148,8 @@ ver_nobr="$(PATH="$nobr_path" muxa version)"
 help_nobr="$(PATH="$nobr_path" muxa help)"
 assert_contains "$help_nobr" "muxa send" "help works with br absent from PATH"
 assert_contains "$help_nobr" "muxa dispatch" "help mentions dispatch"
+assert_contains "$help_nobr" "muxa kill" "help mentions kill"
+assert_contains "$help_nobr" "leave pane running" "help keeps unregister as leave-pane-running"
 case "$help_nobr" in
   *"muxa jobs"*|*"muxa preflight"*) bad "help does not mention jobs or preflight" "out=$help_nobr" ;;
   *) ok "help does not mention jobs or preflight" ;;
@@ -1085,6 +1175,13 @@ assert_contains "$who_nogit" "bob" "who works when git would fail if invoked"
 ver_nogit="$(PATH="$git_stub:$PATH" muxa version)"
 [ -n "$ver_nogit" ] && ok "version works when git would fail if invoked" \
   || bad "version works when git would fail if invoked" "out=$ver_nogit"
+
+tmux -L "$SOCK" new-window -t muxa -n killnogit "exec sleep 3600"
+sleep 0.2
+killnogit_pane="$(tmux -L "$SOCK" list-panes -t muxa:killnogit -F '#{pane_id}')"
+muxa_as "$killnogit_pane" register --name killnogit --kind generic >/dev/null
+kill_nogit="$(PATH="$git_stub:$PATH" muxa_as "$bob_pane" kill killnogit)"
+assert_contains "$kill_nogit" "killed killnogit" "kill works when git would fail if invoked"
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
