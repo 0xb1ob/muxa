@@ -158,22 +158,26 @@ dump_cap "$parent_pane" "D-parent"
 case "$sent_d" in *"broker"*) ok "D child→parent send" ;; *) bad "D child→parent send" "$sent_d" ;; esac
 case "$cap_d" in *"$tok_d"*) ok "D unique token in parent capture" ;; *) bad "D unique token in parent capture" "$cap_d" ;; esac
 
-# C broker down
-tok_c="E2E_C_FALLBACK_$$"
-log "=== C broker down fallback ==="
+# C broker down: fail closed, nothing pasted
+tok_c="E2E_C_FAILCLOSED_$$"
+log "=== C broker down fail-closed ==="
 log "\$ muxa broker stop"
 muxa_as "$parent_pane" broker stop | tee -a "$LOG"
 export MUXA_BROKER_BIN="$ISO/no-such-broker"
 log "\$ muxa send e2e-child $tok_c  (broker bin hidden)"
-sent_c="$(muxa_as "$parent_pane" send e2e-child "$tok_c" 2>&1)" || true
-log "send: $sent_c"
+set +e
+sent_c="$(muxa_as "$parent_pane" send e2e-child "$tok_c" 2>&1)"
+rc_c=$?
+set -e
+log "send rc=$rc_c: $sent_c"
 export MUXA_BROKER_BIN="$ROOT/bin/muxa-broker"
-cap_c="$(wait_capture "$child_pane" "$tok_c" 20 || true)"
-log "wait_capture C:"
+cap_c="$(tmux -L "$SOCK" capture-pane -p -t "$child_pane" 2>/dev/null || true)"
+log "capture C:"
 printf '%s\n' "$cap_c" >>"$LOG"
 dump_cap "$child_pane" "C-child"
-case "$sent_c" in *"fallback paste"*) ok "C fallback path" ;; *) bad "C fallback path" "$sent_c" ;; esac
-case "$cap_c" in *"$tok_c"*) ok "C fallback delivered" ;; *) bad "C fallback delivered" "$cap_c" ;; esac
+[ "$rc_c" -ne 0 ] && ok "C send exits non-zero" || bad "C send exits non-zero" "rc=$rc_c $sent_c"
+case "$sent_c" in *"fallback paste"*|*"falling back"*) bad "C no paste fallback" "$sent_c" ;; *) ok "C no paste fallback" ;; esac
+case "$cap_c" in *"$tok_c"*) bad "C nothing pasted" "$cap_c" ;; *) ok "C nothing pasted" ;; esac
 
 # Confirm live ~/.muxa / default runtime did not handle tokens
 log "=== isolation: operator mailbox must not contain tokens ==="

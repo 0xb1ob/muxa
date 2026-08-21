@@ -152,23 +152,27 @@ esac
 tmux -L "$SOCK" send-keys -t "$child_pane" C-u
 sleep 0.2
 
-# --- C: broker down → immediate paste fallback ---
+# --- C: broker down + binary hidden → fail closed, nothing pasted ---
 muxa_as "$parent_pane" broker stop >/dev/null || true
 sleep 0.1
-# Prevent auto-start by hiding the binary for this one send.
 saved_bin="$MUXA_BROKER_BIN"
 export MUXA_BROKER_BIN="$HOME_ISO/no-such-broker"
 tok_c="BRKC_$$"
-sent_c="$(muxa_as "$parent_pane" send child "$tok_c" 2>&1)" || true
+set +e
+sent_c="$(muxa_as "$parent_pane" send child "$tok_c" 2>&1)"
+rc_c=$?
+set -e
 export MUXA_BROKER_BIN="$saved_bin"
+[ "$rc_c" -ne 0 ] && ok "C send exits non-zero when broker down" \
+  || bad "C send exits non-zero when broker down" "exit=$rc_c out=$sent_c"
 case "$sent_c" in
-  *"fallback paste"*) ok "C send reports fallback paste" ;;
-  *) bad "C send reports fallback paste" "got: $sent_c" ;;
+  *"fallback paste"*|*"falling back"*) bad "C does not paste-buffer fallback" "got: $sent_c" ;;
+  *) ok "C does not paste-buffer fallback" ;;
 esac
-cap_c="$(wait_capture "$child_pane" "$tok_c" 20 || true)"
+cap_c="$(tmux -L "$SOCK" capture-pane -p -t "$child_pane" 2>/dev/null || true)"
 case "$cap_c" in
-  *"$tok_c"*) ok "C fallback delivered" ;;
-  *) bad "C fallback delivered" "cap: $cap_c" ;;
+  *"$tok_c"*) bad "C nothing pasted when broker down" "cap: $cap_c" ;;
+  *) ok "C nothing pasted when broker down" ;;
 esac
 
 # restart broker for cleanliness

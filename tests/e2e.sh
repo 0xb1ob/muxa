@@ -277,10 +277,10 @@ cursor_hook_ok="$(tmux_e display-message -t "$cursor_pane" -p '#{@muxa_hook_ok}'
 a_path="MUXA_A_PATH_$TOKEN"
 if [ "$cursor_hook_ok" = "1" ]; then
   sent="$(muxa_as "$claude_pane" send --no-reply cursor "$a_path" 2>&1 || true)"
-  if printf '%s\n' "$sent" | grep -q delivered; then
-    ok "A-path: idle hook cursor injects after hook_ok"
+  if printf '%s\n' "$sent" | grep -q broker; then
+    ok "A-path: idle send enqueues on broker"
   else
-    bad "A-path: idle hook cursor injects after hook_ok" "$sent"
+    bad "A-path: idle send enqueues on broker" "$sent"
   fi
   wait_pane_has "$cursor_pane" "$a_path" 15 && ok "A-path: body is pasted immediately" \
     || bad "A-path: body is pasted immediately" "$(pane_text "$cursor_pane" | tail -n 20)"
@@ -305,15 +305,8 @@ else
   ok "B-live: copy-mode does not show the body"
 fi
 tmux_e send-keys -t "$cursor_pane" -X cancel 2>/dev/null || true
-sleep 1
-if pane_text "$cursor_pane" | grep -Fq "$b_live"; then
-  bad "B-live: no ghost flush after leaving copy-mode" "$(pane_text "$cursor_pane" | tail -n 20)"
-else
-  ok "B-live: no ghost flush after leaving copy-mode"
-fi
-muxa_as "$claude_pane" deliver --force cursor >/dev/null 2>&1 || muxa_as "$claude_pane" deliver cursor >/dev/null 2>&1 || true
-wait_pane_has "$cursor_pane" "$b_live" 15 && ok "B-live: deliver lands after copy-mode" \
-  || bad "B-live: deliver lands after copy-mode" "$(pane_text "$cursor_pane" | tail -n 20)"
+wait_pane_has "$cursor_pane" "$b_live" 20 && ok "B-live: broker lands after copy-mode" \
+  || bad "B-live: broker lands after copy-mode" "$(pane_text "$cursor_pane" | tail -n 20)"
 
 # --- LLM: type into the parent pane (roots cannot muxa-send to each other) ---
 wait_state claude idle 60 || true
@@ -329,8 +322,6 @@ printf 'hop typed into claude pane\n'
 if wait_pane_has "$cursor_pane" "$hop" 20; then
   ok "cursor child received parent hop"
 else
-  # Inject may have deferred (copy-mode / not ready); deliver is the escape hatch.
-  muxa_as "$claude_pane" deliver cursor >/dev/null 2>&1 || true
   if wait_pane_has "$cursor_pane" "$hop" "$HOP_S"; then
     ok "cursor child received parent hop"
   else
@@ -340,7 +331,6 @@ fi
 if wait_pane_has "$pi_pane" "$hop" 15; then
   ok "pi child received parent hop"
 else
-  muxa_as "$claude_pane" deliver pi >/dev/null 2>&1 || true
   if wait_pane_has "$pi_pane" "$hop" 30; then
     ok "pi child received parent hop"
   else

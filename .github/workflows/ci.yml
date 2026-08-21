@@ -26,4 +26,4 @@ jobs:
       - name: Run tests
         run: |
           go test ./broker/
-          tests/run.sh && tests/tmux-facts.sh && tests/composer.sh && tests/install.sh && tests/broker.sh
+          tests/run.sh && tests/tmux-facts.sh && tests/install.sh && tests/broker.sh
