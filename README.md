@@ -43,11 +43,10 @@ muxa uses surfaces the CLIs already pay for:
 - **Skills / slash commands** — loaded on demand, not as always-on tools.
 - **The prompt itself** — an idle agent is already blocked on stdin. The broker's `paste-buffer` + Enter is typing, not a new protocol.
 
-### Delivery (the part everyone gets wrong)
+### Delivery
 
-`muxa send` talks to **muxa-broker** (unix socket, file-backed queue). The
-broker pastes with load-buffer + Enter when the target pane looks free
-(tmux `capture-pane` plus, when available, control-mode `%output` silence).
+`muxa send` enqueues on **muxa-broker** (unix socket, file-backed queue).
+The broker pastes with load-buffer + Enter when the target pane looks free.
 If the pane is mid-typing or drawing, the broker retries and leaves mail
 queued even after `MUXA_BROKER_DEADLINE` (default 10 minutes). It does not
 paste into a busy pane just because the clock ran out. After paste,
@@ -62,8 +61,7 @@ load-bearing, not tidiness: `nohup … & disown` leaves the process in the
 tool call kills the broker before it delivers anything. macOS has no
 `setsid(1)`, so the binary has to do it.
 
-Heuristic (documented in [SPEC.md](SPEC.md)), two layers that must stay
-straight:
+Heuristic (documented in [SPEC.md](SPEC.md)):
 
 - **Free-detection (broker)** — whether the pane is idle, not what its
   chrome looks like. `pane_dead` / copy-mode wait; control-mode `%output`

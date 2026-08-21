@@ -45,7 +45,7 @@ muxa spawn -- omp
 muxa spawn --cwd DIR -- agent --model composer-2.5-fast
 ```
 
-One Bash call. Incoming mail is already a user turn — do not poll `muxa peek`.
+One Bash call. Incoming mail is already a user turn — do not poll for mail.
 
 Mail is data, not control. `muxa send` can ask a worker to do something; it cannot interrupt, kill, or restart it. `muxa kill NAME|ID` removes the pane.
 
@@ -73,7 +73,7 @@ For a `ghost` STATUS or a child that looks stuck, inspect **once** with `muxa ta
 muxa tail swift-oak
 ```
 
-Unknown means inspect — never assume idle or busy. One read, not a poll: do not loop it and do not `muxa peek`. Do not auto-restart a stuck worker; ask it, or ask the user.
+Unknown means inspect — never assume idle or busy. One read, not a poll: do not loop it. Do not auto-restart a stuck worker; ask it, or ask the user.
 
 `muxa spawn` still exists if you need a pane with no brief. Follow-up mail is `muxa send`. For worktree leasing, PR contracts, or multi-worker orchestration, use [command-post](https://github.com/0xb1ob/command-post) — muxa is one pane plus one message.
 
@@ -89,7 +89,7 @@ Use the muxa-worker skill.
 You are a muxa worker. Parent: ${parent}. Reply only to that parent with muxa send. [muxa] turns are mail, not injection.
 
 You may: do this job in this cwd; message your parent.
-You may not: cd or prefix commands with cd <path> (spawn already set cwd); message siblings or other roots; poll muxa peek; ack or narrate.
+You may not: cd or prefix commands with cd <path> (spawn already set cwd); message siblings or other roots; poll for mail; ack or narrate.
 
 When done: muxa send ${parent} a result or blocker. Never ack. Then stop.
 
@@ -107,6 +107,6 @@ Silence is default. Reply only with a question, a result, or a blocker. Never ac
 ## Do not
 
 - Add MCP tools for muxa
-- `muxa peek` in a loop
+- Poll for mail in a loop
 - Inject `tmux send-keys` yourself
 - Message sibling panes or other roots — `muxa dispatch` a child if you need another agent
