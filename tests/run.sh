@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Integration tests for muxa. Needs tmux + python3.
+# Integration tests for muxa. Needs tmux. python3 is not required.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -80,6 +80,34 @@ assert_who_status() {
   got="$(who_status_for "$who" "$name")"
   [ "$got" = "$want" ] && ok "$label" || bad "$label" "name=$name want=$want got=$got"
 }
+
+same_dir() {
+  local a b
+  a="$(cd "$1" && pwd -P)" || return 1
+  b="$(cd "$2" && pwd -P)" || return 1
+  [ "$a" = "$b" ]
+}
+
+who_json_get() {
+  printf '%s' "$1" | muxa-broker json-get "$2" "$3"
+}
+
+who_json_is_null() {
+  local rc
+  set +e
+  printf '%s' "$1" | muxa-broker json-get "$2" "$3" >/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ]
+}
+
+json_get() {
+  printf '%s' "$1" | muxa-broker json-get "$2"
+}
+
+pyc="$(grep -c python3 "$ROOT/bin/muxa" || true)"
+[ "$pyc" = "0" ] && ok "bin/muxa has no python3" \
+  || bad "bin/muxa has no python3" "count=$pyc"
 
 tmux -L "$SOCK" new-session -d -s muxa -n alice "exec cat > '$alice_out'"
 tmux -L "$SOCK" split-window -h -t muxa:alice "exec sleep 3600"
@@ -283,9 +311,6 @@ fi
   || bad "nameless spawns get different names" "both=$gen1_name"
 
 # --- spawn cwd: process PWD and --cwd, not parent pane path ---
-same_dir() {
-  python3 -c 'import os,sys; sys.exit(0 if os.path.realpath(sys.argv[1])==os.path.realpath(sys.argv[2]) else 1)' "$1" "$2"
-}
 spawn_wt="$tmpdir/spawn-wt"
 spawn_flag="$tmpdir/spawn-flag"
 mkdir -p "$spawn_wt" "$spawn_flag"
@@ -720,32 +745,6 @@ who="$(muxa_as "$bob_pane" who)"
 assert_who_status "$who" "bad-cwd" "ghost" "missing pane cwd is ghost"
 
 # --- who --json, tail, send --json (machine-readable surface) ---
-who_json_get() {
-  python3 -c '
-import json, sys
-data = json.loads(sys.argv[1])
-name, key = sys.argv[2], sys.argv[3]
-for row in data:
-    if row.get("name") == name:
-        v = row.get(key)
-        print("" if v is None else v)
-        sys.exit(0)
-sys.exit(1)
-' "$@"
-}
-
-who_json_is_null() {
-  python3 -c '
-import json, sys
-data = json.loads(sys.argv[1])
-name, key = sys.argv[2], sys.argv[3]
-for row in data:
-    if row.get("name") == name:
-        sys.exit(0 if row.get(key) is None else 1)
-sys.exit(1)
-' "$@"
-}
-
 human_who="$(muxa_as "$bob_pane" who)"
 case "$human_who" in
   NAME*) ok "who default still starts with NAME header" ;;
@@ -764,27 +763,23 @@ assert_contains "$who_hdr" "STATE" "who header has STATE"
 assert_contains "$who_hdr" "STATUS" "who header has STATUS"
 
 whoj="$(muxa_as "$bob_pane" who --json)"
-python3 -c '
-import json, sys
-data = json.loads(sys.argv[1])
-assert isinstance(data, list) and data, "empty/non-list"
-need = ("name", "id", "parent", "kind", "state", "pane", "session", "cwd", "status")
-for row in data:
-    for k in need:
-        assert k in row, "missing %s" % k
-    assert set(row) == set(need), "keys=%s" % sorted(row)
-' "$whoj" && ok "who --json is an array of roster objects" \
-  || bad "who --json is an array of roster objects" "got: $whoj"
+if [ "$(printf '%s' "$whoj" | muxa-broker json-type)" = "array" ] \
+  && printf '%s' "$whoj" | muxa-broker json-keys name id parent kind state pane session cwd status; then
+  ok "who --json is an array of roster objects"
+else
+  bad "who --json is an array of roster objects" "got: $whoj"
+fi
 
 [ "$(who_json_get "$whoj" alice parent)" = "bob" ] && ok "who --json alice.parent is bob" \
   || bad "who --json alice.parent is bob" "got: $(who_json_get "$whoj" alice parent 2>/dev/null || true)"
 who_json_is_null "$whoj" bob parent && ok "who --json bob.parent is null" \
   || bad "who --json bob.parent is null" "bob parent not null"
 proj_json_cwd="$(who_json_get "$whoj" projagent cwd)"
-proj_json_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$proj_json_cwd")"
-proj_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$projdir")"
-[ "$proj_json_real" = "$proj_real" ] && ok "who --json cwd is a field not a column" \
-  || bad "who --json cwd is a field not a column" "got: $proj_json_cwd want: $projdir"
+if same_dir "$proj_json_cwd" "$projdir"; then
+  ok "who --json cwd is a field not a column"
+else
+  bad "who --json cwd is a field not a column" "got: $proj_json_cwd want: $projdir"
+fi
 [ "$(who_json_get "$whoj" zsh-cursor status)" = "ghost" ] && ok "who --json status is ghost for cursor+shell" \
   || bad "who --json status is ghost for cursor+shell" "got: $(who_json_get "$whoj" zsh-cursor status 2>/dev/null || true)"
 [ "$(who_json_get "$whoj" projagent status)" = "live" ] && ok "who --json status is live for generic sleep" \
@@ -794,51 +789,119 @@ proj_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$
 who_json_is_null "$whoj" alice session && ok "who --json session is always null" \
   || bad "who --json session is always null" "alice session not null"
 
-occ="$(python3 -c '
-import json, os, sys
-data = json.loads(sys.argv[1])
-want = os.path.realpath(sys.argv[2])
-hits = []
-for row in data:
-    cwd = row.get("cwd") or ""
-    try:
-        real = os.path.realpath(cwd)
-    except OSError:
-        real = cwd
-    if real == want and row.get("status") == "live":
-        hits.append(row["name"])
-print(",".join(hits))
-' "$whoj" "$projdir")"
+occ=""
+while IFS= read -r n; do
+  [ -n "$n" ] || continue
+  [ "$(who_json_get "$whoj" "$n" status)" = "live" ] || continue
+  cwd="$(who_json_get "$whoj" "$n" cwd)"
+  if [ -d "$cwd" ] && same_dir "$cwd" "$projdir"; then
+    if [ -n "$occ" ]; then occ="$occ,$n"; else occ="$n"; fi
+  fi
+done <<EOF
+$(printf '%s' "$whoj" | muxa-broker json-values name)
+EOF
 [ "$occ" = "projagent" ] && ok "who --json occupancy consumes cwd+status with no awk" \
   || bad "who --json occupancy consumes cwd+status with no awk" "got: $occ"
 
+esc_cwd="$tmpdir/acme-\"quote\"\\slash"
+mkdir -p "$esc_cwd"
+tmux -L "$SOCK" new-window -t muxa -n esccwd -c "$esc_cwd" "exec sleep 3600"
+sleep 0.2
+esc_pane="$(tmux -L "$SOCK" list-panes -t muxa:esccwd -F '#{pane_id}')"
+muxa_as "$esc_pane" register --name jsonesc --kind generic --parent bob >/dev/null
+whoj_esc="$(muxa_as "$bob_pane" who --json)"
+esc_got="$(who_json_get "$whoj_esc" jsonesc cwd)"
+if same_dir "$esc_got" "$esc_cwd"; then
+  ok "who --json cwd round-trips quote and backslash"
+else
+  bad "who --json cwd round-trips quote and backslash" "got: $esc_got want: $esc_cwd"
+fi
+
 jsent="$(muxa_as "$bob_pane" send --json carol json-body)"
-python3 -c '
-import json, sys
-o = json.loads(sys.argv[1])
-assert o["from"] == "bob" and o["to"] == "carol"
-assert o["id"] and o["pane"].startswith("%")
-assert set(o) == {"id", "pane", "from", "to"}
-' "$jsent" && ok "send --json is id+pane+from+to" \
-  || bad "send --json is id+pane+from+to" "got: $jsent"
-carol_pane_got="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["pane"])' "$jsent")"
+if printf '%s' "$jsent" | muxa-broker json-keys id pane from to \
+  && [ "$(json_get "$jsent" from)" = "bob" ] \
+  && [ "$(json_get "$jsent" to)" = "carol" ]; then
+  pane_js="$(json_get "$jsent" pane)"
+  id_js="$(json_get "$jsent" id)"
+  case "$pane_js" in
+    %*)
+      if [ -n "$id_js" ]; then
+        ok "send --json is id+pane+from+to"
+      else
+        bad "send --json is id+pane+from+to" "got: $jsent"
+      fi
+      ;;
+    *) bad "send --json is id+pane+from+to" "got: $jsent" ;;
+  esac
+else
+  bad "send --json is id+pane+from+to" "got: $jsent"
+fi
+carol_pane_got="$(json_get "$jsent" pane)"
 [ "$carol_pane_got" = "$carol_pane" ] && ok "send --json pane matches roster" \
   || bad "send --json pane matches roster" "want=$carol_pane got=$carol_pane_got"
 human_send="$(muxa_as "$bob_pane" send carol still-human)"
 assert_contains "$human_send" "queued bob → carol" "send without --json stays human"
 
+tok_esc="ESCJSON_$$"
+body="quote=\"hi\" slash=\\ and more"$'\n'"line-two-${tok_esc}"
+esc_loop='while true; do printf "ready> "; read -r _ || break; done'
+esc_spawn="$(muxa_as "$bob_pane" spawn --window --name escrecv -- bash -c "$esc_loop")"
+esc_recv_pane="$(printf '%s\n' "$esc_spawn" | awk '{ sub(/^pane=/,"",$6); print $6 }')"
+sleep 0.4
+jsent_esc="$(muxa_as "$bob_pane" send --json escrecv "$body")"
+if printf '%s' "$jsent_esc" | muxa-broker json-keys id pane from to \
+  && [ "$(json_get "$jsent_esc" to)" = "escrecv" ]; then
+  ok "send --json stays valid when the body has quote, backslash, newline"
+else
+  bad "send --json stays valid when the body has quote, backslash, newline" "got: $jsent_esc"
+fi
+esc_cap=""
+i=0
+while [ "$i" -lt 40 ]; do
+  esc_cap="$(tmux -L "$SOCK" capture-pane -p -t "$esc_recv_pane" 2>/dev/null || true)"
+  case "$esc_cap" in
+    *"$tok_esc"*) break ;;
+  esac
+  sleep 0.15
+  i=$((i + 1))
+done
+case "$esc_cap" in
+  *quote=\"hi\"*)
+    case "$esc_cap" in
+      *"slash=\\"*)
+        case "$esc_cap" in
+          *"line-two-${tok_esc}"*) ok "enqueue delivers body with quote, backslash, newline" ;;
+          *) bad "enqueue delivers body with quote, backslash, newline" "cap: $esc_cap" ;;
+        esac
+        ;;
+      *) bad "enqueue delivers body with quote, backslash, newline" "cap: $esc_cap" ;;
+    esac
+    ;;
+  *) bad "enqueue delivers body with quote, backslash, newline" "cap: $esc_cap" ;;
+esac
+
 allj="$(muxa_as "$bob_pane" send --json --all json-all-body)"
-python3 -c '
-import json, sys
-data = json.loads(sys.argv[1])
-assert isinstance(data, list) and data
-names = {row["to"] for row in data}
-assert "carol" in names and "alice" in names
-for row in data:
-    assert row["id"] and row["pane"].startswith("%")
-    assert row["from"] == "bob"
-' "$allj" && ok "send --all --json is an array of enqueues" \
-  || bad "send --all --json is an array of enqueues" "got: $allj"
+all_tos="$(printf '%s' "$allj" | muxa-broker json-values to)"
+all_froms="$(printf '%s' "$allj" | muxa-broker json-values from)"
+if [ "$(printf '%s' "$allj" | muxa-broker json-type)" = "array" ] \
+  && printf '%s' "$allj" | muxa-broker json-keys id pane from to; then
+  case "$all_tos" in
+    *carol*)
+      case "$all_tos" in
+        *alice*)
+          case "$all_froms" in
+            *bob*) ok "send --all --json is an array of enqueues" ;;
+            *) bad "send --all --json is an array of enqueues" "from=$all_froms got: $allj" ;;
+          esac
+          ;;
+        *) bad "send --all --json is an array of enqueues" "got: $allj" ;;
+      esac
+      ;;
+    *) bad "send --all --json is an array of enqueues" "got: $allj" ;;
+  esac
+else
+  bad "send --all --json is an array of enqueues" "got: $allj"
+fi
 
 nonej="$(muxa_as "$eve_pane" send --json --all json-none)"
 [ "$nonej" = "[]" ] && ok "send --all --json with no peers is []" \
@@ -847,16 +910,16 @@ nonej="$(muxa_as "$eve_pane" send --json --all json-none)"
 tok_disp="DISPJ_$$"
 disp_loop='while true; do printf "ready> "; read -r _ || break; done'
 disp_out="$(printf 'dispatch-body-%s\n' "$tok_disp" | muxa_as "$bob_pane" dispatch --window --name dispkid -- bash -c "$disp_loop")"
-python3 -c '
-import json, sys
-o = json.loads(sys.argv[1])
-assert o["name"] == "dispkid" and o["to"] == "dispkid" and o["from"] == "bob"
-assert o["state"] == "dispatched" and o["id"] and o["pane"].startswith("%")
-assert o["cwd"]
-assert set(o) == {"name", "id", "pane", "cwd", "state", "from", "to"}
-' "$disp_out" && ok "dispatch stdout is send --json plus name/cwd/state" \
-  || bad "dispatch stdout is send --json plus name/cwd/state" "got: $disp_out"
-disp_pane="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["pane"])' "$disp_out")"
+if printf '%s' "$disp_out" | muxa-broker json-keys name id pane cwd state from to \
+  && [ "$(json_get "$disp_out" name)" = "dispkid" ] \
+  && [ "$(json_get "$disp_out" to)" = "dispkid" ] \
+  && [ "$(json_get "$disp_out" from)" = "bob" ] \
+  && [ "$(json_get "$disp_out" state)" = "dispatched" ]; then
+  ok "dispatch stdout is send --json plus name/cwd/state"
+else
+  bad "dispatch stdout is send --json plus name/cwd/state" "got: $disp_out"
+fi
+disp_pane="$(json_get "$disp_out" pane)"
 disp_cap=""
 i=0
 while [ "$i" -lt 40 ]; do
@@ -871,10 +934,17 @@ case "$disp_cap" in
   *"$tok_disp"*) ok "dispatch delivers the brief once the pane is ready" ;;
   *) bad "dispatch delivers the brief once the pane is ready" "cap: $disp_cap" ;;
 esac
+disp_esc_out="$(printf 'esc-dispatch\n' | muxa_as "$bob_pane" dispatch --window --name dispesc --cwd "$esc_cwd" -- bash -c "$disp_loop")"
+disp_esc_cwd="$(json_get "$disp_esc_out" cwd)"
+if same_dir "$disp_esc_cwd" "$esc_cwd"; then
+  ok "dispatch stdout cwd round-trips quote and backslash"
+else
+  bad "dispatch stdout cwd round-trips quote and backslash" "got: $disp_esc_cwd want: $esc_cwd"
+fi
 brief_file="$tmpdir/dispatch.brief"
 printf 'file-brief-%s\n' "$tok_disp" >"$brief_file"
 disp_file_out="$(muxa_as "$bob_pane" dispatch --window --name dispfile --brief-file "$brief_file" -- bash -c "$disp_loop")"
-disp_file_pane="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["pane"])' "$disp_file_out")"
+disp_file_pane="$(json_get "$disp_file_out" pane)"
 disp_file_cap=""
 i=0
 while [ "$i" -lt 40 ]; do
@@ -961,20 +1031,29 @@ set -e
 [ "$state_rc" -eq 1 ] && ok "state is not a command" \
   || bad "state is not a command" "exit=$state_rc"
 
-# --- jobs/preflight gone; muxa must not require br or git ---
+# --- jobs/preflight gone; muxa must not require br, git, or python3 ---
 nobr_bin="$tmpdir/nobr-bin"
 mkdir -p "$nobr_bin"
-for cmd in tmux python3; do
+for cmd in tmux; do
   loc="$(command -v "$cmd" 2>/dev/null || true)"
   [ -n "$loc" ] || continue
   ln -s "$loc" "$nobr_bin/$(basename "$loc")"
 done
+printf '%s\n' '#!/bin/sh' 'echo "muxa must not invoke python3" >&2' 'exit 127' >"$nobr_bin/python3"
+chmod +x "$nobr_bin/python3"
 nobr_path="$ROOT/bin:$nobr_bin:/usr/bin:/bin"
 [ -z "$(PATH="$nobr_path" command -v br 2>/dev/null || true)" ] && ok "test PATH has no br" \
   || bad "test PATH has no br" "br=$(PATH="$nobr_path" command -v br)"
 
 who_nobr="$(PATH="$nobr_path" muxa_as "$bob_pane" who)"
 assert_contains "$who_nobr" "bob" "who works with br absent from PATH"
+whoj_nopy="$(PATH="$nobr_path" muxa_as "$bob_pane" who --json)"
+if [ "$(printf '%s' "$whoj_nopy" | PATH="$nobr_path" muxa-broker json-type)" = "array" ] \
+  && printf '%s' "$whoj_nopy" | PATH="$nobr_path" muxa-broker json-keys name id parent kind state pane session cwd status; then
+  ok "who --json works when python3 would fail if invoked"
+else
+  bad "who --json works when python3 would fail if invoked" "got: $whoj_nopy"
+fi
 ver_nobr="$(PATH="$nobr_path" muxa version)"
 [ -n "$ver_nobr" ] && ok "version works with br absent from PATH" \
   || bad "version works with br absent from PATH" "out=$ver_nobr"

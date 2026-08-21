@@ -17,6 +17,15 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("muxa-broker: ")
 
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "ping", "status", "drawing", "enqueue",
+			"json-object", "json-array", "who-json",
+			"json-type", "json-keys", "json-get", "json-values":
+			os.Exit(runCLI(os.Args[1:]))
+		}
+	}
+
 	checkPane := flag.String("check-pane", "", "print parser and two-signal verdicts for a tmux pane and exit")
 	flag.Parse()
 	if *checkPane != "" {

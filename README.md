@@ -194,8 +194,8 @@ tests/record-composer-fixtures.sh
                       # recapture Cursor Agent (splash/idle/typed/busy/trust)
 ```
 
-Needs `tmux`, `python3`, and — for the broker tests only, not for install —
-Go 1.21+. On darwin 25+, `go test` must use `-ldflags=-linkmode=external`
+Needs `tmux`. Broker tests also need Go 1.21+ (not required to install
+muxa). On darwin 25+, `go test` must use `-ldflags=-linkmode=external`
 (same LC_UUID requirement as the release broker build). Uses a private tmux
 socket, not your session.
 
