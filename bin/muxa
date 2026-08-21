@@ -17,15 +17,16 @@ muxa — message other AI CLIs in this tmux server
                                 default: split into a tiled grid in this window (--window for a new window)
                                 child cwd: --cwd, else process PWD, else this pane's path
                                 warns on stderr if a live registered worker already has that cwd
-  muxa who                          roster (tmux pane options, CLI session id, cwd, STATUS)
+  muxa who [--json]                 roster (tmux pane options, CLI session id, cwd, STATUS)
   muxa whoami                       this pane's alias
   muxa unregister NAME|ID           clear muxa registration; leave pane running
   muxa id                           this pane's unique muxa id
   muxa session                      this pane's CLI session/conversation id (empty until reported)
   muxa parent                       this pane's parent alias (empty if root)
   muxa children                     direct children of this pane
-  muxa send [--no-reply] NAME TEXT  enqueue on the pane-mail broker (parent↔child only)
-  muxa send --all TEXT              every parent/child pane (not siblings or other roots)
+  muxa tail NAME [-n N]             one-shot pane capture (visible; -n last N lines of history)
+  muxa send [--json] [--no-reply] NAME TEXT  enqueue on the pane-mail broker (parent↔child only)
+  muxa send [--json] --all TEXT     every parent/child pane (not siblings or other roots)
   muxa broker [start|status|stop]   user-level paste broker (unix socket + file queue)
   muxa state idle|busy|blocked      presence (hooks call this)
   muxa hook EVENT [--format FMT] [--kind KIND]
@@ -682,8 +683,62 @@ cmd_register() {
   fi
 }
 
+cmd_who_json() {
+  local line kind cwd cmd status
+  {
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      kind="$(printf '%s\n' "$line" | field 5)"
+      cwd="$(printf '%s\n' "$line" | field 10)"
+      cmd="$(printf '%s\n' "$line" | field 11)"
+      status="$(pane_status "$kind" "$cwd" "$cmd")"
+      printf '%s||%s\n' "$line" "$status"
+    done <<EOF
+$(roster_lines)
+EOF
+  } | python3 -c '
+import json, sys
+
+def n(s):
+    return s if s else None
+
+rows = []
+for raw in sys.stdin:
+    raw = raw.rstrip("\n")
+    if not raw:
+        continue
+    p = raw.split("||")
+    p.extend([""] * (12 - len(p)))
+    rows.append({
+        "name": p[1],
+        "id": p[2],
+        "parent": n(p[3]),
+        "kind": p[4],
+        "state": p[5],
+        "pane": p[0],
+        "session": n(p[8]),
+        "cwd": p[9],
+        "status": p[11],
+    })
+json.dump(rows, sys.stdout, separators=(",", ":"), ensure_ascii=False)
+sys.stdout.write("\n")
+'
+}
+
 cmd_who() {
   need_tmux
+  local json=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      -*) die "who: unknown flag $1" ;;
+      *) die "who: unexpected argument $1" ;;
+    esac
+  done
+  if [ "$json" -eq 1 ]; then
+    cmd_who_json
+    return
+  fi
   printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-8s %-16s %s\n' \
     NAME ID SESSION PARENT KIND STATE STATUS DELIVER PANE WHERE CWD
   local line kind cwd cmd status name
@@ -709,6 +764,57 @@ cmd_who() {
   done <<EOF
 $(roster_lines)
 EOF
+}
+
+# One-shot pane read. Default is the visible grid (capture-pane -p).
+# -n N is last N lines of history+visible — a read, never a poll.
+cmd_tail() {
+  need_tmux
+  local name="" n="" pane
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n)
+        [ $# -ge 2 ] || die "tail: -n requires a line count"
+        n="$2"
+        shift 2
+        ;;
+      -n*)
+        n="${1#-n}"
+        [ -n "$n" ] || die "tail: -n requires a line count"
+        shift
+        ;;
+      --) shift; break ;;
+      -*) die "tail: unknown flag $1" ;;
+      *)
+        [ -z "$name" ] || die "tail: unexpected argument $1"
+        name="$1"
+        shift
+        ;;
+    esac
+  done
+  [ $# -eq 0 ] || die "tail: unexpected argument $1"
+  [ -n "$name" ] || die "tail: NAME required"
+  if [ -n "$n" ]; then
+    case "$n" in
+      *[!0-9]*|0) die "tail: -n must be a positive integer" ;;
+    esac
+  fi
+  pane="$(find_pane_by_name "$name")" || die "unknown agent '$name' — muxa who"
+  if [ -n "$n" ]; then
+    # History includes the unused blank rows at the bottom of the grid.
+    # Strip those, then take the last N content lines — a read, not a poll.
+    tmux_do capture-pane -p -S - -t "$pane" | python3 -c '
+import sys
+n = int(sys.argv[1])
+lines = sys.stdin.read().splitlines()
+while lines and lines[-1] == "":
+    lines.pop()
+for line in lines[-n:]:
+    sys.stdout.write(line + "\n")
+' "$n" || die "tail: could not read pane $pane"
+  else
+    tmux_do capture-pane -p -t "$pane" || die "tail: could not read pane $pane"
+  fi
 }
 
 cmd_unregister() {
@@ -986,6 +1092,7 @@ sys.stdout.write(data.decode())
 }
 
 # Enqueue on muxa-broker. Fail closed: no paste-buffer fallback, no maildir.
+# SEND_JSON=1 prints {id,pane,from,to} instead of the human queued line.
 send_one() {
   local from="$1" to="$2" flags="$3" body="$4"
   local pane id text
@@ -1001,16 +1108,23 @@ send_one() {
   id="$(date +%s)-$$-$(printf '%05d' "$RANDOM")"
   ensure_broker || die "broker unreachable (could not start muxa-broker)"
   broker_enqueue "$id" "$pane" "$from" "$to" "$text" || die "broker enqueue failed"
-  printf 'queued %s → %s id=%s (broker)\n' "$from" "$to" "$id"
+  if [ "${SEND_JSON:-0}" -eq 1 ]; then
+    python3 -c 'import json,sys; print(json.dumps({"id":sys.argv[1],"pane":sys.argv[2],"from":sys.argv[3],"to":sys.argv[4]}, separators=(",", ":"), ensure_ascii=False))' \
+      "$id" "$pane" "$from" "$to"
+  else
+    printf 'queued %s → %s id=%s (broker)\n' "$from" "$to" "$id"
+  fi
 }
 
 cmd_send() {
   need_tmux
-  local no_reply=0 all=0 to="" body="" from flags line dest n
+  local no_reply=0 all=0 json=0 to="" body="" from flags line dest n item
+  local all_json=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --no-reply) no_reply=1; shift ;;
       --all) all=1; shift ;;
+      --json) json=1; shift ;;
       --) shift; break ;;
       -*) die "send: unknown flag $1" ;;
       *) break ;;
@@ -1031,6 +1145,7 @@ cmd_send() {
   [ -n "$from" ] || from="${MUXA_NAME:-human}"
   flags=""
   [ "$no_reply" -eq 1 ] && flags="no-reply"
+  SEND_JSON="$json"
 
   if [ "$all" -eq 1 ]; then
     n=0
@@ -1044,11 +1159,25 @@ cmd_send() {
       esac
       can_send "$from" "$dest" || continue
       seen="${seen}${dest}"$'\n'
-      send_one "$from" "$dest" "$flags" "$body"
+      if [ "$json" -eq 1 ]; then
+        item="$(send_one "$from" "$dest" "$flags" "$body")"
+        all_json="${all_json}${item}"$'\n'
+      else
+        send_one "$from" "$dest" "$flags" "$body"
+      fi
       n=$((n + 1))
     done <<EOF
 $(roster_lines)
 EOF
+    if [ "$json" -eq 1 ]; then
+      printf '%s' "$all_json" | python3 -c '
+import json, sys
+rows = [json.loads(line) for line in sys.stdin if line.strip()]
+json.dump(rows, sys.stdout, separators=(",", ":"), ensure_ascii=False)
+sys.stdout.write("\n")
+'
+      return 0
+    fi
     if [ "$n" -eq 0 ]; then
       printf 'no reachable peers\n'
     fi
@@ -2037,6 +2166,7 @@ main() {
     register) cmd_register "$@" ;;
     spawn) cmd_spawn "$@" ;;
     who|ls|roster) cmd_who "$@" ;;
+    tail) cmd_tail "$@" ;;
     unregister) cmd_unregister "$@" ;;
     whoami) cmd_whoami "$@" ;;
     id) cmd_id "$@" ;;

@@ -6,8 +6,10 @@ Usage: `/muxa <name> <text>` or `/muxa who`
 
 Run **one** Bash command:
 
-- Roster: `muxa who`
+- Roster: `muxa who` / `muxa who --json`
+- Pane read: `muxa tail <name>` (one-shot; never a poll)
 - Send: `muxa send <name> <text from the rest of this invocation>`
+- Send JSON: `muxa send --json <name> <text>` (queued id + pane)
 - Broadcast: `muxa send --all <text>`
 - No reply wanted: `muxa send --no-reply <name> <text>`
 

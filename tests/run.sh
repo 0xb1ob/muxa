@@ -21,6 +21,10 @@ fi
 for skill in muxa-parent muxa-worker; do
   src="$ROOT/skills/$skill/SKILL.md"
   [ -f "$src" ] || { echo "missing $src" >&2; exit 1; }
+  if grep -E 'tmux[[:space:]]+capture-pane' "$src" >/dev/null; then
+    echo "skill $src still invokes tmux capture-pane" >&2
+    exit 1
+  fi
 done
 SOCK="muxatest-$$"
 export MUXA_TMUX_SOCKET="$SOCK"
@@ -724,6 +728,141 @@ rm -rf "$gone_dir"
 muxa_as "$badcwd_pane" register --name bad-cwd --kind generic --deliver inject >/dev/null
 who="$(muxa_as "$bob_pane" who)"
 assert_who_status "$who" "bad-cwd" "ghost" "missing pane cwd is ghost"
+
+# --- who --json, tail, send --json (machine-readable surface) ---
+who_json_get() {
+  python3 -c '
+import json, sys
+data = json.loads(sys.argv[1])
+name, key = sys.argv[2], sys.argv[3]
+for row in data:
+    if row.get("name") == name:
+        v = row.get(key)
+        print("" if v is None else v)
+        sys.exit(0)
+sys.exit(1)
+' "$@"
+}
+
+who_json_is_null() {
+  python3 -c '
+import json, sys
+data = json.loads(sys.argv[1])
+name, key = sys.argv[2], sys.argv[3]
+for row in data:
+    if row.get("name") == name:
+        sys.exit(0 if row.get(key) is None else 1)
+sys.exit(1)
+' "$@"
+}
+
+human_who="$(muxa_as "$bob_pane" who)"
+case "$human_who" in
+  NAME*) ok "who default still starts with NAME header" ;;
+  *) bad "who default still starts with NAME header" "got: $human_who" ;;
+esac
+case "$human_who" in
+  \[*) bad "who default is not JSON" "got: $human_who" ;;
+  *) ok "who default is not JSON" ;;
+esac
+
+whoj="$(muxa_as "$bob_pane" who --json)"
+python3 -c '
+import json, sys
+data = json.loads(sys.argv[1])
+assert isinstance(data, list) and data, "empty/non-list"
+need = ("name", "id", "parent", "kind", "state", "pane", "session", "cwd", "status")
+for row in data:
+    for k in need:
+        assert k in row, "missing %s" % k
+    assert set(row) == set(need), "keys=%s" % sorted(row)
+' "$whoj" && ok "who --json is an array of roster objects" \
+  || bad "who --json is an array of roster objects" "got: $whoj"
+
+[ "$(who_json_get "$whoj" alice parent)" = "bob" ] && ok "who --json alice.parent is bob" \
+  || bad "who --json alice.parent is bob" "got: $(who_json_get "$whoj" alice parent 2>/dev/null || true)"
+who_json_is_null "$whoj" bob parent && ok "who --json bob.parent is null" \
+  || bad "who --json bob.parent is null" "bob parent not null"
+proj_json_cwd="$(who_json_get "$whoj" projagent cwd)"
+proj_json_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$proj_json_cwd")"
+proj_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$projdir")"
+[ "$proj_json_real" = "$proj_real" ] && ok "who --json cwd is a field not a column" \
+  || bad "who --json cwd is a field not a column" "got: $proj_json_cwd want: $projdir"
+[ "$(who_json_get "$whoj" zsh-cursor status)" = "ghost" ] && ok "who --json status is ghost for cursor+shell" \
+  || bad "who --json status is ghost for cursor+shell" "got: $(who_json_get "$whoj" zsh-cursor status 2>/dev/null || true)"
+[ "$(who_json_get "$whoj" projagent status)" = "live" ] && ok "who --json status is live for generic sleep" \
+  || bad "who --json status is live for generic sleep" "got: $(who_json_get "$whoj" projagent status 2>/dev/null || true)"
+
+occ="$(python3 -c '
+import json, os, sys
+data = json.loads(sys.argv[1])
+want = os.path.realpath(sys.argv[2])
+hits = []
+for row in data:
+    cwd = row.get("cwd") or ""
+    try:
+        real = os.path.realpath(cwd)
+    except OSError:
+        real = cwd
+    if real == want and row.get("status") == "live":
+        hits.append(row["name"])
+print(",".join(hits))
+' "$whoj" "$projdir")"
+[ "$occ" = "projagent" ] && ok "who --json occupancy consumes cwd+status with no awk" \
+  || bad "who --json occupancy consumes cwd+status with no awk" "got: $occ"
+
+jsent="$(muxa_as "$bob_pane" send --json carol json-body)"
+python3 -c '
+import json, sys
+o = json.loads(sys.argv[1])
+assert o["from"] == "bob" and o["to"] == "carol"
+assert o["id"] and o["pane"].startswith("%")
+assert set(o) == {"id", "pane", "from", "to"}
+' "$jsent" && ok "send --json is id+pane+from+to" \
+  || bad "send --json is id+pane+from+to" "got: $jsent"
+carol_pane_got="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["pane"])' "$jsent")"
+[ "$carol_pane_got" = "$carol_pane" ] && ok "send --json pane matches roster" \
+  || bad "send --json pane matches roster" "want=$carol_pane got=$carol_pane_got"
+human_send="$(muxa_as "$bob_pane" send carol still-human)"
+assert_contains "$human_send" "queued bob → carol" "send without --json stays human"
+
+allj="$(muxa_as "$bob_pane" send --json --all json-all-body)"
+python3 -c '
+import json, sys
+data = json.loads(sys.argv[1])
+assert isinstance(data, list) and data
+names = {row["to"] for row in data}
+assert "carol" in names and "alice" in names
+for row in data:
+    assert row["id"] and row["pane"].startswith("%")
+    assert row["from"] == "bob"
+' "$allj" && ok "send --all --json is an array of enqueues" \
+  || bad "send --all --json is an array of enqueues" "got: $allj"
+
+nonej="$(muxa_as "$eve_pane" send --json --all json-none)"
+[ "$nonej" = "[]" ] && ok "send --all --json with no peers is []" \
+  || bad "send --all --json with no peers is []" "got: $nonej"
+
+tmux -L "$SOCK" new-window -t muxa -n taildata "printf '%s\n' alpha-tail bravo-tail charlie-tail; exec sleep 3600"
+sleep 0.3
+tail_pane="$(tmux -L "$SOCK" list-panes -t muxa:taildata -F '#{pane_id}' | head -1)"
+muxa_as "$tail_pane" register --name tautest --kind generic --deliver inject --parent bob >/dev/null
+tailed="$(muxa_as "$bob_pane" tail tautest)"
+assert_contains "$tailed" "alpha-tail" "tail captures visible pane"
+assert_contains "$tailed" "charlie-tail" "tail captures last visible line"
+last="$(muxa_as "$bob_pane" tail tautest -n 1)"
+case "$last" in
+  *charlie-tail*) ok "tail -n 1 is last history line" ;;
+  *) bad "tail -n 1 is last history line" "got: $last" ;;
+esac
+last2="$(muxa_as "$bob_pane" tail -n 2 tautest)"
+assert_contains "$last2" "bravo-tail" "tail -n N NAME flag order"
+set +e
+muxa_as "$bob_pane" tail nobody 2>/dev/null
+tail_code=$?
+set -e
+[ "$tail_code" -eq 2 ] && ok "tail unknown exits 2" \
+  || bad "tail unknown exits 2" "exit=$tail_code"
 
 # --- unregister ---
 tmux -L "$SOCK" new-window -t muxa -n unreg "exec sleep 3600"
