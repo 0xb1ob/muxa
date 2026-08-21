@@ -1,0 +1,92 @@
+name: Release binaries
+
+# install.sh never compiles Go. It downloads muxa-broker from a release, so
+# every tag needs the assets attached before that tag is installable.
+#
+# Backfill an existing tag: gh workflow run release.yml -f tag=1.0.1
+
+on:
+  push:
+    tags: ["*"]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and attach assets to
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, goos: linux, goarch: amd64 }
+          - { runner: ubuntu-latest, goos: linux, goarch: arm64 }
+          - { runner: macos-latest, goos: darwin, goarch: amd64, cc: "clang -arch x86_64" }
+          - { runner: macos-latest, goos: darwin, goarch: arm64, cc: "clang -arch arm64" }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+      - name: Build muxa-broker
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.goos == 'darwin' && '1' || '0' }}
+          CC: ${{ matrix.cc }}
+        run: |
+          set -eux
+          out="muxa-broker-${GOOS}-${GOARCH}"
+          # darwin 25+ SIGKILLs Mach-O without LC_UUID; only the external
+          # linker emits it, so cgo + clang is required for darwin.
+          if [ "$GOOS" = darwin ]; then
+            go build -ldflags=-linkmode=external -o "$out" ./broker
+            xattr -c "$out" 2>/dev/null || true
+            codesign -s - --force --timestamp=none "$out"
+            otool -l "$out" | grep -q LC_UUID || {
+              echo "missing LC_UUID in $out" >&2
+              exit 1
+            }
+          else
+            go build -o "$out" ./broker
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: muxa-broker-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: muxa-broker-${{ matrix.goos }}-${{ matrix.goarch }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          set -eux
+          cd dist
+          chmod +x muxa-broker-*
+          sha256sum muxa-broker-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+        run: |
+          set -eux
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+                 --title "$TAG" --generate-notes
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*

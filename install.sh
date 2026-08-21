@@ -8,6 +8,10 @@
 #   ./install.sh
 #
 # Env: MUXA_HOME (default ~/.muxa) MUXA_REPO MUXA_REF MUXA_BIN_DIR
+#      MUXA_BROKER_VERSION (release tag, default latest) MUXA_BROKER_URL
+#      MUXA_BROKER_BASE_URL MUXA_BROKER_SKIP_VERIFY
+#
+# Go is not required: muxa-broker is downloaded as a release asset.
 set -euo pipefail
 
 MUXA_REPO="${MUXA_REPO:-https://github.com/0xb1ob/muxa.git}"
@@ -80,33 +84,108 @@ mkdir -p "$BIN"
 ln -sfn "$ROOT/bin/muxa" "$BIN/muxa"
 chmod +x "$ROOT/bin/muxa" "$ROOT/install.sh" "$ROOT/tests/run.sh"
 
-# Optional Go broker. Darwin 25+ needs the external linker for LC_UUID.
+# Go broker. Never compiled here: Go is not an install-time dependency.
+# The binary is a release asset, verified against that release's SHA256SUMS.
+broker_platform() {
+  local os arch
+  case "$(uname -s)" in
+    Darwin) os=darwin ;;
+    Linux) os=linux ;;
+    *) return 1 ;;
+  esac
+  case "$(uname -m)" in
+    x86_64 | amd64) arch=amd64 ;;
+    arm64 | aarch64) arch=arm64 ;;
+    *) return 1 ;;
+  esac
+  printf '%s-%s' "$os" "$arch"
+}
+
+fetch() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 2 -o "$2" "$1"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "$2" "$1"
+  else
+    return 1
+  fi
+}
+
+sha256_of() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+# stdout: path of a verified broker binary in $1 (a scratch dir). Nonzero on
+# any failure — an unverified daemon binary is never installed.
+download_broker() {
+  local tmp="$1" plat asset base bin want got
+  plat="$(broker_platform)" || {
+    printf 'muxa-install: no muxa-broker build for %s/%s\n' "$(uname -s)" "$(uname -m)" >&2
+    return 1
+  }
+  asset="muxa-broker-$plat"
+  bin="$tmp/$asset"
+
+  if [ -n "${MUXA_BROKER_URL:-}" ]; then
+    fetch "$MUXA_BROKER_URL" "$bin" || return 1
+    printf '%s' "$bin"
+    return 0
+  fi
+
+  base="${MUXA_BROKER_BASE_URL:-https://github.com/0xb1ob/muxa/releases}"
+  if [ -n "${MUXA_BROKER_VERSION:-}" ]; then
+    base="$base/download/$MUXA_BROKER_VERSION"
+  else
+    base="$base/latest/download"
+  fi
+
+  fetch "$base/$asset" "$bin" || {
+    printf 'muxa-install: cannot download %s/%s\n' "$base" "$asset" >&2
+    return 1
+  }
+
+  if [ "${MUXA_BROKER_SKIP_VERIFY:-0}" = 1 ]; then
+    printf '%s' "$bin"
+    return 0
+  fi
+  fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" || {
+    printf 'muxa-install: %s/SHA256SUMS missing; refusing unverified broker\n' "$base" >&2
+    return 1
+  }
+  want="$(awk -v a="$asset" '$2 == a || $2 == "*" a {print $1}' "$tmp/SHA256SUMS" | head -1)"
+  got="$(sha256_of "$bin" || true)"
+  if [ -z "$want" ] || [ -z "$got" ] || [ "$want" != "$got" ]; then
+    printf 'muxa-install: checksum mismatch for %s (want=%s got=%s)\n' "$asset" "${want:-none}" "${got:-none}" >&2
+    return 1
+  fi
+  printf '%s' "$bin"
+}
+
 if [ -d "$ROOT/broker" ]; then
-  _go="${MUXA_GO:-}"
-  if [ -z "$_go" ]; then
-    if [ -x /usr/local/go/bin/go ]; then
-      _go=/usr/local/go/bin/go
-    else
-      _go="$(command -v go || true)"
+  _tmp="$(mktemp -d "${TMPDIR:-/tmp}/muxa-broker.XXXXXX")"
+  if _bin="$(download_broker "$_tmp")" && [ -s "$_bin" ]; then
+    install -m 755 "$_bin" "$ROOT/bin/muxa-broker"
+    if [ "$(uname -s)" = Darwin ]; then
+      # darwin 25+ SIGKILLs quarantined / unsigned Mach-O.
+      xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true
+      codesign -s - --force --timestamp=none "$ROOT/bin/muxa-broker" 2>/dev/null || true
     fi
+    ln -sfn "$ROOT/bin/muxa-broker" "$BIN/muxa-broker"
+    printf 'muxa-install: muxa-broker -> %s\n' "$ROOT/bin/muxa-broker"
+  elif [ -x "$ROOT/bin/muxa-broker" ]; then
+    ln -sfn "$ROOT/bin/muxa-broker" "$BIN/muxa-broker"
+    printf 'muxa-install: keeping existing %s\n' "$ROOT/bin/muxa-broker" >&2
+  else
+    printf 'muxa-install: no muxa-broker installed; muxa send will fail closed\n' >&2
   fi
-  if [ -n "$_go" ] && [ -x "$_go" ]; then
-    _flags=()
-    case "$(uname -s)" in
-      Darwin) _flags=(-ldflags=-linkmode=external) ;;
-    esac
-    if "$_go" build "${_flags[@]}" -o "$ROOT/bin/muxa-broker" "$ROOT/broker"; then
-      chmod +x "$ROOT/bin/muxa-broker"
-      if [ "$(uname -s)" = Darwin ]; then
-        xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true
-        codesign -s - --force --timestamp=none "$ROOT/bin/muxa-broker" 2>/dev/null || true
-      fi
-      ln -sfn "$ROOT/bin/muxa-broker" "$BIN/muxa-broker"
-    else
-      printf 'muxa-install: muxa-broker build failed; muxa send will paste-fallback\n' >&2
-    fi
-  fi
-  unset _go _flags
+  rm -rf "$_tmp"
+  unset _tmp _bin
 fi
 
 # Skills: on-demand, not MCP. Progressive disclosure = fewer tokens.

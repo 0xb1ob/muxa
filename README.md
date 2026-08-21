@@ -78,6 +78,15 @@ merges user-level hooks, and copies the **muxa-parent** and **muxa-worker**
 skills to `~/.cursor/skills`, `~/.claude/skills`, and `~/.agents/skills`.
 Re-run the same curl to refresh `~/.muxa` from `origin/main` and update skills/hooks.
 
+**Go is not an install dependency.** `muxa-broker` is downloaded as a GitHub
+release asset (`muxa-broker-<os>-<arch>` for darwin/linux × amd64/arm64),
+verified against that release's `SHA256SUMS`, and installed next to `muxa`
+(`~/.muxa/bin/muxa-broker`). A checksum that does not match installs nothing.
+Pin with `MUXA_BROKER_VERSION=<tag>`, or point at your own build with
+`MUXA_BROKER_URL=…`. `.github/workflows/release.yml` builds and attaches the
+assets for every tag (darwin builds use the external linker so the Mach-O has
+`LC_UUID`, which darwin 25+ requires).
+
 From a git checkout (development):
 
 ```bash
@@ -149,7 +158,8 @@ tests/broker.sh       # broker integration (isolated tmux + dummy prompts)
 tests/tmux-facts.sh   # version-sensitive tmux behaviour muxa depends on
 ```
 
-Needs `tmux`, `python3`, and (for the broker) Go 1.21+. Uses a private tmux socket, not your session.
+Needs `tmux`, `python3`, and — for the broker tests only, not for install —
+Go 1.21+. Uses a private tmux socket, not your session.
 `muxa jobs` tests also need [`br`](https://github.com/Dicklesworthstone/beads_rust) on `PATH`.
 
 ## Environment
@@ -163,6 +173,10 @@ Needs `tmux`, `python3`, and (for the broker) Go 1.21+. Uses a private tmux sock
 | `MUXA_BROKER_BIN` | `bin/muxa-broker` next to `muxa` | Daemon binary |
 | `MUXA_BROKER_DEADLINE` | `600` | Seconds to wait for a free pane before the broker pastes anyway |
 | `MUXA_BROKER_POLL_MS` | `250` | Broker retry interval |
+| `MUXA_BROKER_VERSION` | latest release | Install-time: release tag to fetch the broker asset from |
+| `MUXA_BROKER_URL` | unset | Install-time: exact broker URL (skips the checksum lookup) |
+| `MUXA_BROKER_BASE_URL` | `https://github.com/0xb1ob/muxa/releases` | Install-time: release base URL |
+| `MUXA_BROKER_SKIP_VERIFY` | `0` | Install-time: `1` skips `SHA256SUMS` verification |
 | `MUXA_TMUX_SOCKET` | unset | Private tmux socket name (`tmux -L`) |
 | `MUXA_TMUX_BIN` | `tmux` | tmux binary |
 
