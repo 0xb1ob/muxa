@@ -113,6 +113,12 @@ does not rename or re-parent it; it may correct `@muxa_kind` only when
 process evidence says so, and must not flip a live `claude`/`cursor`/`pi`
 registration to a different family without that evidence. Presence events (`busy`, `idle`, `blocked`, `stop`) are not part of muxa.
 
+`muxa hook` fails open. It runs from registrations inside agent harnesses,
+where a non-zero exit — 2 especially — denies the tool call or turn that
+fired it. An unknown event warns on stderr and exits 0; outside tmux the
+hook exits 0 silently. A stale registration left by an older muxa must
+degrade to a warning, never lock an agent out of its own session.
+
 ## Reachability
 
 muxa does not know about orchestrators. It only enforces a tree:
