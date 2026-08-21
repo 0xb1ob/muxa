@@ -318,27 +318,19 @@ repeat you already handled.
 
 Role instructions live in the **muxa-parent** and **muxa-worker** skills.
 
-## Jobs (runtime map)
+## muxa / command-post boundary
 
-`muxa jobs` is a per-repo **runtime map**: which worker, worktree, and
-branch are attached to an existing **br** issue. It is not the backlog,
-not an orchestrator, and not a TUI.
+Paired record: [0xb1ob/command-post](https://github.com/0xb1ob/command-post)
+`AGENTS.md`. The two notes must agree.
 
-Durable fields (kind, delivery, status, PR URL, note) live on the br
-issue. Runtime fields (worker, worktree, branch) live only in
-`$XDG_STATE_HOME/muxa/jobs/<repo>-<hash>.tsv`, keyed by br issue id.
+**muxa owns the transport** — panes, identity, and getting a message into a
+running agent.
 
-`muxa jobs add JOB …` attaches runtime fields to an issue that already
-exists in br. It MUST NOT create a br issue. `JOB` is a br issue id, a
-unique title, or a unique `--slug` token embedded in the id. Job keys
-MUST NOT contain whitespace. Human titles may (`command-post: foo`);
-those jobs are addressed by br id. Do not invent a third ledger (no
-`note=<br-id>` join).
+**command-post owns the work** — what to do, where, by whom, and whether it
+is done.
 
-`muxa jobs list` prints the runtime map joined to br, not every issue in
-`.beads/`. `muxa jobs set` / `done` update runtime rows and/or durable
-br fields. Unknown keys exit 2. `br` is required; muxa auto-inits
-`.beads/` on first use.
+**Hard constraint:** muxa may never require `br`, `git`, or a job id. If an
+argument is a br key, the command is in the wrong repo.
 
 ## Trust
 

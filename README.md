@@ -13,9 +13,8 @@ The other agent sees a normal user turn tagged `[muxa]`. That is the protocol.
 `muxa send` enqueues on the broker. If the broker cannot start or enqueue,
 send exits non-zero and pastes nothing.
 
-**Scope:** muxa is tmux agent spawn, mail, preflight, and a runtime jobs map
-(`muxa jobs`). It is not a job orchestrator. For worktree leasing, dispatch
-contracts, and multi-worker coding jobs, use
+**Scope:** muxa is tmux agent spawn and mail. It is not a job orchestrator.
+For worktree leasing, dispatch contracts, and multi-worker coding jobs, use
 [command-post](https://github.com/0xb1ob/command-post).
 
 ## Research: what already exists, and why not
@@ -111,7 +110,7 @@ From a git checkout (development):
 
 ```bash
 ./install.sh          # install from this tree; does not clone
-tests/run.sh          # identity / spawn / jobs / preflight
+tests/run.sh          # identity / spawn
 tests/install.sh      # ~/.muxa cache update after a squash / shallow fetch
 tests/e2e.sh          # real Claude Code + Cursor Agent + Oh My Pi in tmux
                       # --capture-fixtures writes .ansi + .meta + .t2.ansi
@@ -171,13 +170,11 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 | `muxa send --all TEXT` | Every parent/child pane (not siblings or other roots) |
 | `muxa broker [start\|status\|stop]` | User-level paste broker (unix socket + file queue) |
 | `muxa hook EVENT` | Register / presence (not a mail drain) |
-| `muxa preflight [--base BRANCH] [WORKTREE...]` | Repo checks before handing out jobs (git only, no tmux) |
-| `muxa jobs add\|set\|done\|list` | Runtime map (worker/worktree/branch) for **existing** br issues. Does not create br issues or act as the backlog. Address jobs by br id (titles may contain whitespace). Durable kind/delivery/status stay on br. `br` is required; muxa auto-inits `.beads/` on first use |
 
 ## Tests
 
 ```bash
-tests/run.sh          # identity / spawn / jobs / preflight
+tests/run.sh          # identity / spawn
 tests/broker.sh       # broker integration (isolated tmux + dummy prompts)
 tests/tmux-facts.sh   # version-sensitive tmux behaviour muxa depends on
 tests/e2e.sh --capture-fixtures
@@ -190,7 +187,6 @@ Needs `tmux`, `python3`, and — for the broker tests only, not for install —
 Go 1.21+. On darwin 25+, `go test` must use `-ldflags=-linkmode=external`
 (same LC_UUID requirement as the release broker build). Uses a private tmux
 socket, not your session.
-`muxa jobs` tests also need [`br`](https://github.com/Dicklesworthstone/beads_rust) on `PATH`.
 
 ## Environment
 

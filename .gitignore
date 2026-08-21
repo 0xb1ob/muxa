@@ -3,7 +3,6 @@ node_modules/
 *.log
 .lavish/
 .muxa-e2e-artifacts/
-.beads/
 bin/muxa-broker
 tests/fixtures/composer/*-harvest.*
 

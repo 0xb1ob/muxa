@@ -15,11 +15,6 @@ jobs:
       - name: Install dependencies
         timeout-minutes: 5
         run: sudo apt-get -o Acquire::Retries=3 -o Acquire::ForceIPv4=true update && sudo apt-get -o Acquire::Retries=3 -o Acquire::ForceIPv4=true install -y tmux zsh
-      - name: Install br
-        timeout-minutes: 5
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh | bash -s -- --skip-skills --no-gum
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - uses: actions/setup-go@v5
         with:
           go-version: "1.21"
