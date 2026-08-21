@@ -90,11 +90,13 @@ frame() {
 prev=""
 while true; do
   st="$(cat '"$composer_state"' 2>/dev/null || true)"
-  if [ "$st" != "$prev" ]; then
+  timeout=0.3
+  [ "$st" = busy ] && timeout=0.05
+  if [ "$st" != "$prev" ] || [ "$st" = busy ]; then
     prev="$st"
     frame "$st"
   fi
-  if IFS= read -r -t 0.3 line; then
+  if IFS= read -r -t "$timeout" line; then
     printf "%s\n" "$line" >>'"$composer_log"'
     frame "$st"
   fi
@@ -304,9 +306,9 @@ esac
 
 # --- E: agent-CLI composer pane takes the first brief immediately ---
 # The regression is timing as much as delivery: a first brief to an idle
-# composer must land because LooksFree says free, not because a deadline
-# expired. Control-mode silence should make that sub-second; the log must
-# never call it a fallback paste (that path is gone).
+# composer must land because free-detection plus typed-in-box say free, not
+# because a deadline expired. Control-mode silence should make that
+# sub-second; the log must never call it a fallback paste (that path is gone).
 tmux -L "$SOCK" split-window -v -t muxa:parent "$composer_loop"
 sleep 0.5
 composer_pane="$(tmux -L "$SOCK" list-panes -t muxa:parent -F '#{pane_id} #{pane_top}' | sort -k2,2n | awk 'END{print $1}')"
@@ -341,8 +343,10 @@ case "$line_e" in
 esac
 
 # --- F: a composer that is typed-in or mid-turn is left alone ---
-# Widening the heuristic must not cost the protection it replaces: text a human
-# typed and a live interrupt hint both still mean "not free".
+# Typed-in-box still protects unsubmitted input. A mid-turn pane must
+# actually draw (free-detection is drawing / two-signal, not interrupt
+# phrases), so the busy stand-in animates rather than painting one static
+# chrome frame.
 composer_holds() {
   local label="$1" state="$2" tok="$3" cap
   settle "$composer_pane"

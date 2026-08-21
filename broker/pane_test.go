@@ -88,20 +88,21 @@ func composerFixtureCases() []struct {
 		// Default-foreground text in the box reads as typed even when it is a
 		// hint: this fixture's "Image in clipboard · ctrl+v to paste" carries
 		// the same attributes as text typed after a faint ❯. Conservative on
-		// purpose — the cost is the deadline fallback, not lost input.
+		// purpose — the cost is a delayed paste, not lost input.
 		{"claude-idle-233.ansi", false, "non-faint box text is indistinguishable from typing"},
-		// Busy: live interrupt hint in the box, or a spinner beside it.
-		{"claude-busy.ansi", false, "'esc to interrupt' inside the box"},
-		{"cursor-busy-revcursor.ansi", false, "'ctrl+c to stop' inside the box"},
-		{"cursor-busy-spinner.ansi", false, "spinner above the box"},
-		{"pi-busy.ansi", false, "spinner above the box, composer looks idle"},
+		// Busy chrome is not a parser signal. LooksFree must not wait on
+		// spinners or interrupt phrases; free-detection is the broker's.
+		{"claude-busy.ansi", true, "faint 'esc to interrupt' is chrome, not typed"},
+		{"cursor-busy-revcursor.ansi", true, "faint 'ctrl+c to stop' is chrome, not typed"},
+		{"cursor-busy-spinner.ansi", true, "spinner above the box is chrome, not typed"},
+		{"pi-busy.ansi", true, "spinner above the box, composer looks idle"},
 		// Typed: non-faint text between the borders must never be clobbered.
 		{"cursor-typed.ansi", false, "human typed 'hello world'"},
-		// No composer box → shell fallback.
-		{"cursor-trust-dialog.ansi", false, "rounded modal, not a composer"},
-		{"shell-prompt.ansi", true, "plain shell prompt"},
-		{"vim.ansi", false, "vim insert mode"},
-		{"garbage.ansi", false, "truncated escape, no prompt"},
+		// No composer box → conjunct is vacuously true (free-detection decides).
+		{"cursor-trust-dialog.ansi", true, "rounded modal, not a composer"},
+		{"shell-prompt.ansi", true, "plain shell prompt, no box"},
+		{"vim.ansi", true, "vim insert mode, no box"},
+		{"garbage.ansi", true, "truncated escape, no box"},
 	}
 }
 
@@ -113,25 +114,12 @@ func TestLooksFree(t *testing.T) {
 	}{
 		{"empty", "", true},
 		{"blank lines", "\n\n  \n", true},
-		{"dollar", "user@host ~ $", true},
-		{"percent", "muxa %", true},
-		{"hash root", "root@box:/#", true},
-		{"gt", ">", true},
-		{"gt spaces", ">  ", true},
-		{"ready loop", "ready>", true},
-		{"zsh with path", "mbaranovski@mac muxa %", true},
-		{"ansi prompt", "\x1b[32mready>\x1b[0m", true},
-		{"typed after percent", "muxa % hello", false},
-		{"typed after gt", "> partial text", false},
-		{"typed after ready", "ready> still typing", false},
-		{"command output", "hello world", false},
-		{"busy string", "esc to interrupt", false},
-		{"ctrl-c", "ctrl+c to stop", false},
-		{"spinner-ish", "⠋ running", false},
-		{"multiline prompt last", "output\nmore\nready>", true},
-		{"multiline typed last", "output\nready> abc", false},
-		{"trailing empty after prompt", "ready>\n\n", true},
-		{"cursor-ish composer", "  > ", true},
+		{"shell prompt is vacuously free", "user@host ~ $", true},
+		{"typed shell is vacuously free", "muxa % hello", true},
+		{"command output is vacuously free", "hello world", true},
+		{"busy string is vacuously free", "esc to interrupt", true},
+		{"idle box", "▄▄▄▄▄▄\n \x1b[2m❯\x1b[0m     \n▀▀▀▀▀▀\n", true},
+		{"typed in box", "▄▄▄▄▄▄\n hello\n▀▀▀▀▀▀\n", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -143,10 +131,9 @@ func TestLooksFree(t *testing.T) {
 	}
 }
 
-// TestLooksFreeComposerFixtures pins the composer path to real
-// `capture-pane -e` output. Every "idle" fixture here used to read as busy,
-// which is why a first brief to a freshly spawned agent pane sat in pending
-// until the deadline instead of being pasted (muxa#41).
+// TestLooksFreeComposerFixtures pins the typed-in-box conjunct to real
+// `capture-pane -e` output. Busy chrome (spinners, interrupt phrases) must
+// not flip the verdict: that is free-detection, not this remnant.
 func TestLooksFreeComposerFixtures(t *testing.T) {
 	for _, tc := range composerFixtureCases() {
 		t.Run(tc.file, func(t *testing.T) {
@@ -212,14 +199,16 @@ func TestComposerIgnoresBusyScrollback(t *testing.T) {
 		"  (older status) ctrl+c to stop was shown during the prior turn\n" +
 		"▄▄▄▄▄▄\n \x1b[2m❯\x1b[0m     \n▀▀▀▀▀▀\n"
 	if !LooksFree(cap) {
-		t.Fatal("busy phrases above the box must not mark an idle composer busy")
+		t.Fatal("busy phrases above the box must not mark an idle composer typed")
 	}
 }
 
-func TestComposerBusyPhraseInsideBox(t *testing.T) {
+func TestComposerBusyChromeIsNotAPromptModel(t *testing.T) {
+	// Faint interrupt hints are chrome. LooksFree must not use them to
+	// decide a pane is at a prompt; that is the broker's job.
 	cap := "▄▄▄▄▄▄\n \x1b[2m❯ esc to interrupt\x1b[0m \n▀▀▀▀▀▀\n"
-	if LooksFree(cap) {
-		t.Fatal("interrupt hint inside the box means a turn is running")
+	if !LooksFree(cap) {
+		t.Fatal("busy phrases inside the box must not mark typed-in-box")
 	}
 }
 
@@ -231,8 +220,9 @@ func TestComposerEmptyInputRow(t *testing.T) {
 }
 
 func TestComposerBoxNeedsBothBorders(t *testing.T) {
-	// A lone bottom border is ordinary output, not a composer.
-	if LooksFree("some output\nmore output\n▀▀▀▀▀▀\n") {
+	// A lone bottom border is ordinary output, not a composer. Without a
+	// box the conjunct is vacuously true — check findComposer, not LooksFree.
+	if _, _, _, ok := findComposer("some output\nmore output\n▀▀▀▀▀▀\n"); ok {
 		t.Fatal("bottom border alone must not be read as a composer")
 	}
 }

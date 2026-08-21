@@ -8,54 +8,40 @@ import (
 	"unicode/utf8"
 )
 
-// LooksFree reports whether capture-pane output looks like a pane that
-// can accept a paste+Enter without interrupting typing or a busy TUI.
+// LooksFree is the typed-in-box conjunct, not a free-detection model.
 //
-// Two shapes exist and only the first one has a prompt on the last line:
+// Free-detection — whether a pane is idle / at a prompt — is the broker's
+// job: pane_dead / pane_in_mode, control-mode %output silence, and the
+// two-signal rule (quiescence AND empty at the hardware cursor). This
+// function MUST NOT decide that a pane is at a prompt, and MUST NOT model
+// status chrome (spinners, interrupt phrases, bottom-line prompt markers).
+// The bottom line is user-configurable; no fixed chrome model can be
+// correct.
 //
-// Shell-ish pane — the last non-empty line *is* the input line:
+// What it may be used for: refuse a paste when a composer box contains
+// unsubmitted human input. That is the only thing in the system that can
+// see a Cursor Agent half-typed prompt. Hardware cursor (#44), second-
+// capture frame diff (#44), and control-mode silence (#46) are all blind
+// to it: cursor-idle and cursor-typed fixtures are identical at cursor_x=0,
+// both static (t1==t2), and typing emits %output that then goes quiet —
+// the same silence as an empty composer.
 //
-//  1. Strip ANSI/OSC.
-//  2. Take the last non-empty line, trim trailing space.
-//  3. Empty line → free (blank pane / empty input).
-//  4. A prompt marker ($ % # > ❯) followed by whitespace and then non-space
-//     → not free (someone is typing after the prompt).
-//  5. Line ends with a prompt marker (optional trailing space) → free.
-//  6. Anything else → not free (command output, spinner, busy TUI).
-//
-// Agent-CLI pane — the input line sits inside a half-block composer box and
-// the last lines are chrome (status row, cwd, model name), so rule 6 above
-// would reject an idle CLI forever and every first brief would wait out
-// MUXA_BROKER_DEADLINE. When the capture contains a composer box, decide on
-// the box instead: see composerFree.
-//
-// Both paths stay CLI-agnostic — the composer path keys off terminal
-// attributes (SGR 2 faint, SGR 7 reverse) and half-block box chrome, not off
-// any Claude/Cursor/Pi string. A live pane that is not free keeps its mail
-// queued; the broker does not paste after MUXA_BROKER_DEADLINE just because
-// the clock ran out.
+// If there is no ▄/▀ box, the conjunct is vacuously true and free-detection
+// decides. Capture must keep -e: without SGR, a faint placeholder is
+// indistinguishable from typed text.
 func LooksFree(capture string) bool {
-	if rows, top, bot, ok := findComposer(capture); ok {
-		return composerFree(rows, top, bot)
-	}
-	plain := stripANSI(capture)
-	line := lastNonEmptyLine(plain)
-	line = strings.TrimRightFunc(line, unicode.IsSpace)
-	if line == "" {
+	rows, top, bot, ok := findComposer(capture)
+	if !ok {
 		return true
 	}
-	if typedAfterPrompt.MatchString(line) {
-		return false
-	}
-	return promptAtEnd.MatchString(line)
+	return !typedInBox(rows, top, bot)
 }
 
 var (
-	csiRe            = regexp.MustCompile(`\x1b\[[0-9;?=]*[A-Za-z]`)
-	oscRe            = regexp.MustCompile(`\x1b\].*?(?:\x07|\x1b\\)`)
-	otherEscRe       = regexp.MustCompile(`\x1b.`)
-	typedAfterPrompt = regexp.MustCompile(`[$%#>❯][ \t]+\S`)
-	promptAtEnd      = regexp.MustCompile(`[$%#>❯][ \t]*$`)
+	csiRe       = regexp.MustCompile(`\x1b\[[0-9;?=]*[A-Za-z]`)
+	oscRe       = regexp.MustCompile(`\x1b\].*?(?:\x07|\x1b\\)`)
+	otherEscRe  = regexp.MustCompile(`\x1b.`)
+	promptAtEnd = regexp.MustCompile(`[$%#>❯][ \t]*$`)
 )
 
 func stripANSI(s string) string {
@@ -65,19 +51,10 @@ func stripANSI(s string) string {
 	return s
 }
 
-func lastNonEmptyLine(s string) string {
-	lines := strings.Split(s, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.TrimSpace(lines[i]) != "" {
-			return lines[i]
-		}
-	}
-	return ""
-}
-
 // Half-block rows every agent-CLI composer we have captured draws around its
 // input line: U+2584 fills the lower half of the row above the input, U+2580
-// the upper half of the row below it.
+// the upper half of the row below it. Locating the box is not chrome
+// modelling — it is how we read the input the hardware cursor does not see.
 const (
 	borderTop    = '▄' // ▄
 	borderBottom = '▀' // ▀
@@ -92,7 +69,8 @@ type cell struct {
 
 // findComposer locates the innermost composer box: the last bottom-edge row
 // and the top-edge row directly above it, with at least one input row in
-// between. Trailing chrome below the box (status row, cwd) is ignored.
+// between. Trailing rows below the box are ignored; they are not consulted
+// for a prompt/busy verdict.
 func findComposer(capture string) (rows [][]cell, top, bot int, ok bool) {
 	for _, line := range strings.Split(capture, "\n") {
 		rows = append(rows, attrCells(line))
@@ -133,38 +111,26 @@ func isBorder(row []cell, r rune) bool {
 	return seen
 }
 
-// composerFree decides an agent-CLI composer box.
+// typedInBox reports unsubmitted input inside a composer box.
 //
-// Placeholder text ("Add a follow-up", "Plan, search, build anything", a bare
-// ❯) is rendered faint by every composer we have captured, and the block
-// cursor is reverse video — so faint and reverse cells are chrome. Anything
-// else between the borders is text a human typed and must not be clobbered.
+// Placeholder text is rendered faint (SGR 2) by every composer we have
+// captured, and the block cursor is reverse video (SGR 7) — those cells
+// are not typed. Anything else between the borders is text a human typed
+// and must not be clobbered.
 //
-// A live status line inside the box ("esc to interrupt", "ctrl+c to stop")
-// means a turn is running. Those phrases are only trusted inside the box:
-// above it they are ordinary transcript text from an earlier turn. A spinner
-// glyph is the reverse — it is only ever live, so it counts from the row
-// directly above the box as well.
+// Reverse alone is not enough to call a box empty: one typed character
+// with the cursor on it is all-reverse. An idle composer always renders
+// *some* faint glyph, so a visible row with no faint run is typed.
 //
-// Reverse alone is not enough to call a box empty: one typed character with
-// the cursor on it is all-reverse. An idle composer always renders *some*
-// faint glyph — the prompt marker or the placeholder — so free requires
-// either a faint run or a genuinely blank row.
-//
-// The deliberate limit: default-foreground text in the box is read as typed
-// even when it is really a hint (Claude's "Image in clipboard · ctrl+v to
-// paste" is byte-identical to text typed after a faint ❯). Erring that way
-// costs the deadline fallback; erring the other way overwrites a human's
-// input. Recognising the hint would mean parsing one CLI's chrome.
-func composerFree(rows [][]cell, top, bot int) bool {
-	var typed, status strings.Builder
-	spinner, faint, visible := false, false, false
+// Spinners, interrupt phrases, and other status chrome are out of scope:
+// they decide nothing here. Default-foreground hint text (Claude's
+// "Image in clipboard · ctrl+v to paste") is indistinguishable from
+// typing and is treated as typed. That is deliberate: the cost is a
+// delayed paste; the other way overwrites a human's input.
+func typedInBox(rows [][]cell, top, bot int) bool {
+	faint, visible := false, false
 	for i := top + 1; i < bot; i++ {
 		for _, c := range rows[i] {
-			status.WriteRune(c.r)
-			if isSpinner(c.r) {
-				spinner = true
-			}
 			if unicode.IsSpace(c.r) {
 				continue
 			}
@@ -174,56 +140,11 @@ func composerFree(rows [][]cell, top, bot int) bool {
 				faint = true
 			case c.reverse: // block cursor
 			default:
-				typed.WriteRune(c.r)
+				return true
 			}
 		}
-		status.WriteRune('\n')
 	}
-	if spinner || hasBusyPhrase(status.String()) {
-		return false
-	}
-	if top > 0 && hasSpinner(rows[top-1]) {
-		return false
-	}
-	if typed.Len() > 0 {
-		return false
-	}
-	return faint || !visible
-}
-
-// busyPhrases are interrupt hints a composer only shows mid-turn.
-var busyPhrases = []string{
-	"esc to interrupt",
-	"esc to stop",
-	"ctrl+c to stop",
-	"ctrl-c to stop",
-	"ctrl+c to interrupt",
-}
-
-func hasBusyPhrase(s string) bool {
-	s = strings.ToLower(s)
-	for _, p := range busyPhrases {
-		if strings.Contains(s, p) {
-			return true
-		}
-	}
-	return false
-}
-
-func hasSpinner(row []cell) bool {
-	for _, c := range row {
-		if isSpinner(c.r) {
-			return true
-		}
-	}
-	return false
-}
-
-// isSpinner reports whether r is a braille cell other than the blank. Every
-// CLI in scope animates its "working" indicator out of the braille block, and
-// braille never shows up in composer chrome or in prose typed at a prompt.
-func isSpinner(r rune) bool {
-	return r > '⠀' && r <= '⣿'
+	return visible && !faint
 }
 
 // attrCells decodes one `capture-pane -e` line into visible cells carrying

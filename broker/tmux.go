@@ -77,9 +77,9 @@ func (t *TMUX) InMode(pane string) bool {
 }
 
 // Capture reads the visible pane. -e keeps the SGR attributes, which is how
-// LooksFree tells an agent-CLI composer's faint placeholder from text a human
-// typed. Without it tmux hands back plain text and every idle composer reads
-// as busy.
+// the typed-in-box conjunct tells a faint placeholder from text a human
+// typed. Without it tmux hands back plain text and unsubmitted input is
+// indistinguishable from chrome.
 func (t *TMUX) Capture(pane string) (string, error) {
 	return t.Run([]string{"capture-pane", "-p", "-e", "-t", pane}, nil)
 }
@@ -119,21 +119,6 @@ func (t *TMUX) Inject(pane, text string) error {
 		return fmt.Errorf("pane %s died during inject", pane)
 	}
 	return nil
-}
-
-// Free reports whether the pane may receive a paste right now.
-func (t *TMUX) Free(pane string) (bool, error) {
-	if t.PaneDead(pane) {
-		return false, nil
-	}
-	if t.InMode(pane) {
-		return false, nil
-	}
-	cap, err := t.Capture(pane)
-	if err != nil {
-		return false, err
-	}
-	return LooksFree(cap), nil
 }
 
 // CaptureHistory is the visible grid plus scrollback. Confirmation may find a
