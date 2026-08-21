@@ -124,27 +124,70 @@ The broker keeps each enqueue as a JSON file under
 socket is `<runtime>/broker/broker.sock`. `muxa send` auto-starts
 `bin/muxa-broker` when the socket does not answer `{"op":"ping"}`.
 
+The broker MUST daemonize itself. It re-execs with `setsid(2)`, so the
+running daemon leads its own session and process group, and writes its own
+pidfile. `nohup … & disown` is **not** sufficient and MUST NOT be relied on:
+it only detaches the job from the starting shell's table, leaving the child
+in the *caller's* process group, where the group teardown at the end of the
+calling agent's tool call kills the broker mid-queue — typically before its
+first delivery, with the first brief still in `pending/` and nothing but
+repeated `listening` lines in the log. macOS ships no `setsid(1)`, so the
+shell cannot do this. `MUXA_BROKER_FOREGROUND=1` opts out for tests and
+supervisors. The forking parent waits for its daemon to answer a ping before
+exiting, so a zero exit means the queue has an owner; the shell still starts
+it in the background and polls, because `bin/muxa-broker` is versioned
+separately from `bin/muxa` and an older broker would never return.
+
+Startup logs `re-adopted N pending` when it inherits an undelivered queue.
+Shutdown on SIGINT/SIGTERM makes one last delivery pass, then logs
+`shutdown signal=… : N pending left in <dir>` or `queue drained`. Mail is
+never silently stranded: the count is in the log and the files stay on disk
+for the next start. SIGHUP is ignored. Socket paths of 104 bytes or more are
+rejected with an explicit error rather than the kernel's `invalid argument`.
+
 `bin/muxa-broker` is a prebuilt release asset (`muxa-broker-<os>-<arch>`),
 downloaded and checksum-verified by `install.sh`. Install never compiles Go;
 a Go toolchain is a test-only dependency.
 
 For each queued message the broker captures the target pane (`tmux
-capture-pane -p`) and pastes only when input looks **free**:
+capture-pane -p -e`, attributes retained) and pastes only when input looks
+**free**:
 
 1. `#{pane_dead}` or `#{pane_in_mode}` → not free (copy-mode paste is
    silent-loss).
-2. Strip ANSI/OSC from the capture. Take the last non-empty line.
-3. Empty line → free (blank pane / empty input).
-4. A prompt marker (`$`, `%`, `#`, `>`, `❯`) followed by whitespace and
-   then non-space → not free (typing after the prompt).
-5. Line ends with a prompt marker → free (idle prompt).
-6. Anything else → not free (output, spinner, busy TUI).
+2. If the capture contains a **composer box** — a row of `▄` above a row of
+   `▀` with at least one row between them — decide on the box, because an
+   agent CLI's input line is inside it and the last lines of the pane are
+   chrome (status row, model, cwd):
+   - A braille spinner in the box or on the row directly above it → not free
+     (a turn is running).
+   - `esc to interrupt` / `ctrl+c to stop` **inside** the box → not free.
+     These phrases are only trusted inside the box; above it they are
+     transcript text from a finished turn.
+   - Any text in the box that is neither faint (SGR 2) nor under the reverse
+     video cursor (SGR 7) → not free (a human typed it).
+   - Otherwise → free (blank row, or a faint placeholder / prompt marker).
+3. Otherwise the last non-empty line *is* the input line:
+   - Strip ANSI/OSC. Empty line → free (blank pane / empty input).
+   - A prompt marker (`$`, `%`, `#`, `>`, `❯`) followed by whitespace and
+     then non-space → not free (typing after the prompt).
+   - Line ends with a prompt marker → free (idle prompt).
+   - Anything else → not free (output, spinner, busy TUI).
 
 This heuristic is tmux-only and CLI-agnostic. It does not parse composer
-JSON, Stop hooks, or SessionStart. Retry until
-`MUXA_BROKER_DEADLINE` seconds (default 600) is the reliability layer —
-do not special-case Claude/Cursor/Pi layouts. When the deadline expires
-the broker pastes once anyway (timeout fallback). When the broker is
+JSON, Stop hooks, or SessionStart, and it MUST NOT match on any CLI's
+strings or layout: the composer rule keys off terminal attributes and
+half-block box chrome, which Claude, Cursor Agent and pi all render. Rule 3
+alone is not enough — every agent CLI's idle pane ends in chrome, so it read
+as busy and every first brief waited out the whole deadline.
+
+Faint means chrome, so default-foreground text inside the box counts as
+typed even when it is really a hint. That is deliberate: the cost is a
+delayed paste, whereas the other way round overwrites a human's input.
+
+Retry until `MUXA_BROKER_DEADLINE` seconds (default 600) is the reliability
+layer. When the deadline expires the broker pastes once anyway (timeout
+fallback) — a fallback paste is a symptom, not the design. When the broker is
 down or the binary is missing, `muxa send` exits non-zero and pastes
 nothing.
 

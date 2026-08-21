@@ -76,8 +76,12 @@ func (t *TMUX) InMode(pane string) bool {
 	return err != nil || v == "1"
 }
 
+// Capture reads the visible pane. -e keeps the SGR attributes, which is how
+// LooksFree tells an agent-CLI composer's faint placeholder from text a human
+// typed. Without it tmux hands back plain text and every idle composer reads
+// as busy.
 func (t *TMUX) Capture(pane string) (string, error) {
-	return t.Run([]string{"capture-pane", "-p", "-t", pane}, nil)
+	return t.Run([]string{"capture-pane", "-p", "-e", "-t", pane}, nil)
 }
 
 func (t *TMUX) Inject(pane, text string) error {

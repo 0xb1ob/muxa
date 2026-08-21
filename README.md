@@ -49,15 +49,32 @@ muxa uses surfaces the CLIs already pay for:
 
 `muxa send` talks to **muxa-broker** (unix socket, file-backed queue). The
 broker pastes with load-buffer + Enter when the target pane looks free
-(tmux `capture-pane` only: prompt-ish last line, empty input). If the pane
-is mid-typing, the broker retries until `MUXA_BROKER_DEADLINE` (default 10
-minutes), then pastes once. If the broker is down, `muxa send` exits
-non-zero and pastes nothing. `MUXA_BROKER=0` is an error — it does not
-restore the old bash delivery stack.
+(tmux `capture-pane` only). If the pane is mid-typing, the broker retries
+until `MUXA_BROKER_DEADLINE` (default 10 minutes), then pastes once. If the
+broker is down, `muxa send` exits non-zero and pastes nothing.
+`MUXA_BROKER=0` is an error — it does not restore the old bash delivery
+stack.
 
-Heuristic (documented in [SPEC.md](SPEC.md)): strip ANSI; last non-empty
-line; empty → free; prompt marker (`$%#>❯`) with text after it → typing
-(not free); prompt marker at end of line → free; anything else → wait.
+The broker daemonizes itself with `setsid(2)` and owns its pidfile. That is
+load-bearing, not tidiness: `nohup … & disown` leaves the process in the
+*caller's* process group, so the teardown at the end of the calling agent's
+tool call kills the broker before it delivers anything. macOS has no
+`setsid(1)`, so the binary has to do it.
+
+Heuristic (documented in [SPEC.md](SPEC.md)), two shapes:
+
+- **Agent CLI** — the input line is inside a `▄`/`▀` composer box and the
+  last lines of the pane are chrome, so the box decides: faint (SGR 2) text
+  and the reverse-video cursor are placeholder and cursor → free; anything
+  else in the box is typed → wait; a braille spinner, or `esc to
+  interrupt`/`ctrl+c to stop` **inside** the box → a turn is running → wait.
+- **Shell** — last non-empty line; empty → free; prompt marker (`$%#>❯`)
+  with text after it → typing → wait; prompt marker at end of line → free;
+  anything else → wait.
+
+Both are CLI-agnostic: the composer rule reads terminal attributes and box
+chrome, never a Claude/Cursor/pi string. Without it, every agent CLI's idle
+pane read as busy and every first brief waited out the full deadline.
 
 tmux user options are the roster (`@muxa_name`, `@muxa_kind`, `@muxa_state`,
 `@muxa_deliver`, `@muxa_session`). `tmux list-panes` is service discovery.
