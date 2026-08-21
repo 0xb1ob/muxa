@@ -1138,7 +1138,6 @@ hook_register_pane() {
 # SessionStart does not rename a live pane; it may correct @muxa_kind when
 # process/argv evidence disagrees with --kind.
 cmd_hook() {
-  need_tmux
   local event="${1:-}"
   shift || true
   local kind="" pane existing
@@ -1152,11 +1151,21 @@ cmd_hook() {
   if [ ! -t 0 ]; then
     cat >/dev/null
   fi
+  # Hooks fail open. This subcommand runs from registrations inside agent
+  # harnesses, where a non-zero exit (2 especially) denies the tool call or
+  # turn that fired it. A stale registration for a removed event must degrade
+  # to a stderr warning, never lock the agent out of its own session.
   case "$event" in
     session-start|SessionStart|sessionStart) event="session-start" ;;
     "") die "hook: event required" ;;
-    *) die "hook: unknown event $event" ;;
+    *)
+      printf 'muxa: hook: ignoring unknown event %s (only session-start exists; remove the stale hook registration)\n' "$event" >&2
+      return 0
+      ;;
   esac
+  if [ -z "${TMUX:-}" ] && [ -z "${MUXA_TMUX_SOCKET:-}" ]; then
+    return 0
+  fi
   pane="$(this_pane)"
   kind="$(resolve_hook_kind "$pane" "$kind")"
   if pane_is_registered "$pane"; then

@@ -595,6 +595,26 @@ kindclaude_name="$(tmux -L "$SOCK" display-message -t "$kindclaude_pane" -p '#{@
 [ -n "$kindclaude_name" ] && ok "session-start assigns a name" \
   || bad "session-start assigns a name" "name empty"
 
+# Hooks fail open: a harness treats non-zero (2 especially) as deny, so a
+# stale registration for a removed event must warn and exit 0, not lock the
+# agent out of every tool call.
+hook_stale_rc=0
+hook_stale_err="$(muxa_as "$kindclaude_pane" hook busy 2>&1 >/dev/null)" || hook_stale_rc=$?
+[ "$hook_stale_rc" -eq 0 ] && ok "hook unknown event exits 0" \
+  || bad "hook unknown event exits 0" "rc=$hook_stale_rc"
+assert_contains "$hook_stale_err" "ignoring unknown event busy" "hook unknown event warns on stderr"
+muxa_as "$kindclaude_pane" hook stop --format claude >/dev/null 2>&1 \
+  && ok "hook stop --format claude exits 0" \
+  || bad "hook stop --format claude exits 0" "rc=$?"
+env -u TMUX MUXA_TMUX_SOCKET= muxa hook session-start >/dev/null 2>&1 \
+  && ok "hook session-start outside tmux exits 0" \
+  || bad "hook session-start outside tmux exits 0" "rc=$?"
+if muxa_as "$kindclaude_pane" hook >/dev/null 2>&1; then
+  bad "hook with no event still errors" "expected non-zero"
+else
+  ok "hook with no event still errors"
+fi
+
 # Spawned cursor child must not flip when a leftover session-start fires.
 spawn_agent="$(muxa_as "$bob_pane" spawn --name kind-agent -- "$kind_fakebin/agent")"
 assert_contains "$spawn_agent" "kind=cursor" "spawn agent infers cursor kind"
