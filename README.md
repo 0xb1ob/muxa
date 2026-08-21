@@ -114,6 +114,7 @@ From a git checkout (development):
 tests/run.sh          # identity / spawn / jobs / preflight
 tests/install.sh      # ~/.muxa cache update after a squash / shallow fetch
 tests/e2e.sh          # real Claude Code + Cursor Agent + Oh My Pi in tmux
+                      # --capture-fixtures writes .ansi + .meta + .t2.ansi
 ```
 
 This repo also ships project-scoped hooks for working on muxa itself:
@@ -179,6 +180,10 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 tests/run.sh          # identity / spawn / jobs / preflight
 tests/broker.sh       # broker integration (isolated tmux + dummy prompts)
 tests/tmux-facts.sh   # version-sensitive tmux behaviour muxa depends on
+tests/e2e.sh --capture-fixtures
+                      # harvest .ansi + cursor .meta + .t2.ansi (~250ms later)
+tests/record-composer-fixtures.sh
+                      # recapture Cursor Agent (splash/idle/typed/busy/trust)
 ```
 
 Needs `tmux`, `python3`, and — for the broker tests only, not for install —

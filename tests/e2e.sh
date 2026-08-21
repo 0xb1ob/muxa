@@ -4,6 +4,8 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=tests/record-fixture.sh
+. "$ROOT/tests/record-fixture.sh"
 CAPTURE_FIXTURES=0
 if [ "${1:-}" = "--capture-fixtures" ]; then
   CAPTURE_FIXTURES=1
@@ -76,8 +78,8 @@ dump() {
     for n in claude cursor pi; do
       p="$(pane_by_name "$n")"
       [ -n "$p" ] || continue
-      tmux_e capture-pane -e -p -t "$p" \
-        >"$ROOT/tests/fixtures/composer/${n}-harvest.ansi" 2>/dev/null || true
+      record_composer_fixture "$SOCK" "$p" \
+        "$ROOT/tests/fixtures/composer/${n}-harvest" || true
     done
   fi
 }

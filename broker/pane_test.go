@@ -3,8 +3,104 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
+
+// composerFixture is one tests/fixtures/composer/*.ansi plus optional
+// #43 signals: tmux cursor in .meta, and a second capture in .t2.ansi.
+// Missing sidecar files are skipped so the muxa#41 LooksFree assertions
+// still run on the .ansi alone.
+type composerFixture struct {
+	File    string
+	Capture string
+	CursorY int
+	CursorX int
+	HasMeta bool
+	T2      string
+	HasT2   bool
+}
+
+func composerFixtureDir() string {
+	return filepath.Join("..", "tests", "fixtures", "composer")
+}
+
+func loadComposerFixture(t *testing.T, file string) composerFixture {
+	t.Helper()
+	dir := composerFixtureDir()
+	b, err := os.ReadFile(filepath.Join(dir, file))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	out := composerFixture{File: file, Capture: string(b)}
+	base := strings.TrimSuffix(file, ".ansi")
+	if meta, err := os.ReadFile(filepath.Join(dir, base+".meta")); err == nil {
+		out.HasMeta = true
+		for _, line := range strings.Split(string(meta), "\n") {
+			key, val, ok := strings.Cut(strings.TrimSpace(line), "=")
+			if !ok {
+				continue
+			}
+			switch key {
+			case "cursor_y":
+				n, err := strconv.Atoi(val)
+				if err != nil {
+					t.Fatalf("%s.meta cursor_y=%q: %v", base, val, err)
+				}
+				out.CursorY = n
+			case "cursor_x":
+				n, err := strconv.Atoi(val)
+				if err != nil {
+					t.Fatalf("%s.meta cursor_x=%q: %v", base, val, err)
+				}
+				out.CursorX = n
+			}
+		}
+	}
+	if t2, err := os.ReadFile(filepath.Join(dir, base+".t2.ansi")); err == nil {
+		out.HasT2 = true
+		out.T2 = string(t2)
+	}
+	return out
+}
+
+func composerFixtureCases() []struct {
+	file string
+	free bool
+	why  string
+} {
+	return []struct {
+		file string
+		free bool
+		why  string
+	}{
+		// Idle composers: placeholder only, rendered faint.
+		{"cursor-agent-splash.ansi", true, "real Cursor Agent splash, empty composer"},
+		{"cursor-idle.ansi", true, "faint 'Add a follow-up' placeholder"},
+		{"cursor-revcursor-idle.ansi", true, "block cursor over the placeholder"},
+		{"256color-idle.ansi", true, "faint placeholder under a 256-colour theme"},
+		{"claude-idle.ansi", true, "bare faint > in the box"},
+		{"pi-idle.ansi", true, "bare faint ❯ in the box"},
+		// Default-foreground text in the box reads as typed even when it is a
+		// hint: this fixture's "Image in clipboard · ctrl+v to paste" carries
+		// the same attributes as text typed after a faint ❯. Conservative on
+		// purpose — the cost is the deadline fallback, not lost input.
+		{"claude-idle-233.ansi", false, "non-faint box text is indistinguishable from typing"},
+		// Busy: live interrupt hint in the box, or a spinner beside it.
+		{"claude-busy.ansi", false, "'esc to interrupt' inside the box"},
+		{"cursor-busy-revcursor.ansi", false, "'ctrl+c to stop' inside the box"},
+		{"cursor-busy-spinner.ansi", false, "spinner above the box"},
+		{"pi-busy.ansi", false, "spinner above the box, composer looks idle"},
+		// Typed: non-faint text between the borders must never be clobbered.
+		{"cursor-typed.ansi", false, "human typed 'hello world'"},
+		// No composer box → shell fallback.
+		{"cursor-trust-dialog.ansi", false, "rounded modal, not a composer"},
+		{"shell-prompt.ansi", true, "plain shell prompt"},
+		{"vim.ansi", false, "vim insert mode"},
+		{"garbage.ansi", false, "truncated escape, no prompt"},
+	}
+}
 
 func TestLooksFree(t *testing.T) {
 	cases := []struct {
@@ -49,44 +145,34 @@ func TestLooksFree(t *testing.T) {
 // which is why a first brief to a freshly spawned agent pane sat in pending
 // until the deadline instead of being pasted (muxa#41).
 func TestLooksFreeComposerFixtures(t *testing.T) {
-	cases := []struct {
-		file string
-		free bool
-		why  string
-	}{
-		// Idle composers: placeholder only, rendered faint.
-		{"cursor-agent-splash.ansi", true, "real Cursor Agent splash, empty composer"},
-		{"cursor-idle.ansi", true, "faint 'Add a follow-up' placeholder"},
-		{"cursor-revcursor-idle.ansi", true, "block cursor over the placeholder"},
-		{"256color-idle.ansi", true, "faint placeholder under a 256-colour theme"},
-		{"claude-idle.ansi", true, "bare faint > in the box"},
-		{"pi-idle.ansi", true, "bare faint ❯ in the box"},
-		// Default-foreground text in the box reads as typed even when it is a
-		// hint: this fixture's "Image in clipboard · ctrl+v to paste" carries
-		// the same attributes as text typed after a faint ❯. Conservative on
-		// purpose — the cost is the deadline fallback, not lost input.
-		{"claude-idle-233.ansi", false, "non-faint box text is indistinguishable from typing"},
-		// Busy: live interrupt hint in the box, or a spinner beside it.
-		{"claude-busy.ansi", false, "'esc to interrupt' inside the box"},
-		{"cursor-busy-revcursor.ansi", false, "'ctrl+c to stop' inside the box"},
-		{"cursor-busy-spinner.ansi", false, "spinner above the box"},
-		{"pi-busy.ansi", false, "spinner above the box, composer looks idle"},
-		// Typed: non-faint text between the borders must never be clobbered.
-		{"cursor-typed.ansi", false, "human typed 'hello world'"},
-		// No composer box → shell fallback.
-		{"cursor-trust-dialog.ansi", false, "rounded modal, not a composer"},
-		{"shell-prompt.ansi", true, "plain shell prompt"},
-		{"vim.ansi", false, "vim insert mode"},
-		{"garbage.ansi", false, "truncated escape, no prompt"},
-	}
-	for _, tc := range cases {
+	for _, tc := range composerFixtureCases() {
 		t.Run(tc.file, func(t *testing.T) {
-			b, err := os.ReadFile(filepath.Join("..", "tests", "fixtures", "composer", tc.file))
-			if err != nil {
-				t.Fatalf("read fixture: %v", err)
-			}
-			if got := LooksFree(string(b)); got != tc.free {
+			fx := loadComposerFixture(t, tc.file)
+			if got := LooksFree(fx.Capture); got != tc.free {
 				t.Fatalf("LooksFree(%s)=%v want %v (%s)", tc.file, got, tc.free, tc.why)
+			}
+		})
+	}
+}
+
+// TestComposerFixtureSignals asserts the shipped corpus has #43 sidecars.
+// loadComposerFixture still skips missing files, so the muxa#41 LooksFree
+// assertions keep running on the .ansi alone.
+func TestComposerFixtureSignals(t *testing.T) {
+	for _, tc := range composerFixtureCases() {
+		t.Run(tc.file, func(t *testing.T) {
+			fx := loadComposerFixture(t, tc.file)
+			if !fx.HasMeta {
+				t.Fatal("missing .meta (cursor_y/cursor_x)")
+			}
+			if fx.CursorY < 0 || fx.CursorX < 0 {
+				t.Fatalf("cursor_y=%d cursor_x=%d", fx.CursorY, fx.CursorX)
+			}
+			if !fx.HasT2 {
+				t.Fatal("missing .t2.ansi (second capture)")
+			}
+			if fx.T2 == "" {
+				t.Fatal("t2.ansi present but empty")
 			}
 		})
 	}
@@ -96,14 +182,11 @@ func TestLooksFreeComposerFixtures(t *testing.T) {
 // attributes stripped, an idle composer is indistinguishable from typed text
 // and the pane never looks free.
 func TestLooksFreeComposerNeedsEscapes(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join("..", "tests", "fixtures", "composer", "cursor-agent-splash.ansi"))
-	if err != nil {
-		t.Fatalf("read fixture: %v", err)
-	}
-	if !LooksFree(string(b)) {
+	fx := loadComposerFixture(t, "cursor-agent-splash.ansi")
+	if !LooksFree(fx.Capture) {
 		t.Fatal("with escapes: want free")
 	}
-	if LooksFree(stripANSI(string(b))) {
+	if LooksFree(stripANSI(fx.Capture)) {
 		t.Fatal("without escapes the placeholder is unreadable; capture-pane must use -e")
 	}
 }
