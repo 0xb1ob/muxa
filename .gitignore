@@ -5,5 +5,4 @@ node_modules/
 .muxa-e2e-artifacts/
 bin/muxa-broker
 tests/fixtures/composer/*-harvest.*
-
-
+.beads/
