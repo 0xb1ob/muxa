@@ -4,6 +4,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PATH="$ROOT/bin:$PATH"
+GO="${GO:-/usr/local/go/bin/go}"
+command -v "$GO" >/dev/null 2>&1 || GO="$(command -v go)"
+ldflags=()
+case "$(uname -s)" in
+  Darwin) ldflags=(-ldflags=-linkmode=external) ;;
+esac
+"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-broker" "$ROOT/broker"
+if [ "$(uname -s)" = Darwin ]; then
+  xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true
+  codesign -s - --force --timestamp=none "$ROOT/bin/muxa-broker" 2>/dev/null || true
+fi
 
 for skill in muxa-parent muxa-worker; do
   src="$ROOT/skills/$skill/SKILL.md"
@@ -12,14 +23,23 @@ done
 SOCK="muxatest-$$"
 export MUXA_TMUX_SOCKET="$SOCK"
 export MUXA_ENTER_DELAY=0.05
-unset TMUX MUXA_NAME MUXA_PARENT MUXA_ID MUXA_BIN || true
+unset TMUX MUXA_NAME MUXA_PARENT MUXA_ID MUXA_BIN MUXA_HOME || true
 
 pass=0
 fail=0
 tmpdir="$(mktemp -d /tmp/muxa-test.XXXXXX)"
 alice_out="$tmpdir/alice.out"
+export MUXA_BROKER_DIR="$tmpdir/broker"
+export MUXA_BROKER_SOCK="$tmpdir/broker/broker.sock"
+export MUXA_BROKER_PID="$tmpdir/broker/broker.pid"
+export MUXA_BROKER_BIN="$ROOT/bin/muxa-broker"
+export XDG_RUNTIME_DIR="$tmpdir/run"
+mkdir -p "$tmpdir/run" "$tmpdir/broker"
 
 cleanup() {
+  if [ -f "${MUXA_BROKER_PID:-}" ]; then
+    kill "$(cat "$MUXA_BROKER_PID")" 2>/dev/null || true
+  fi
   tmux -L "$SOCK" kill-server 2>/dev/null || true
   rm -rf "$tmpdir"
 }
@@ -51,24 +71,6 @@ assert_who_status() {
   [ "$got" = "$want" ] && ok "$label" || bad "$label" "name=$name want=$want got=$got"
 }
 
-muxa_box() {
-  local name="$1" pid base
-  pid="$(tmux -L "$SOCK" list-sessions -F '#{pid}' | head -1)"
-  base="${XDG_RUNTIME_DIR:-/tmp/muxa-${UID:-$(id -u)}}"
-  printf '%s/muxa/%s/mail/%s' "$base" "$pid" "$name"
-}
-
-place_mail() {
-  local box="$1" id="$2" body="$3" extra="${4:-}"
-  mkdir -p "$box/tmp" "$box/new" "$box/cur" "$box/done" "$box/dead"
-  {
-    printf 'From: bob\nTo: alice\nId: %s\nTime: 2026-01-01T00:00:00Z\nFlags: \n' "$id"
-    [ -n "$extra" ] && printf '%s\n' "$extra"
-    printf '\n%s\n' "$body"
-  } >"$box/tmp/$id"
-  mv "$box/tmp/$id" "$box/new/$id"
-}
-
 tmux -L "$SOCK" new-session -d -s muxa -n alice "exec cat > '$alice_out'"
 tmux -L "$SOCK" split-window -h -t muxa:alice "exec sleep 3600"
 sleep 0.2
@@ -86,24 +88,6 @@ muxa_as() {
   local pane="$1"
   shift
   TMUX_PANE="$pane" muxa "$@"
-}
-
-# Write a composer fixture to the pane tty so capture-pane -e sees it.
-# Does not go through the pane process (cat), so alice.out stays clean.
-paint_composer() {
-  local pane="$1" fixture="$2"
-  local tty
-  tty="$(tmux -L "$SOCK" display-message -t "$pane" -p '#{pane_tty}')"
-  printf '\033[H\033[2J' > "$tty"
-  cat "$ROOT/tests/fixtures/composer/$fixture" > "$tty"
-  sleep 0.05
-}
-
-muxa_runtime() {
-  local pid base
-  pid="$(tmux -L "$SOCK" list-sessions -F '#{pid}' | head -1)"
-  base="${XDG_RUNTIME_DIR:-/tmp/muxa-${UID:-$(id -u)}}"
-  printf '%s/muxa/%s' "$base" "$pid"
 }
 
 # --- register + who ---
@@ -124,847 +108,14 @@ assert_contains "$me" "bob" "whoami is bob"
 dup="$(muxa_as "$bob_pane" register --name alice --kind generic --deliver inject 2>&1 || true)"
 assert_contains "$dup" "already registered" "duplicate name refused"
 
-# --- idle inject ---
-sent="$(muxa_as "$bob_pane" send alice 'review src/auth.ts')"
-assert_contains "$sent" "delivered bob → alice" "idle send delivers"
-sleep 0.3
-got="$(cat "$alice_out" 2>/dev/null || true)"
-assert_contains "$got" "review src/auth.ts" "alice pane received body"
-assert_contains "$got" "[muxa] from=bob" "alice pane received prefix"
-
-# --- oversized inject refused; a single oversize parks in dead/ (E7) ---
-muxa_as "$alice_pane" state idle
-big="$(python3 -c "print('O' * 9000)")"
-oversized="$(muxa_as "$bob_pane" send alice "$big" 2>&1)"
-assert_contains "$oversized" "queued bob → alice" "oversized idle send queues"
-assert_contains "$oversized" "exceeds inject limit" "oversized idle send warns"
-peek_big="$(muxa_as "$bob_pane" peek alice)"
-case "$peek_big" in
-  *OOOO*) bad "oversized idle mail is not left in new/" "peek still has body: $peek_big" ;;
-  *) ok "oversized idle mail is not left in new/" ;;
-esac
-alice_box="$(muxa_box alice)"
-dead_n="$(find "$alice_box/dead" -type f 2>/dev/null | awk 'END { print NR }')"
-[ "$dead_n" -ge 1 ] && ok "oversized idle mail parked in dead/" \
-  || bad "oversized idle mail parked in dead/" "dead_n=$dead_n box=$alice_box"
-
-muxa_as "$alice_pane" state busy
-kick_big="$(muxa_as "$bob_pane" send alice "$big" 2>&1)"
-assert_contains "$kick_big" "waiting for idle" "oversized busy send spawns kick_wait"
-muxa_as "$alice_pane" state idle
-sleep 0.8
-peek_big3="$(muxa_as "$bob_pane" peek alice)"
-case "$peek_big3" in
-  *OOOO*) bad "oversized kick_wait mail is not left in new/" "peek still has body" ;;
-  *) ok "oversized kick_wait mail is not left in new/" ;;
-esac
-
-# hooks still tolerate large bodies (never inject, so never park)
-muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
-muxa_as "$alice_pane" state busy
-muxa_as "$bob_pane" send alice "$big" >/dev/null
-drain_big="$(muxa_as "$alice_pane" hook stop --format claude)"
-assert_contains "$drain_big" "OOOO" "hook stop drains oversized body"
-# Claimed oversized mail would otherwise sit in cur/ and inflate UNREAD below.
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- busy + hook drain (Claude JSON) ---
-muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
-muxa_as "$alice_pane" state busy
-queued="$(muxa_as "$bob_pane" send --no-reply alice 'queued while busy')"
-assert_contains "$queued" "hook will drain" "busy+hook queues"
-
-peek="$(muxa_as "$bob_pane" peek alice)"
-assert_contains "$peek" "queued while busy" "peek shows unread"
-
-drain="$(muxa_as "$alice_pane" hook stop --format claude)"
-assert_contains "$drain" "additionalContext" "claude stop JSON"
-assert_contains "$drain" "queued while busy" "drain includes body"
-assert_contains "$drain" "Do not reply" "no-reply flag honored"
-
-peek2="$(muxa_as "$bob_pane" peek alice)"
-assert_contains "$peek2" "claimed but unconfirmed" "peek shows claimed mail after drain"
-assert_contains "$peek2" "queued while busy" "peek still has body after drain"
-who_drain="$(muxa_as "$bob_pane" who)"
-who_drain_n="$(printf '%s\n' "$who_drain" | awk '$1=="alice" { print substr($0, 114, 8); exit }')"
-who_drain_n="${who_drain_n#"${who_drain_n%%[![:space:]]*}"}"
-who_drain_n="${who_drain_n%"${who_drain_n##*[![:space:]]}"}"
-[ "$who_drain_n" = "1" ] && ok "who UNREAD counts claimed mail" \
-  || bad "who UNREAD counts claimed mail" "got='$who_drain_n'"
-python3 - "$(muxa_box alice)/cur" <<'PY'
-import os, sys, time
-d = sys.argv[1]
-now = time.time()
-for name in os.listdir(d):
-    p = os.path.join(d, name)
-    if os.path.isfile(p):
-        os.utime(p, (now - 5, now - 5))
-PY
-empty_after="$(muxa_as "$alice_pane" hook stop --format claude)"
-[ -z "$empty_after" ] && ok "next stop sweeps claimed mail silently" \
-  || bad "next stop sweeps claimed mail silently" "got: $empty_after"
-peek2b="$(muxa_as "$bob_pane" peek alice)"
-assert_contains "$peek2b" "(empty)" "mailbox empty after sweep"
-
-# --- Cursor JSON ---
-muxa_as "$alice_pane" state busy
-muxa_as "$bob_pane" send alice 'cursor followup' >/dev/null
-cjson="$(muxa_as "$alice_pane" hook stop --format cursor)"
-assert_contains "$cjson" "followup_message" "cursor stop JSON"
-
-# --- Pi JSON ---
-muxa_as "$alice_pane" state busy
-muxa_as "$bob_pane" send alice 'pi continue' >/dev/null
-pjson="$(muxa_as "$alice_pane" hook stop --format pi)"
-assert_contains "$pjson" '"continue": true' "pi stop JSON"
-
-# --- empty stop is silent (prior cursor/pi drains must not leak) ---
-python3 - "$(muxa_box alice)/cur" <<'PY'
-import os, sys, time
-d = sys.argv[1]
-now = time.time()
-for name in os.listdir(d):
-    p = os.path.join(d, name)
-    if os.path.isfile(p):
-        os.utime(p, (now - 5, now - 5))
-PY
-muxa_as "$alice_pane" hook stop --format claude >/dev/null
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-muxa_as "$alice_pane" state busy
-empty="$(muxa_as "$alice_pane" hook stop --format claude)"
-[ -z "$empty" ] && ok "empty stop prints nothing" || bad "empty stop prints nothing" "got: $empty"
-# Fail-closed: fresh cursor/pi drains then immediate empty stop (Linux-fast path).
-muxa_as "$alice_pane" state busy
-muxa_as "$bob_pane" send alice 'cursor followup leak' >/dev/null
-muxa_as "$alice_pane" hook stop --format cursor >/dev/null
-muxa_as "$alice_pane" state busy
-muxa_as "$bob_pane" send alice 'pi continue leak' >/dev/null
-muxa_as "$alice_pane" hook stop --format pi >/dev/null
-empty_leak="$(muxa_as "$alice_pane" hook stop --format claude)"
-[ -z "$empty_leak" ] && ok "empty stop silent after prior cursor/pi drains" \
-  || bad "empty stop silent after prior cursor/pi drains" "got: $empty_leak"
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- concurrent kick_wait while busy (inject) ---
-muxa_as "$alice_pane" register --name alice --kind generic --deliver inject >/dev/null
-muxa_as "$alice_pane" state busy
-: >"$alice_out"
-muxa_as "$bob_pane" send --no-reply alice 'wait-msg-alpha' &
-muxa_as "$bob_pane" send --no-reply alice 'wait-msg-beta' &
-wait
-sleep 0.2
-muxa_as "$alice_pane" state idle
-sleep 1.0
-got="$(cat "$alice_out" 2>/dev/null || true)"
-assert_contains "$got" "wait-msg-alpha" "concurrent wait delivers alpha"
-assert_contains "$got" "wait-msg-beta" "concurrent wait delivers beta"
-assert_contains "$got" "[muxa] 2 messages" "concurrent wait batches into one inject"
-
-# --- copy-mode defers (the reproduced incident) ---
-muxa_as "$alice_pane" register --name alice --kind generic --deliver inject >/dev/null
-muxa_as "$alice_pane" state idle
-: >"$alice_out"
-tmux -L "$SOCK" copy-mode -t "$alice_pane"
-copy_sent="$(muxa_as "$bob_pane" send alice 'COPY_MODE_BODY' 2>&1)"
-assert_contains "$copy_sent" "queued bob → alice" "copy-mode send queues"
-sleep 0.2
-got="$(cat "$alice_out" 2>/dev/null || true)"
-case "$got" in
-  *COPY_MODE_BODY*) bad "copy-mode does not deliver to the app" "got: $got" ;;
-  *) ok "copy-mode does not deliver to the app" ;;
-esac
-peek_copy="$(muxa_as "$bob_pane" peek alice)"
-assert_contains "$peek_copy" "COPY_MODE_BODY" "peek still shows copy-mode mail"
-tmux -L "$SOCK" send-keys -t "$alice_pane" -X cancel 2>/dev/null || true
-sleep 0.1
-# Stash the deferred mail so the next inject is a clean paste (claim_new would
-# otherwise coalesce it). Ghost-flush is a tmux paste-buffer property.
-copy_box="$(muxa_box alice)"
-stash="$(mktemp -d "$tmpdir/stash.XXXXXX")"
-find "$copy_box/new" -type f -exec mv {} "$stash/" \; 2>/dev/null || true
-muxa_as "$alice_pane" state idle
-later="$(muxa_as "$bob_pane" send alice 'AFTER_CANCEL_MSG' 2>&1)"
-assert_contains "$later" "delivered" "send after leaving copy-mode delivers"
-sleep 0.3
-got="$(cat "$alice_out" 2>/dev/null || true)"
-assert_contains "$got" "AFTER_CANCEL_MSG" "pane received the later message"
-case "$got" in
-  *COPY_MODE_BODYAFTER_CANCEL_MSG*) bad "copy-mode ghost flush is prevented" "got concatenated: $got" ;;
-  *) ok "copy-mode ghost flush is prevented" ;;
-esac
-find "$stash" -type f -exec mv {} "$copy_box/new/" \; 2>/dev/null || true
-# original body still queued; deliver now that copy-mode is off
-del_copy="$(muxa_as "$bob_pane" deliver alice 2>&1)"
-assert_contains "$del_copy" "injected into alice" "deliver after cancel injects"
-sleep 0.2
-got="$(cat "$alice_out" 2>/dev/null || true)"
-assert_contains "$got" "COPY_MODE_BODY" "deliver lands the deferred copy-mode body"
-
-# --- dead pane: send queues, mail stays in new/, peek finds it ---
-tmux -L "$SOCK" set-window-option -g remain-on-exit off 2>/dev/null || true
-tmux -L "$SOCK" new-window -t muxa -n deadpane "exec sleep 3600"
-sleep 0.2
-dead_pane="$(tmux -L "$SOCK" list-panes -t muxa:deadpane -F '#{pane_id}' | head -1)"
-muxa_as "$dead_pane" register --name deadagent --kind generic --deliver inject --parent bob >/dev/null
-tmux -L "$SOCK" set-window-option -t muxa:deadpane remain-on-exit on
-dead_pid="$(tmux -L "$SOCK" display-message -t "$dead_pane" -p '#{pane_pid}')"
-kill "$dead_pid" 2>/dev/null || true
-sleep 0.3
-dead_flag="$(tmux -L "$SOCK" display-message -t "$dead_pane" -p '#{pane_dead}' 2>/dev/null || echo 1)"
-[ "$dead_flag" = "1" ] && ok "dead pane fixture is pane_dead=1" \
-  || bad "dead pane fixture is pane_dead=1" "pane_dead=$dead_flag"
-dead_sent="$(muxa_as "$bob_pane" send deadagent 'DEAD_PANE_BODY' 2>&1)"
-assert_contains "$dead_sent" "queued bob → deadagent" "dead pane send queues"
-peek_dead="$(muxa_as "$bob_pane" peek deadagent)"
-assert_contains "$peek_dead" "DEAD_PANE_BODY" "peek finds mail for a dead pane"
-case "$peek_dead" in
-  *claimed\ but\ unconfirmed*) bad "dead pane mail is not stuck in cur/" "$peek_dead" ;;
-  *) ok "dead pane mail is not stuck in cur/" ;;
-esac
-
-# --- alternate screen, generic pane ---
-tmux -L "$SOCK" new-window -t muxa -n altpane "printf '\\033[?1049h'; exec cat"
-sleep 0.3
-alt_pane="$(tmux -L "$SOCK" list-panes -t muxa:altpane -F '#{pane_id}' | head -1)"
-muxa_as "$alt_pane" register --name altagent --kind generic --deliver inject --parent bob >/dev/null
-alt_on="$(tmux -L "$SOCK" display-message -t "$alt_pane" -p '#{alternate_on}')"
-if [ "$alt_on" = "1" ]; then
-  alt_sent="$(muxa_as "$bob_pane" send altagent 'ALT_SCREEN_BODY' 2>&1)"
-  assert_contains "$alt_sent" "queued bob → altagent" "generic alt-screen send queues"
-  peek_alt="$(muxa_as "$bob_pane" peek altagent)"
-  assert_contains "$peek_alt" "ALT_SCREEN_BODY" "alt-screen mail stays in mailbox"
-else
-  ok "generic alt-screen send queues (skip: alternate_on=$alt_on)"
-  ok "alt-screen mail stays in mailbox (skip)"
-fi
-
-# --- peek shows cur/ ---
-box="$(muxa_box alice)"
-mkdir -p "$box/cur"
-{
-  printf 'From: bob\nTo: alice\nId: claimed-1\nTime: 2026-01-01T00:00:00Z\nFlags: \n\nSTUCK_CLAIMED\n'
-} >"$box/cur/claimed-1"
-peek_cur="$(muxa_as "$bob_pane" peek alice)"
-assert_contains "$peek_cur" "claimed but unconfirmed" "peek shows cur/ section"
-assert_contains "$peek_cur" "age=" "peek shows claimed age"
-assert_contains "$peek_cur" "STUCK_CLAIMED" "peek shows claimed body"
-rm -f "$box/cur/claimed-1"
-
-# --- deliver re-injects unconfirmed cur/ when new/ is empty (S4) ---
-muxa_as "$alice_pane" register --name alice --kind generic --deliver inject >/dev/null
-muxa_as "$alice_pane" state idle
-: >"$alice_out"
-box="$(muxa_box alice)"
-find "$box/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$box/cur" -type f -exec rm -f {} + 2>/dev/null || true
-{
-  printf 'From: bob\nTo: alice\nId: cur-redeliver\nTime: 2026-01-01T00:00:00Z\nFlags: \n\nCUR_REDELIVER_BODY\n'
-} >"$box/cur/cur-redeliver"
-del_cur="$(muxa_as "$bob_pane" deliver alice 2>&1)"
-assert_contains "$del_cur" "injected into alice" "deliver re-injects from cur/"
-sleep 0.3
-got="$(cat "$alice_out" 2>/dev/null || true)"
-assert_contains "$got" "CUR_REDELIVER_BODY" "deliver from cur/ lands the body"
-find "$box/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$box/cur" -type f -exec rm -f {} + 2>/dev/null || true
-find "$box/done" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- deliver cur/ fallback must not touch hook mail awaiting Stop ---
-muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
-tmux -L "$SOCK" set-option -p -t "$alice_pane" @muxa_hook_ok 1 2>/dev/null || true
-muxa_as "$alice_pane" state busy
-box="$(muxa_box alice)"
-find "$box/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$box/cur" -type f -exec rm -f {} + 2>/dev/null || true
-{
-  printf 'From: bob\nTo: alice\nId: hook-cur-wait\nTime: 2026-01-01T00:00:00Z\nFlags: \n\nHOOK_CUR_AWAIT_STOP\n'
-} >"$box/cur/hook-cur-wait"
-del_hook_cur="$(muxa_as "$bob_pane" deliver alice 2>&1)"
-assert_contains "$del_hook_cur" "no mail" "deliver skips hook cur/ awaiting Stop"
-[ -f "$box/cur/hook-cur-wait" ] && ok "deliver leaves hook mail in cur/" \
-  || bad "deliver leaves hook mail in cur/" "$(ls -la "$box/cur" "$box/new" 2>&1)"
-hook_new_n="$(find "$box/new" -type f 2>/dev/null | awk 'END { print NR }')"
-[ "$hook_new_n" -eq 0 ] && ok "deliver does not resurrect hook mail to new/" \
-  || bad "deliver does not resurrect hook mail to new/" "new=$hook_new_n"
-find "$box/cur" -type f -exec rm -f {} + 2>/dev/null || true
-muxa_as "$alice_pane" state idle
-
-# --- deliver cur/ inject fallback keeps claim on inject failure ---
-muxa_as "$alice_pane" register --name alice --kind generic --deliver inject >/dev/null
-muxa_as "$alice_pane" state idle
-box="$(muxa_box alice)"
-find "$box/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$box/cur" -type f -exec rm -f {} + 2>/dev/null || true
-{
-  printf 'From: bob\nTo: alice\nId: inject-cur-wait\nTime: 2026-01-01T00:00:00Z\nFlags: \n\nINJECT_CUR_KEEP\n'
-} >"$box/cur/inject-cur-wait"
-tmux -L "$SOCK" copy-mode -t "$alice_pane"
+# --- send fail-closed: broker required ---
 set +e
-del_inj_cur="$(muxa_as "$bob_pane" deliver alice 2>&1)"
-del_inj_rc=$?
+broker0_err="$(MUXA_BROKER=0 muxa_as "$bob_pane" send alice hi 2>&1)"
+broker0_rc=$?
 set -e
-[ "$del_inj_rc" -ne 0 ] && ok "deliver inject cur/ defers when not ready" \
-  || bad "deliver inject cur/ defers when not ready" "exit=$del_inj_rc out=$del_inj_cur"
-[ -f "$box/cur/inject-cur-wait" ] && ok "failed deliver inject cur/ leaves mail in cur/" \
-  || bad "failed deliver inject cur/ leaves mail in cur/" "$(ls -la "$box/cur" "$box/new" 2>&1)"
-inj_new_n="$(find "$box/new" -type f 2>/dev/null | awk 'END { print NR }')"
-[ "$inj_new_n" -eq 0 ] && ok "failed deliver inject cur/ does not unclaim to new/" \
-  || bad "failed deliver inject cur/ does not unclaim to new/" "new=$inj_new_n"
-tmux -L "$SOCK" send-keys -t "$alice_pane" -X cancel 2>/dev/null || true
-find "$box/cur" -type f -exec rm -f {} + 2>/dev/null || true
-find "$box/new" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- peek runs reaper on stale cur/ ---
-muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
-box="$(muxa_box alice)"
-{
-  printf 'From: bob\nTo: alice\nId: peek-reap\nTime: 2026-01-01T00:00:00Z\nFlags: \n\nPEEK_REAP\n'
-} >"$box/cur/peek-reap"
-touch -t 202001010000 "$box/cur/peek-reap"
-muxa_as "$bob_pane" peek alice >/dev/null
-[ -f "$box/new/peek-reap" ] && ok "peek runs reaper on stale cur/" \
-  || bad "peek runs reaper on stale cur/" "$(ls -la "$box/cur" "$box/new" 2>&1)"
-assert_contains "$(cat "$box/new/peek-reap")" "Redelivered: 1" "peek reaper writes Redelivered: 1"
-find "$box/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$box/cur" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- reaper redelivers stale cur/ and resets mtime (E24) ---
-muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
-muxa_as "$alice_pane" state busy
-box="$(muxa_box alice)"
-mkdir -p "$box/cur" "$box/new" "$box/dead"
-{
-  printf 'From: bob\nTo: alice\nId: stale-1\nTime: 2026-01-01T00:00:00Z\nFlags: \n\nREAP_ME\n'
-} >"$box/cur/stale-1"
-touch -t 202001010000 "$box/cur/stale-1"
-muxa_as "$bob_pane" send alice 'reaper-trigger' >/dev/null
-[ -f "$box/new/stale-1" ] && ok "reaper moves stale cur/ to new/" \
-  || bad "reaper moves stale cur/ to new/" "missing $box/new/stale-1"
-assert_contains "$(cat "$box/new/stale-1")" "Redelivered: 1" "reaper writes Redelivered: 1"
-age_s="$(python3 - "$box/new/stale-1" <<'PY'
-import os, sys, time
-print(int(time.time() - os.stat(sys.argv[1]).st_mtime))
-PY
-)"
-[ "$age_s" -lt 30 ] && ok "reaper rewrite resets mtime" \
-  || bad "reaper rewrite resets mtime" "age=${age_s}s"
-find "$box/new" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- reaper parks after N ---
-{
-  printf 'From: bob\nTo: alice\nId: stale-max\nTime: 2026-01-01T00:00:00Z\nFlags: \nRedelivered: 3\n\nPARK_ME\n'
-} >"$box/cur/stale-max"
-touch -t 202001010000 "$box/cur/stale-max"
-park_err="$(muxa_as "$bob_pane" send alice 'park-trigger' 2>&1)"
-assert_contains "$park_err" "undeliverable" "reaper warns when parking"
-[ -f "$box/dead/stale-max" ] && ok "reaper parks after max attempts" \
-  || bad "reaper parks after max attempts" "$(ls -la "$box/cur" "$box/dead" 2>&1)"
-find "$box/new" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- kick_wait does not poison state (E21) ---
-muxa_as "$alice_pane" register --name alice --kind generic --deliver inject >/dev/null
-muxa_as "$alice_pane" state busy
-tmux -L "$SOCK" copy-mode -t "$alice_pane"
-muxa_as "$bob_pane" send alice 'POISON_CHECK' >/dev/null
-muxa_as "$alice_pane" state idle
-sleep 0.8
-st="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_state}')"
-[ "$st" = "idle" ] && ok "kick_wait restores idle after deferral" \
-  || bad "kick_wait restores idle after deferral" "state=$st"
-tmux -L "$SOCK" send-keys -t "$alice_pane" -X cancel 2>/dev/null || true
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- batch cap ---
-muxa_as "$alice_pane" register --name alice --kind claude --deliver hook >/dev/null
-muxa_as "$alice_pane" state busy
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-i=1
-while [ "$i" -le 20 ]; do
-  muxa_as "$bob_pane" send alice "batch-msg-$i" >/dev/null
-  i=$((i + 1))
-done
-new_n="$(find "$(muxa_box alice)/new" -type f | awk 'END { print NR }')"
-[ "$new_n" -eq 20 ] && ok "queued 20 messages before claim" \
-  || bad "queued 20 messages before claim" "new_n=$new_n"
-MUXA_BATCH_MAX=8 muxa_as "$alice_pane" hook stop --format claude >/dev/null
-left_n="$(find "$(muxa_box alice)/new" -type f | awk 'END { print NR }')"
-[ "$left_n" -eq 12 ] && ok "claim caps at MUXA_BATCH_MAX" \
-  || bad "claim caps at MUXA_BATCH_MAX" "left_in_new=$left_n"
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/done" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- ordering: lex-unsafe ids still deliver in mtime/send order (E8) ---
-muxa_as "$alice_pane" register --name alice --kind generic --deliver inject >/dev/null
-muxa_as "$alice_pane" state idle
-: >"$alice_out"
-obox="$(muxa_box alice)"
-find "$obox/new" -type f -exec rm -f {} + 2>/dev/null || true
-epoch="$(date +%s)"
-# Same epoch, lex order would be -40 < -400 < -5 if unpadded; send order is 5, 40, 400.
-place_mail "$obox" "${epoch}-1-5" "ORDER_FIRST"
-sleep 0.05
-place_mail "$obox" "${epoch}-1-40" "ORDER_SECOND"
-sleep 0.05
-place_mail "$obox" "${epoch}-1-400" "ORDER_THIRD"
-muxa_as "$bob_pane" deliver alice >/dev/null
-sleep 0.3
-got="$(cat "$alice_out" 2>/dev/null || true)"
-python3 - "$got" <<'PY' && ok "coalesced payload preserves send order" || bad "coalesced payload preserves send order" "got: $got"
-import sys
-text = sys.argv[1]
-i1, i2, i3 = text.find("ORDER_FIRST"), text.find("ORDER_SECOND"), text.find("ORDER_THIRD")
-sys.exit(0 if -1 not in (i1, i2, i3) and i1 < i2 < i3 else 1)
-PY
-
-# --- idle hook inject after Stop (CLI parent sitting idle) ---
-muxa_as "$alice_pane" register --name alice --kind claude --deliver hook --parent bob >/dev/null
-tmux -L "$SOCK" set-option -p -t "$alice_pane" -u @muxa_hook_ok 2>/dev/null || true
-muxa_as "$alice_pane" state idle
-: >"$alice_out"
-# hook_ok unset: skip composer so splash/typed input cannot deadlock spawn.
-paint_composer "$alice_pane" cursor-typed.ansi
-boot="$(muxa_as "$bob_pane" send alice 'BOOTSTRAP_BRIEF')"
-assert_contains "$boot" "delivered bob → alice" "idle hook pane injects before hook_ok"
-sleep 0.3
-got="$(cat "$alice_out" 2>/dev/null || true)"
-assert_contains "$got" "BOOTSTRAP_BRIEF" "bootstrap brief reached the pane"
-
-# --- first brief: alt-screen / blank capture queues (not stuck in cur/) ---
-tmux -L "$SOCK" new-window -t muxa -n splash "printf '\\033[?1049h'; exec cat > '$tmpdir/splash.out'"
-sleep 0.3
-splash_pane="$(tmux -L "$SOCK" list-panes -t muxa:splash -F '#{pane_id}' | head -1)"
-splash_out="$tmpdir/splash.out"
-muxa_as "$splash_pane" register --name splash --kind cursor --deliver hook --parent bob >/dev/null
-tmux -L "$SOCK" set-option -p -t "$splash_pane" -u @muxa_hook_ok 2>/dev/null || true
-muxa_as "$splash_pane" state idle
-: >"$splash_out"
-splash_on="$(tmux -L "$SOCK" display-message -t "$splash_pane" -p '#{alternate_on}')"
-if [ "$splash_on" = "1" ]; then
-  splash_sent="$(muxa_as "$bob_pane" send splash 'SPLASH_FIRST_BRIEF' 2>&1)"
-  assert_contains "$splash_sent" "queued bob → splash" "first brief on alt-screen queues"
-  assert_contains "$splash_sent" "waiting for idle" "first brief on alt-screen spawns kick_wait"
-  sleep 0.2
-  got="$(cat "$splash_out" 2>/dev/null || true)"
-  case "$got" in
-    *SPLASH_FIRST_BRIEF*) bad "first brief on alt-screen does not paste" "got: $got" ;;
-    *) ok "first brief on alt-screen does not paste" ;;
-  esac
-  peek_splash="$(muxa_as "$bob_pane" peek splash)"
-  assert_contains "$peek_splash" "SPLASH_FIRST_BRIEF" "peek shows queued first brief"
-  case "$peek_splash" in
-    *claimed\ but\ unconfirmed*) bad "first brief on alt-screen is not stuck in cur/" "$peek_splash" ;;
-    *) ok "first brief on alt-screen is not stuck in cur/" ;;
-  esac
-  splash_new="$(find "$(muxa_box splash)/new" -type f 2>/dev/null | awk 'END { print NR }')"
-  splash_cur="$(find "$(muxa_box splash)/cur" -type f 2>/dev/null | awk 'END { print NR }')"
-  [ "$splash_new" -ge 1 ] && [ "$splash_cur" -eq 0 ] && ok "first brief on alt-screen left mail in new/" \
-    || bad "first brief on alt-screen left mail in new/" "new=$splash_new cur=$splash_cur"
-  paint_composer "$splash_pane" cursor-idle.ansi
-  sleep 1.5
-  got="$(cat "$splash_out" 2>/dev/null || true)"
-  assert_contains "$got" "SPLASH_FIRST_BRIEF" "kick_wait delivers first brief on drawn alt-screen"
-  splash_pidfile="$(muxa_runtime)/kick-wait-${splash_pane}.pid"
-  if [ -f "$splash_pidfile" ] && kill -0 "$(cat "$splash_pidfile" 2>/dev/null)" 2>/dev/null; then
-    kill "$(cat "$splash_pidfile")" 2>/dev/null || true
-    rm -f "$splash_pidfile"
-  fi
-  find "$(muxa_box splash)/new" -type f -exec rm -f {} + 2>/dev/null || true
-  find "$(muxa_box splash)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-else
-  ok "first brief on alt-screen queues (skip: alternate_on=$splash_on)"
-  ok "first brief on alt-screen spawns kick_wait (skip)"
-  ok "first brief on alt-screen does not paste (skip)"
-  ok "peek shows queued first brief (skip)"
-  ok "first brief on alt-screen is not stuck in cur/ (skip)"
-  ok "first brief on alt-screen left mail in new/ (skip)"
-  ok "kick_wait delivers first brief on drawn alt-screen (skip)"
-fi
-tmux -L "$SOCK" kill-window -t "muxa:splash" 2>/dev/null || true
-
-# --- first brief: kick_wait survives boot busy (nested S7) ---
-nested_out="$tmpdir/nested.out"
-tmux -L "$SOCK" split-window -h -t "$bob_pane" "exec cat > '$nested_out'"
-sleep 0.2
-nested_pane="$(tmux -L "$SOCK" list-panes -t muxa:alice -F '#{pane_id} #{pane_current_command}' \
-  | awk -v skip="$alice_pane" '$2=="cat" && $1!=skip { print $1; exit }')"
-[ -n "$nested_pane" ] || { bad "nested first-brief pane created" "missing pane"; nested_pane="$alice_pane"; }
-muxa_as "$nested_pane" register --name nested --kind claude --deliver hook --parent bob >/dev/null
-tmux -L "$SOCK" set-option -p -t "$nested_pane" -u @muxa_hook_ok 2>/dev/null || true
-muxa_as "$nested_pane" state idle
-: >"$nested_out"
-nested_sent="$(muxa_as "$bob_pane" send nested 'NESTED_FIRST_BRIEF' 2>&1)"
-assert_contains "$nested_sent" "queued bob → nested" "nested first brief queues on blank capture"
-assert_contains "$nested_sent" "waiting for idle" "nested first brief spawns kick_wait"
-muxa_as "$nested_pane" state busy
-sleep 0.3
-nested_pidfile="$(muxa_runtime)/kick-wait-${nested_pane}.pid"
-if [ -f "$nested_pidfile" ] && kill -0 "$(cat "$nested_pidfile" 2>/dev/null)" 2>/dev/null; then
-  ok "first brief kick_wait survives boot busy"
-else
-  bad "first brief kick_wait survives boot busy" "pidfile=$nested_pidfile"
-fi
-nested_new="$(find "$(muxa_box nested)/new" -type f 2>/dev/null | awk 'END { print NR }')"
-[ "${nested_new:-0}" -ge 1 ] && ok "first brief mail stays in new/ through boot busy" \
-  || bad "first brief mail stays in new/ through boot busy" "new=$nested_new"
-muxa_as "$nested_pane" state idle
-paint_composer "$nested_pane" claude-idle.ansi
-sleep 1.5
-got="$(cat "$nested_out" 2>/dev/null || true)"
-assert_contains "$got" "NESTED_FIRST_BRIEF" "kick_wait delivers nested first brief after boot busy"
-if [ -f "$nested_pidfile" ] && kill -0 "$(cat "$nested_pidfile" 2>/dev/null)" 2>/dev/null; then
-  kill "$(cat "$nested_pidfile")" 2>/dev/null || true
-  rm -f "$nested_pidfile"
-fi
-find "$(muxa_box nested)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box nested)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-
-empty_stop="$(muxa_as "$alice_pane" hook stop --format claude)"
-[ -z "$empty_stop" ] && ok "first hook stop with empty mailbox is silent" \
-  || bad "first hook stop with empty mailbox is silent" "got: $empty_stop"
-hook_ok="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_hook_ok}')"
-[ "$hook_ok" = "1" ] && ok "@muxa_hook_ok set on first hook stop" \
-  || bad "@muxa_hook_ok set on first hook stop" "got: $hook_ok"
-# Bootstrap inject left a young cur/ claim; sweep it so UNREAD below is
-# only the idle inject (Stop skips claims younger than 1s).
-python3 - "$(muxa_box alice)/cur" <<'PY'
-import os, sys, time
-d = sys.argv[1]
-if not os.path.isdir(d):
-    raise SystemExit(0)
-now = time.time()
-for name in os.listdir(d):
-    p = os.path.join(d, name)
-    if os.path.isfile(p):
-        os.utime(p, (now - 5, now - 5))
-PY
-muxa_as "$alice_pane" hook stop --format claude >/dev/null
-muxa_as "$alice_pane" state idle
-: >"$alice_out"
-paint_composer "$alice_pane" claude-idle.ansi
-idle_inj="$(muxa_as "$bob_pane" send alice 'HOOK_IDLE_INJECT')"
-assert_contains "$idle_inj" "delivered bob → alice" "idle hook pane injects after hook_ok"
-sleep 0.3
-got="$(cat "$alice_out" 2>/dev/null || true)"
-assert_contains "$got" "HOOK_IDLE_INJECT" "idle hook pane is pasted after hook_ok"
-unread="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_unread}')"
-[ "$unread" = "1" ] && ok "@muxa_unread=1 after idle hook inject (cur/ until Stop)" \
-  || bad "@muxa_unread=1 after idle hook inject (cur/ until Stop)" "got: $unread"
-who="$(muxa_as "$bob_pane" who)"
-assert_contains "$who" "UNREAD" "who header has UNREAD"
-# UNREAD column is 8 chars starting at 114 (after STATUS)
-who_unread="$(printf '%s\n' "$who" | awk '$1=="alice" { print substr($0, 114, 8); exit }')"
-who_unread="${who_unread#"${who_unread%%[![:space:]]*}"}"
-who_unread="${who_unread%"${who_unread##*[![:space:]]}"}"
-[ "$who_unread" = "1" ] && ok "who shows UNREAD=1" \
-  || bad "who shows UNREAD=1" "got='$who_unread' line=$(printf '%s\n' "$who" | awk '$1=="alice"')"
-python3 - "$(muxa_box alice)/cur" <<'PY'
-import os, sys, time
-d = sys.argv[1]
-now = time.time()
-for name in os.listdir(d):
-    p = os.path.join(d, name)
-    if os.path.isfile(p):
-        os.utime(p, (now - 5, now - 5))
-PY
-muxa_as "$alice_pane" hook stop --format claude >/dev/null
-unread3="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_unread}')"
-[ -z "$unread3" ] && ok "@muxa_unread cleared after sweep" \
-  || bad "@muxa_unread cleared after sweep" "got: $unread3"
-
-# --- hook_ok + idle + non-empty composer: no paste, queue + kick_wait ---
-muxa_as "$alice_pane" state idle
-: >"$alice_out"
-paint_composer "$alice_pane" cursor-typed.ansi
-typed_sent="$(muxa_as "$bob_pane" send alice 'HOOK_TYPED_COMPOSER' 2>&1)"
-assert_contains "$typed_sent" "queued bob → alice" "typed composer hook send queues"
-assert_contains "$typed_sent" "waiting for idle" "typed composer hook send spawns kick_wait"
-assert_contains "$typed_sent" "not ready to receive" "typed composer hook send names the verdict"
-sleep 0.2
-got="$(cat "$alice_out" 2>/dev/null || true)"
-case "$got" in
-  *HOOK_TYPED_COMPOSER*) bad "typed composer hook send does not paste" "got: $got" ;;
-  *) ok "typed composer hook send does not paste" ;;
-esac
-peek_typed="$(muxa_as "$bob_pane" peek alice)"
-assert_contains "$peek_typed" "HOOK_TYPED_COMPOSER" "peek still shows typed-composer mail"
-case "$peek_typed" in
-  *claimed\ but\ unconfirmed*) bad "typed composer hook send unclaims (not stuck in cur/)" "$peek_typed" ;;
-  *) ok "typed composer hook send unclaims (not stuck in cur/)" ;;
-esac
-typed_new="$(find "$(muxa_box alice)/new" -type f 2>/dev/null | awk 'END { print NR }')"
-typed_cur="$(find "$(muxa_box alice)/cur" -type f 2>/dev/null | awk 'END { print NR }')"
-[ "$typed_new" -ge 1 ] && [ "$typed_cur" -eq 0 ] && ok "typed composer hook send left mail in new/" \
-  || bad "typed composer hook send left mail in new/" "new=$typed_new cur=$typed_cur"
-typed_pidfile="$(muxa_runtime)/kick-wait-${alice_pane}.pid"
-if [ -f "$typed_pidfile" ] && kill -0 "$(cat "$typed_pidfile" 2>/dev/null)" 2>/dev/null; then
-  ok "typed composer hook send left a live kick_wait"
-else
-  bad "typed composer hook send left a live kick_wait" "pidfile=$typed_pidfile"
-fi
-# Composer empty: waiter should paste. Copy-mode inject failure unclaim is
-# covered separately below.
-: >"$alice_out"
-paint_composer "$alice_pane" claude-idle.ansi
-sleep 1.5
-got="$(cat "$alice_out" 2>/dev/null || true)"
-assert_contains "$got" "HOOK_TYPED_COMPOSER" "kick_wait pastes once composer is empty"
-if [ -f "$typed_pidfile" ] && kill -0 "$(cat "$typed_pidfile" 2>/dev/null)" 2>/dev/null; then
-  kill "$(cat "$typed_pidfile")" 2>/dev/null || true
-  rm -f "$typed_pidfile"
-fi
-python3 - "$(muxa_box alice)/cur" <<'PY'
-import os, sys, time
-d = sys.argv[1]
-if not os.path.isdir(d):
-    raise SystemExit(0)
-now = time.time()
-for name in os.listdir(d):
-    p = os.path.join(d, name)
-    if os.path.isfile(p):
-        os.utime(p, (now - 5, now - 5))
-PY
-muxa_as "$alice_pane" hook stop --format claude >/dev/null
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- kick_wait outlives MUXA_KICK_WAIT_MAX and is observable (E27) ---
-kw_pidfile="$(muxa_runtime)/kick-wait-${alice_pane}.pid"
-kw_log="$(muxa_runtime)/kick-wait-${alice_pane}.log"
-rm -f "$kw_log"
-muxa_as "$alice_pane" state idle
-: >"$alice_out"
-paint_composer "$alice_pane" cursor-typed.ansi
-long_sent="$(TMUX_PANE="$bob_pane" MUXA_KICK_WAIT_MAX=2 MUXA_KICK_WAIT_DEADLINE=60 \
-  muxa send alice 'KICK_WAIT_OUTLIVES_MAX' 2>&1)"
-assert_contains "$long_sent" "waiter pid=" "send names the kick_wait waiter pid"
-sleep 3   # 6 polls, three times the MUXA_KICK_WAIT_MAX=2 that used to end it
-if [ -f "$kw_pidfile" ] && kill -0 "$(cat "$kw_pidfile" 2>/dev/null)" 2>/dev/null; then
-  ok "kick_wait outlives MUXA_KICK_WAIT_MAX while mail is queued"
-else
-  bad "kick_wait outlives MUXA_KICK_WAIT_MAX while mail is queued" "pidfile=$kw_pidfile"
-fi
-kw_state="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_kick_wait}')"
-case "$kw_state" in
-  waiting*) ok "live waiter is visible in @muxa_kick_wait" ;;
-  *) bad "live waiter is visible in @muxa_kick_wait" "got: $kw_state" ;;
-esac
-who_wait="$(muxa_as "$bob_pane" who)"
-assert_contains "$who_wait" "WAIT" "who header has WAIT"
-assert_contains "$who_wait" "waiting" "who shows the live waiter"
-assert_contains "$(cat "$kw_log" 2>/dev/null || true)" "still not ready after" \
-  "kick_wait logs progress instead of discarding it"
-: >"$alice_out"
-paint_composer "$alice_pane" claude-idle.ansi
-sleep 1.5
-got="$(cat "$alice_out" 2>/dev/null || true)"
-assert_contains "$got" "KICK_WAIT_OUTLIVES_MAX" "long-lived kick_wait delivers once composer clears"
-kw_state="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_kick_wait}')"
-[ -z "$kw_state" ] && ok "waiter clears @muxa_kick_wait after delivering" \
-  || bad "waiter clears @muxa_kick_wait after delivering" "got: $kw_state"
-assert_contains "$(cat "$kw_log" 2>/dev/null || true)" "delivered to alice" \
-  "kick_wait logs the delivery"
-
-# --- the bounded deadline is reported, not swallowed (E27) ---
-rm -f "$kw_log"
-muxa_as "$alice_pane" state idle
-: >"$alice_out"
-paint_composer "$alice_pane" cursor-typed.ansi
-TMUX_PANE="$bob_pane" MUXA_KICK_WAIT_MAX=2 MUXA_KICK_WAIT_DEADLINE=1 \
-  muxa send alice 'KICK_WAIT_DEADLINE' >/dev/null 2>&1
-sleep 2.5
-kw_state="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_kick_wait}')"
-case "$kw_state" in
-  expired*) ok "expired waiter is visible in @muxa_kick_wait" ;;
-  *) bad "expired waiter is visible in @muxa_kick_wait" "got: $kw_state" ;;
-esac
-assert_contains "$(cat "$kw_log" 2>/dev/null || true)" "gave up after 1s" \
-  "kick_wait deadline is logged"
-tmux -L "$SOCK" set-option -p -t "$alice_pane" -u @muxa_kick_wait 2>/dev/null || true
-rm -f "$kw_pidfile" "$kw_log"
-paint_composer "$alice_pane" claude-idle.ansi
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- busy hook pane queues for Stop ---
-muxa_as "$alice_pane" state busy
-: >"$alice_out"
-qbusy="$(muxa_as "$bob_pane" send alice 'HOOK_BUSY_QUEUE')"
-assert_contains "$qbusy" "queued bob → alice id=" "busy hook pane queues after hook_ok"
-assert_contains "$qbusy" "hook will drain" "busy hook queue reason"
-sleep 0.2
-got="$(cat "$alice_out" 2>/dev/null || true)"
-case "$got" in
-  *HOOK_BUSY_QUEUE*) bad "busy hook pane is not pasted" "got: $got" ;;
-  *) ok "busy hook pane is not pasted" ;;
-esac
-drain_busy="$(muxa_as "$alice_pane" hook stop --format claude)"
-assert_contains "$drain_busy" "HOOK_BUSY_QUEUE" "hook stop drains queued busy mail"
-python3 - "$(muxa_box alice)/cur" <<'PY'
-import os, sys, time
-d = sys.argv[1]
-now = time.time()
-for name in os.listdir(d):
-    p = os.path.join(d, name)
-    if os.path.isfile(p):
-        os.utime(p, (now - 5, now - 5))
-PY
-muxa_as "$alice_pane" hook stop --format claude >/dev/null
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- cursor busy hook pane queues for Stop (S6) ---
-muxa_as "$alice_pane" register --name alice --kind cursor --deliver hook --parent bob >/dev/null
-tmux -L "$SOCK" set-option -p -t "$alice_pane" @muxa_hook_ok 1 2>/dev/null || true
-muxa_as "$alice_pane" state busy
-: >"$alice_out"
-qcurbusy="$(muxa_as "$bob_pane" send alice 'CURSOR_BUSY_STOP')"
-assert_contains "$qcurbusy" "queued bob → alice id=" "cursor busy hook pane queues"
-assert_contains "$qcurbusy" "hook will drain" "cursor busy hook queue reason"
-sleep 0.2
-got="$(cat "$alice_out" 2>/dev/null || true)"
-case "$got" in
-  *CURSOR_BUSY_STOP*) bad "cursor busy hook pane is not pasted" "got: $got" ;;
-  *) ok "cursor busy hook pane is not pasted" ;;
-esac
-drain_curbusy="$(muxa_as "$alice_pane" hook stop --format cursor)"
-assert_contains "$drain_curbusy" "followup_message" "cursor stop JSON on busy drain"
-assert_contains "$drain_curbusy" "CURSOR_BUSY_STOP" "cursor stop drains queued busy mail"
-python3 - "$(muxa_box alice)/cur" <<'PY'
-import os, sys, time
-d = sys.argv[1]
-now = time.time()
-for name in os.listdir(d):
-    p = os.path.join(d, name)
-    if os.path.isfile(p):
-        os.utime(p, (now - 5, now - 5))
-PY
-muxa_as "$alice_pane" hook stop --format cursor >/dev/null
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-tmux -L "$SOCK" set-option -p -t "$alice_pane" -u @muxa_unread 2>/dev/null || true
-muxa_as "$alice_pane" state idle
-
-# --- cursor busy Stop injects when composer idle (live S6 / Agent TUI) ---
-muxa_as "$alice_pane" register --name alice --kind cursor --deliver hook --parent bob >/dev/null
-tmux -L "$SOCK" set-option -p -t "$alice_pane" @muxa_hook_ok 1 2>/dev/null || true
-paint_composer "$alice_pane" cursor-idle.ansi
-muxa_as "$alice_pane" state busy
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-: >"$alice_out"
-muxa_as "$bob_pane" send alice 'CURSOR_BUSY_STOP_INJECT' >/dev/null
-sleep 0.2
-inject_drain="$(MUXA_STOP_INJECT=1 muxa_as "$alice_pane" hook stop --format cursor)"
-got="$(cat "$alice_out" 2>/dev/null || true)"
-assert_contains "$got" "CURSOR_BUSY_STOP_INJECT" "cursor stop injects into idle composer (live S6 path)"
-case "$inject_drain" in
-  *followup_message*) bad "cursor stop inject path is silent on stdout" "got: $inject_drain" ;;
-  *) ok "cursor stop inject path is silent on stdout" ;;
-esac
-cur_n="$(find "$(muxa_box alice)/cur" -type f 2>/dev/null | awk 'END { print NR }')"
-[ "$cur_n" -ge 1 ] && ok "cursor stop inject leaves hook mail in cur/ until sweep" \
-  || bad "cursor stop inject leaves hook mail in cur/ until sweep" "cur=$cur_n"
-# Fail-closed: must not leave cur/ claimed with no stdout followup and no TUI inject.
-case "$inject_drain" in
-  *followup_message*) ;;
-  *)
-    case "$got" in
-      *CURSOR_BUSY_STOP_INJECT*) ok "cursor stop drain fail-closed: inject or followup" ;;
-      *) bad "cursor stop drain fail-closed: inject or followup" "stdout=$inject_drain tui=$got" ;;
-    esac
-    ;;
-esac
-python3 - "$(muxa_box alice)/cur" <<'PY'
-import os, sys, time
-d = sys.argv[1]
-now = time.time()
-for name in os.listdir(d):
-    p = os.path.join(d, name)
-    if os.path.isfile(p):
-        os.utime(p, (now - 5, now - 5))
-PY
-muxa_as "$alice_pane" hook stop --format cursor >/dev/null
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-tmux -L "$SOCK" set-option -p -t "$alice_pane" -u @muxa_unread 2>/dev/null || true
-muxa_as "$alice_pane" state idle
-
-# --- hook inject failure unclaims ---
-muxa_as "$alice_pane" state idle
-: >"$alice_out"
-tmux -L "$SOCK" copy-mode -t "$alice_pane"
-fail_sent="$(muxa_as "$bob_pane" send alice 'HOOK_FAIL_UNCLAIM' 2>&1)"
-assert_contains "$fail_sent" "queued bob → alice" "copy-mode hook send queues"
-sleep 0.2
-got="$(cat "$alice_out" 2>/dev/null || true)"
-case "$got" in
-  *HOOK_FAIL_UNCLAIM*) bad "copy-mode hook send does not paste" "got: $got" ;;
-  *) ok "copy-mode hook send does not paste" ;;
-esac
-peek_fail="$(muxa_as "$bob_pane" peek alice)"
-assert_contains "$peek_fail" "HOOK_FAIL_UNCLAIM" "peek still shows failed hook inject"
-case "$peek_fail" in
-  *claimed\ but\ unconfirmed*) bad "failed hook inject unclaims (not stuck in cur/)" "$peek_fail" ;;
-  *) ok "failed hook inject unclaims (not stuck in cur/)" ;;
-esac
-new_n="$(find "$(muxa_box alice)/new" -type f 2>/dev/null | awk 'END { print NR }')"
-cur_n="$(find "$(muxa_box alice)/cur" -type f 2>/dev/null | awk 'END { print NR }')"
-[ "$new_n" -ge 1 ] && [ "$cur_n" -eq 0 ] && ok "failed hook inject left mail in new/" \
-  || bad "failed hook inject left mail in new/" "new=$new_n cur=$cur_n"
-tmux -L "$SOCK" send-keys -t "$alice_pane" -X cancel 2>/dev/null || true
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- unread recompute under concurrency ---
-muxa_as "$alice_pane" state busy
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-muxa_as "$bob_pane" send alice 'conc-unread-a' >/dev/null &
-muxa_as "$bob_pane" send alice 'conc-unread-b' >/dev/null &
-wait
-sleep 0.2
-opt="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_unread}')"
-files="$(find "$(muxa_box alice)/new" -type f | awk 'END { print NR }')"
-[ "$opt" = "$files" ] && [ "$files" = "2" ] && ok "unread option equals mailbox count under concurrency" \
-  || bad "unread option equals mailbox count under concurrency" "opt=$opt files=$files"
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-tmux -L "$SOCK" set-option -p -t "$alice_pane" -u @muxa_unread 2>/dev/null || true
-
-# restore alice as bob's child for later ACL tests
-muxa_as "$alice_pane" register --name alice --kind generic --deliver inject --parent bob >/dev/null
-muxa_as "$alice_pane" state idle
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- deliver prechecks vs --force (Q3) ---
-: >"$alice_out"
-tmux -L "$SOCK" copy-mode -t "$alice_pane"
-muxa_as "$bob_pane" send alice 'FORCE_BODY' >/dev/null
-set +e
-del_plain="$(muxa_as "$bob_pane" deliver alice 2>&1)"
-del_rc=$?
-set -e
-[ "$del_rc" -ne 0 ] && ok "deliver in copy-mode exits non-zero" \
-  || bad "deliver in copy-mode exits non-zero" "exit=$del_rc out=$del_plain"
-assert_contains "$del_plain" "not ready to receive" "deliver in copy-mode prints a reason"
-got="$(cat "$alice_out" 2>/dev/null || true)"
-case "$got" in
-  *FORCE_BODY*) bad "plain deliver does not paste in copy-mode" "got: $got" ;;
-  *) ok "plain deliver does not paste in copy-mode" ;;
-esac
-del_force="$(muxa_as "$bob_pane" deliver --force alice 2>&1)"
-assert_contains "$del_force" "skipping readiness prechecks" "deliver --force warns"
-assert_contains "$del_force" "injected into alice" "deliver --force injects"
-sleep 0.2
-got="$(cat "$alice_out" 2>/dev/null || true)"
-assert_contains "$got" "FORCE_BODY" "deliver --force lands the body"
-tmux -L "$SOCK" send-keys -t "$alice_pane" -X cancel 2>/dev/null || true
-
+[ "$broker0_rc" -ne 0 ] && ok "MUXA_BROKER=0 send exits non-zero" \
+  || bad "MUXA_BROKER=0 send exits non-zero" "exit=$broker0_rc out=$broker0_err"
+assert_contains "$broker0_err" "broker is required" "MUXA_BROKER=0 is an error not a legacy path"
 # --- unknown target ---
 err="$(muxa_as "$bob_pane" send nobody hi 2>&1 || true)"
 assert_contains "$err" "unknown agent" "unknown name errors"
@@ -993,10 +144,12 @@ assert_contains "$kids" "carol" "bob children include carol"
 assert_contains "$kids" "dave" "bob children include dave"
 
 sent="$(muxa_as "$bob_pane" send carol 'from-parent')"
-assert_contains "$sent" "delivered bob → carol" "parent → child allowed"
+assert_contains "$sent" "queued bob → carol" "parent → child allowed"
+assert_contains "$sent" "broker" "parent → child uses broker"
 
 sent="$(muxa_as "$carol_pane" send bob 'from-child')"
-assert_contains "$sent" "delivered carol → bob" "child → parent allowed"
+assert_contains "$sent" "queued carol → bob" "child → parent allowed"
+assert_contains "$sent" "broker" "child → parent uses broker"
 
 sib="$(muxa_as "$carol_pane" send dave 'nope' 2>&1 || true)"
 assert_contains "$sib" "forbidden" "sibling send refused"
@@ -1008,12 +161,11 @@ assert_contains "$sib2" "forbidden" "sibling alice → carol refused"
 saved_dave_name="$(tmux -L "$SOCK" display-message -p -t "$dave_pane" '#{@muxa_name}')"
 tmux -L "$SOCK" set-option -p -t "$dave_pane" @muxa_name carol
 marker="send-all-dedupe-$$"
-muxa_as "$bob_pane" send --no-reply --all "$marker" >/dev/null
-peek_carol="$(muxa_as "$bob_pane" peek carol)"
-count="$(printf '%s\n' "$peek_carol" | grep -cF "$marker" || true)"
+all_out="$(muxa_as "$bob_pane" send --no-reply --all "$marker")"
+count="$(printf '%s\n' "$all_out" | grep -c "queued bob → carol" || true)"
 tmux -L "$SOCK" set-option -p -t "$dave_pane" @muxa_name "$saved_dave_name"
 [ "$count" -eq 1 ] && ok "send --all dedupes duplicate roster names" \
-  || bad "send --all dedupes duplicate roster names" "expected 1 message, count=$count peek=$peek_carol"
+  || bad "send --all dedupes duplicate roster names" "expected 1 enqueue, count=$count out=$all_out"
 
 tmux -L "$SOCK" new-window -t muxa -n eve "exec sleep 3600"
 sleep 0.2
@@ -1519,104 +671,12 @@ cursor_env="$(printf '%s' '{"session_id":"cursor-conv-1"}' | muxa_as "$alice_pan
 assert_contains "$cursor_env" '"MUXA_PANE"' "cursor session-start emits MUXA_PANE env"
 assert_contains "$cursor_env" "$alice_pane" "cursor session-start env names this pane"
 
-# --- IDE Stop: conversation_id wins over the caller's TMUX_PANE ---
-muxa_as "$alice_pane" register --name alice --kind cursor --deliver hook --parent bob >/dev/null
-printf '%s' '{"session_id":"ide-conv-9"}' | muxa_as "$alice_pane" hook session-start --kind cursor >/dev/null
-muxa_as "$alice_pane" state busy
-muxa_as "$bob_pane" state idle
-muxa_as "$bob_pane" send alice 'IDE_SESSION_DRAIN' >/dev/null
-ide_drain="$(printf '%s' '{"conversation_id":"ide-conv-9","status":"completed"}' | muxa_as "$bob_pane" hook stop --format cursor)"
-assert_contains "$ide_drain" "followup_message" "stop from other pane still emits cursor JSON"
-assert_contains "$ide_drain" "IDE_SESSION_DRAIN" "conversation_id drains the session mailbox"
-alice_st="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_state}')"
-[ "$alice_st" = "busy" ] && ok "session stop marks the target pane busy" \
-  || bad "session stop marks the target pane busy" "state=$alice_st"
-bob_st="$(tmux -L "$SOCK" display-message -t "$bob_pane" -p '#{@muxa_state}')"
-[ "$bob_st" = "idle" ] && ok "session stop does not mark the caller pane busy" \
-  || bad "session stop does not mark the caller pane busy" "bob_state=$bob_st"
-ide_peek="$(muxa_as "$bob_pane" peek alice)"
-assert_contains "$ide_peek" "IDE_SESSION_DRAIN" "queued drain stays visible in peek"
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- IDE Stop with no TMUX_PANE (GUI hook) ---
-# Busy so send queues for Stop; idle hook panes inject (tested above).
-muxa_as "$alice_pane" state busy
-muxa_as "$bob_pane" send alice 'NO_TMUX_PANE_DRAIN' >/dev/null
-no_pane_drain="$(printf '%s' '{"conversation_id":"ide-conv-9","status":"completed"}' | muxa hook stop --format cursor)"
-assert_contains "$no_pane_drain" "NO_TMUX_PANE_DRAIN" "stop without TMUX_PANE drains by conversation_id"
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- aborted stop leaves mail queued ---
-muxa_as "$alice_pane" state busy
-muxa_as "$bob_pane" send alice 'ABORT_KEEP' >/dev/null
-abort_out="$(printf '%s' '{"conversation_id":"ide-conv-9","status":"aborted"}' | muxa_as "$alice_pane" hook stop --format cursor)"
-[ -z "$abort_out" ] && ok "aborted stop prints nothing" \
-  || bad "aborted stop prints nothing" "got: $abort_out"
-abort_peek="$(muxa_as "$bob_pane" peek alice)"
-assert_contains "$abort_peek" "ABORT_KEEP" "aborted stop does not claim mail"
-abort_st="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_state}')"
-[ "$abort_st" = "idle" ] && ok "aborted stop sets idle" \
-  || bad "aborted stop sets idle" "state=$abort_st"
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-
 # --- afterAgentResponse clears stuck busy ---
 muxa_as "$alice_pane" state busy
 muxa_as "$alice_pane" hook afterAgentResponse
 aar_st="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_state}')"
 [ "$aar_st" = "idle" ] && ok "afterAgentResponse sets idle" \
   || bad "afterAgentResponse sets idle" "state=$aar_st"
-
-# --- same-turn second Stop re-emits young cur/ (Cursor uses last hook stdout) ---
-muxa_as "$alice_pane" register --name alice --kind cursor --deliver hook --parent bob >/dev/null
-muxa_as "$alice_pane" state busy
-muxa_as "$bob_pane" send alice 'DUAL_STOP_BODY' >/dev/null
-muxa_as "$alice_pane" hook stop --format cursor >/dev/null
-second_stop="$(MUXA_SWEEP_MIN_AGE=60 muxa_as "$alice_pane" hook stop --format cursor)"
-assert_contains "$second_stop" "followup_message" "same-turn second stop re-emits cursor JSON"
-assert_contains "$second_stop" "DUAL_STOP_BODY" "same-turn second stop re-emits young cur/"
-dual_peek="$(muxa_as "$bob_pane" peek alice)"
-assert_contains "$dual_peek" "DUAL_STOP_BODY" "same-turn second stop does not sweep claim"
-pending_cleared="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_stop_pending}')"
-[ -z "$pending_cleared" ] && ok "same-turn second stop clears stop_pending" \
-  || bad "same-turn second stop clears stop_pending" "got: $pending_cleared"
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-
-# --- empty stop must not re-emit idle-injected young cur/ ---
-muxa_as "$alice_pane" register --name alice --kind cursor --deliver hook --parent bob >/dev/null
-tmux -L "$SOCK" set-option -p -t "$alice_pane" @muxa_hook_ok 1 2>/dev/null || true
-tmux -L "$SOCK" set-option -p -t "$alice_pane" -u @muxa_stop_pending 2>/dev/null || true
-muxa_as "$alice_pane" state busy
-noreemit_box="$(muxa_box alice)"
-find "$noreemit_box/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$noreemit_box/cur" -type f -exec rm -f {} + 2>/dev/null || true
-{
-  printf 'From: bob\nTo: alice\nId: inject-young\nTime: 2026-01-01T00:00:00Z\nFlags: \n\nIDLE_INJECT_NO_REEMIT\n'
-} >"$noreemit_box/cur/inject-young"
-noreemit_stop="$(MUXA_SWEEP_MIN_AGE=60 muxa_as "$alice_pane" hook stop --format cursor)"
-[ -z "$noreemit_stop" ] && ok "empty stop does not re-emit idle-injected cur/" \
-  || bad "empty stop does not re-emit idle-injected cur/" "got: $noreemit_stop"
-pending="$(tmux -L "$SOCK" display-message -t "$alice_pane" -p '#{@muxa_stop_pending}')"
-[ -z "$pending" ] && ok "idle-injected cur/ does not set stop_pending" \
-  || bad "idle-injected cur/ does not set stop_pending" "got: $pending"
-muxa_as "$alice_pane" hook idle >/dev/null
-python3 - "$(muxa_box alice)/cur" <<'PY'
-import os, sys, time
-d = sys.argv[1]
-if not os.path.isdir(d):
-    raise SystemExit(0)
-now = time.time()
-for name in os.listdir(d):
-    p = os.path.join(d, name)
-    if os.path.isfile(p):
-        os.utime(p, (now - 5, now - 5))
-PY
-muxa_as "$alice_pane" hook stop --format cursor >/dev/null
-find "$(muxa_box alice)/new" -type f -exec rm -f {} + 2>/dev/null || true
-find "$(muxa_box alice)/cur" -type f -exec rm -f {} + 2>/dev/null || true
-
 printf '%s' '{"session_id":"cli-sess-123"}' | muxa_as "$alice_pane" hook session-start --kind generic >/dev/null
 muxa_as "$alice_pane" register --name alice --kind generic --deliver inject --parent bob >/dev/null
 

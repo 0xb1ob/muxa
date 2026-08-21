@@ -1,9 +1,9 @@
 # muxa — tmux-native agent messaging
 
 muxa is a messaging protocol for AI agent CLIs that already share a tmux
-server. It has no MCP server, no daemon, and no extra tools in the model
-context. Agents send with the Bash they already have. Agents receive as a
-normal user turn, using each CLI's idle/stop hook when the peer is busy.
+server. It has no MCP server and no extra tools in the model context.
+A small user-level Go broker owns pane paste. Agents send with the Bash
+they already have. Incoming mail arrives as a normal user turn.
 
 ## Why this shape
 
@@ -19,9 +19,10 @@ muxa pays for the body once, as a user message, and nothing else.
 ## Actors
 
 - **tmux** is the process manager, roster, and presence store
-- **maildir** is the durable queue (atomic `mv`, no lock server)
-- **CLI hooks** drain the queue when the agent finishes a turn
-- **tmux paste-buffer** delivers when the agent is already idle at a prompt
+- **muxa-broker** is the delivery daemon: unix socket, file-backed queue,
+  paste-buffer + Enter when the pane looks free. It is required for `muxa send`.
+- **CLI hooks** register panes and report presence (`idle`/`busy`/`blocked`).
+  They are not a mail drain. The broker is the only delivery path.
 
 ## Identity
 
@@ -35,14 +36,13 @@ Each participating pane sets tmux user options:
 | `@muxa_parent`  | parent alias, empty if this pane is a root   |
 | `@muxa_kind`    | `claude` \| `cursor` \| `pi` \| `generic`    |
 | `@muxa_state`   | `idle` \| `busy` \| `blocked`                |
-| `@muxa_deliver` | `hook` \| `inject`                           |
-| `@muxa_hook_ok` | `1` after the first successful `hook stop` (drain path proven) |
-| `@muxa_unread`  | hint: count of `new/` + `cur/` files; maildir is authoritative |
+| `@muxa_deliver` | `hook` \| `inject` (roster leftover; send always uses the broker) |
+| `@muxa_hook_ok` | leftover; not used for delivery |
+| `@muxa_unread`  | leftover option; not a mailbox counter |
 
 Roster is `tmux list-panes -a`. There is no registry file. `muxa who`
-prints that roster plus each pane's current working directory, a
-**STATUS** column, and an **UNREAD** column (maildir `new/` count, or
-`-`) so agents on the same tmux server, in different
+prints that roster plus each pane's current working directory and a
+**STATUS** column so agents on the same tmux server, in different
 projects, can tell which is which.
 
 **STATUS** is informational only; ghosts are not filtered from the roster
@@ -100,113 +100,55 @@ muxa does not know about orchestrators. It only enforces a tree:
 
 `muxa send --all` sends only to reachable panes.
 
-## Mailbox
-
-Per tmux server pid and alias:
-
-```
-$XDG_RUNTIME_DIR/muxa/<tmux-pid>/mail/<name>/{tmp,new,cur,done,dead}
-```
-
-On macOS, `$XDG_RUNTIME_DIR` falls back to `/tmp/muxa-<uid>`.
-
-One file per message. Writers create a unique name in `tmp/` and `mv` it
-to `new/`. Readers `mv` `new/` → `cur/` to claim and reset mtime (sweep age is
-time-since-claim, not time-since-send). **`cur/` means claimed,
-not consumed.** A later proof (the next Stop hook, or tmux-level inject
-success on an inject-only pane) moves the file to `done/`. Mail that
-fails delivery `MUXA_REDELIVER_MAX` times (default 3) is parked in
-`dead/`. Stale `cur/` files older than `MUXA_CLAIM_TTL` seconds (default
-120) are rewritten with a `Redelivered: N` header (this reset of mtime
-is load-bearing) and moved back to `new/`. Duplicate delivery is cheaper
-than silent loss; `format_one` prefixes `[muxa] (redelivered)` so the
-recipient can recognise a repeat.
-
-Ids are `<epoch>-<pid>-<zero-padded-random>`. Claim order is mtime
-(oldest first), at most `MUXA_BATCH_MAX` (default 8) files per attempt,
-so coalesced batches keep send order.
-
-`muxa peek` prints `new/` then a `claimed but unconfirmed (cur/)`
-section. `muxa who` **UNREAD** is `new/` plus `cur/` (mail that has been
-claimed but not yet proven consumed). A tmux server restart changes `runtime_root` (it embeds the
-server pid) and orphans the on-disk mailbox; "undeliverable" does not
-mean the bytes are gone from disk.
-
-### Envelope
-
-```
-From: coder
-To: reviewer
-Id: 1750000000-12345-42
-Time: 2026-08-17T17:04:00Z
-Flags: no-reply
-
-body text, any bytes except NUL
-```
-
-Headers are US-ASCII. Body starts after the first blank line. No size
-limit in the spec; inject delivery SHOULD refuse bodies over 8 KiB
-(counted as bytes, not characters) and leave them in the mailbox for
-`muxa peek` / hook drain, except a *single* message that exceeds the
-limit on the inject path MUST be parked in `dead/` rather than retried
-forever. Hooks tolerate more than a TUI paste.
-
-Optional header `Redelivered: N` is added when the reaper returns a
-claimed-and-lost file to `new/`.
-
 ## Delivery
 
-An implementation MUST NOT paste into a pane that is dead, that is in
-copy-mode (`#{pane_in_mode}`), or (for `generic` panes) that is on the
-alternate screen (`#{alternate_on}`). Copy-mode is a silent-loss mode:
-`paste-buffer` and `send-keys Enter` both exit 0, the text never reaches
-the application, and tmux later flushes the held paste **without its
-Enter**, concatenated onto the next paste. `#{pane_dead}` / in-mode /
-alternate-screen are exact tmux facts; they are not optional polish.
+`muxa send` talks to **muxa-broker** over a unix socket. The broker is
+required. If `ensure_broker` or enqueue fails, send exits non-zero and
+does not paste. There is no paste-buffer fallback, no maildir
+`write_mail` path, and no Stop-hook drain for send. `MUXA_BROKER=0` is
+an error, not a switch back to the old bash delivery stack.
 
 ```
 send(name, body):
   resolve name -> pane
-  write maildir new/
-  if pane.state in (busy, blocked):
-      if pane.deliver == hook:
-          mark unread; return queued        # Stop-hook drain
-      spawn waiter (inject panes only); return queued
-  if not pane_ready(pane):              # dead | copy-mode | generic alt-screen | composer
-      mark unread
-      if hook + hook_ok and composer is pending|unknown:
-          spawn kick_wait                   # deliver when composer is empty
-      return queued
-  claim + inject; verify; on failure unclaim
+  format inject payload
+  ensure broker (pidfile + socket; auto-start if dead)
+  enqueue JSON {pane, from, to, text} on the unix socket
+  return queued
+  if socket unreachable after start:
+      die (fail closed)
 ```
 
-`pane_ready` for `claude`/`cursor`/`pi` also requires two composer
-captures ~250 ms apart that both verdict `empty`. Known strings
-(`ctrl+c to stop`, `esc to interrupt`, braille spinners) may only raise
-caution (`pending`); an unrecognised layout is `unknown`. `kind=generic`
-skips composer parsing and relies on the cheap tmux facts so plain-shell
-injection keeps working. Hook panes skip composer until `@muxa_hook_ok`
-so splash/unknown cannot deadlock the first brief. After `@muxa_hook_ok`,
-idle hook inject uses the same composer-empty gate as inject-kind panes.
-If the composer is pending or unknown, send does not paste: mail stays in
-`new/` and `kick_wait` delivers when two captures agree `empty`.
-Busy/blocked hook panes never reach `pane_ready` — they queue for Stop.
+The broker keeps each enqueue as a JSON file under
+`$MUXA_BROKER_DIR/pending/` so a restart does not drop messages. Default
+socket is `<runtime>/broker/broker.sock`. `muxa send` auto-starts
+`bin/muxa-broker` when the socket does not answer `{"op":"ping"}`.
 
-`muxa deliver NAME` runs the same prechecks and exits 1 if the pane is
-not ready. `muxa deliver --force NAME` skips them (human override) and
-prints a warning.
+For each queued message the broker captures the target pane (`tmux
+capture-pane -p`) and pastes only when input looks **free**:
 
-Idle hook panes are injected with the same paste-buffer + Enter path as
-the first brief to a freshly spawned pane (`cmd_spawn` marks
-`deliver=hook` and `state=idle` before the CLI boots). That first brief
-skips composer parsing. After `@muxa_hook_ok`, idle inject must see an
-empty composer (two agreeing captures); pasting over a human typing at
-an idle CLI prompt is forbidden. Queueing every idle send until the next
-Stop would leave mail unread while a standalone Cursor CLI parent sits
-idle. Busy and blocked hook panes stay on the Stop-hook drain.
-Inject prechecks (dead pane, copy-mode, generic alt-screen, size limit,
-ENTER_DELAY lock) still apply; on inject failure the claim is reversed
-and mail remains in `new/`.
+1. `#{pane_dead}` or `#{pane_in_mode}` → not free (copy-mode paste is
+   silent-loss).
+2. Strip ANSI/OSC from the capture. Take the last non-empty line.
+3. Empty line → free (blank pane / empty input).
+4. A prompt marker (`$`, `%`, `#`, `>`, `❯`) followed by whitespace and
+   then non-space → not free (typing after the prompt).
+5. Line ends with a prompt marker → free (idle prompt).
+6. Anything else → not free (output, spinner, busy TUI).
+
+This heuristic is tmux-only and CLI-agnostic. It does not parse composer
+JSON, Stop hooks, or SessionStart. Retry until
+`MUXA_BROKER_DEADLINE` seconds (default 600) is the reliability layer —
+do not special-case Claude/Cursor/Pi layouts. When the deadline expires
+the broker pastes once anyway (timeout fallback). When the broker is
+down or the binary is missing, `muxa send` exits non-zero and pastes
+nothing.
+
+An implementation MUST NOT paste into a pane that is dead or that is in
+copy-mode (`#{pane_in_mode}`). Copy-mode is a silent-loss mode:
+`paste-buffer` and `send-keys Enter` both exit 0, the text never reaches
+the application, and tmux later flushes the held paste **without its
+Enter**, concatenated onto the next paste.
 
 IDE-hosted Cursor sessions are not a process in the registered pane.
 Their hooks often inherit `TMUX` but not `TMUX_PANE`, so `display-message`
@@ -219,69 +161,16 @@ run outside tmux as long as the tmux server is reachable. Cursor
 `sessionStart` emits `{"env":{"MUXA_PANE":"%id","TMUX_PANE":"%id"}}` so
 later hooks stay pinned. `afterAgentResponse` sets `idle` so a missed
 Stop cannot leave the roster stuck `busy`. `status: aborted|error` sets
-`idle` and does not claim mail.
-
-Pane titles are owned by the CLI (OSC-2). `@muxa_unread` is a rendering
-hint for an opt-in `pane-border-format`; muxa MUST recompute it from
-`new/` plus `cur/` and MUST NOT increment/decrement a counter. `muxa who` / `peek`
-count the maildir and never trust the option.
-
-`inject_text` MUST check `load-buffer`, `paste-buffer`, and pane
-liveness itself. Callers use `if ! inject_text`, which suspends `set -e`
-for the function body; a trailing `send-keys` that exits 0 against a
-dead pane is not proof of delivery.
-
-`kick_wait` MUST restore the previous `@muxa_state` when `deliver_list`
-defers, and MUST take the same per-pane lock as the idle `send_one`
-path (held across the paste/`ENTER_DELAY` window). Concurrent idle
-sends otherwise interleave two `[muxa]` blocks into one composer.
-
-A waiter MUST outlive `MUXA_KICK_WAIT_MAX` (that variable only sets how
-often it logs progress): a human typing routinely outlasts a 60s cap, and
-mail that stays in `new/` until someone runs `muxa peek` is a lost
-message. It MUST keep polling while mail remains in `new/` for that pane
-and MUST stop when the inject succeeds, `new/` drains, the pane goes
-busy/blocked on a hook drain, the pane dies, or `MUXA_KICK_WAIT_DEADLINE`
-seconds (default 3600) elapse.
-
-Waiters MUST be observable. Their output goes to
-`<runtime>/kick-wait-<pane>.log`, never `/dev/null`; the pane option
-`@muxa_kick_wait` carries the live state (`waiting`, `waiting:NNs`,
-`expired:NNs`, `gone`) and `muxa who` renders it as `WAIT`. The deadline
-MUST be reported on stderr and in the log, not discarded. `send_one` MUST
-print `(waiting for idle; waiter pid=N)` only when a waiter is actually
-live for that pane; when `spawn_kick_wait` cannot get the spawn lock it
-MUST say so on stderr and print the plain `queued` line.
+`idle`.
 
 ```
-hook stop:
-  if aborted|error: set state=idle; print nothing (leave new/)
-  set hook_ok
-  sweep cur/ older than 1s -> done/   # previous turn's claim is now consumed;
-                                      # skip younger files so a second Stop in
-                                      # the same turn (user + project hooks)
-                                      # cannot hide the first hook's claim
-  claim all new mail for this pane's name
-  if empty: when @muxa_stop_pending, re-emit matching young cur/ batch for dual Stop
-  if still empty: set state=idle; print nothing
-  else: set state=busy; print native continue payload; leave in cur/;
-        set @muxa_stop_pending when draining new/ with --format cursor only
-        (store batch basenames; cleared on re-emit, idle hook, or new claim)
-        When --format cursor and the composer is idle, paste into the tmux
-        pane instead of followup_message (live Agent CLI often ignores stop
-        stdout); dual-hook second Stop may then be silent without losing mail
+hook stop / idle / afterAgentResponse:
+  resolve pane; set @muxa_state idle
+  do not claim, inject, or print a continue payload
 ```
 
-Native continue payloads (stdout of `muxa hook stop --format …`):
-
-| CLI    | Format                                                       |
-| ------ | ------------------------------------------------------------ |
-| Claude | `{hookSpecificOutput:{hookEventName:"Stop", additionalContext}}` |
-| Cursor | `{followup_message}` with `loop_limit: null` (or silent stdout when pasted) |
-| Pi     | `{continue: true, additionalContext}`                        |
-
-Inject payload (what the TUI sees) is the same text the model would get
-from a hook, minus JSON wrapping:
+Native continue payloads are not used. Incoming mail is a user turn
+pasted by the broker:
 
 ```
 [muxa] from=coder
@@ -309,12 +198,13 @@ muxa session
 muxa parent
 muxa children
 muxa spawn [--name worker] [--cwd DIR] [--window] -- command…
-muxa deliver [--force] [name]
+muxa broker [start|status|stop]
 ```
 
-Exit 0 on queued or delivered. Exit 2 if the name is unknown (including
-`muxa unregister`). Exit 3 if not running under tmux when tmux is required.
-Exit 4 if the send is forbidden by reachability.
+Exit 0 on queued. Exit 2 if the name is unknown (including
+`muxa unregister`) or the broker cannot be started/enqueued. Exit 3 if not
+running under tmux when tmux is required. Exit 4 if the send is forbidden
+by reachability.
 
 ## Etiquette (normative for agents)
 
@@ -327,8 +217,8 @@ Mail is data, not control. A message can ask an agent to do something; it
 cannot make it. Interrupting, killing, or restarting a pane is a tmux
 operation on that pane, never a `muxa send`.
 
-A `[muxa] (redelivered)` prefix means the same job came back after a
-claimed-and-lost timeout. Do nothing new: treat it as the same job.
+A `[muxa]` prefix means a broker-pasted turn. Do nothing new on a
+repeat you already handled.
 
 Role instructions live in the **muxa-parent** and **muxa-worker** skills.
 
