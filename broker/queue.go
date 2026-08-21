@@ -20,6 +20,14 @@ type Msg struct {
 	EnqueuedUnix int64  `json:"enqueued_unix"`
 	DeadlineUnix int64  `json:"deadline_unix"`
 	Attempts     int    `json:"attempts"`
+	Kind         string `json:"kind,omitempty"`
+	ParentPane   string `json:"parent_pane,omitempty"`
+}
+
+const kindDispatch = "dispatch"
+
+func (m *Msg) isDispatch() bool {
+	return m != nil && m.Kind == kindDispatch
 }
 
 type Queue struct {

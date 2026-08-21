@@ -19,6 +19,8 @@ type Request struct {
 	To           string `json:"to,omitempty"`
 	Text         string `json:"text,omitempty"`
 	DeadlineUnix int64  `json:"deadline_unix,omitempty"`
+	Kind         string `json:"kind,omitempty"`
+	ParentPane   string `json:"parent_pane,omitempty"`
 }
 
 type Response struct {
@@ -136,6 +138,8 @@ func (s *Server) dispatch(req Request) Response {
 			To:           req.To,
 			Text:         req.Text,
 			DeadlineUnix: deadline,
+			Kind:         req.Kind,
+			ParentPane:   req.ParentPane,
 		}
 		if err := s.Q.Put(m); err != nil {
 			return Response{OK: false, Error: err.Error()}
