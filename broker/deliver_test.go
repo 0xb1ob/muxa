@@ -135,8 +135,8 @@ func TestRetryUntilFree(t *testing.T) {
 	if f.lastInject() != "TOKEN-RETRY" {
 		t.Fatalf("payload=%q", f.lastInject())
 	}
-	if p, doneN, failed, err := q.Counts(); err != nil || p != 0 || doneN != 1 || failed != 0 {
-		t.Fatalf("counts pending=%d done=%d failed=%d err=%v", p, doneN, failed, err)
+	if p, doneN, failed, unknown, err := q.Counts(); err != nil || p != 0 || doneN != 1 || failed != 0 || unknown != 0 {
+		t.Fatalf("counts pending=%d done=%d failed=%d unknown=%d err=%v", p, doneN, failed, unknown, err)
 	}
 }
 
@@ -158,8 +158,8 @@ func TestNoTimeoutFallbackPaste(t *testing.T) {
 	if f.injectCount() != 0 {
 		t.Fatalf("timeout fallback pasted into a busy pane: %d", f.injectCount())
 	}
-	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 {
-		t.Fatalf("after deadline pending=%d done=%d failed=%d", p, doneN, failed)
+	if p, doneN, failed, unknown, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 || unknown != 0 {
+		t.Fatalf("after deadline pending=%d done=%d failed=%d unknown=%d", p, doneN, failed, unknown)
 	}
 }
 
@@ -175,8 +175,8 @@ func TestUnconfirmedPasteNotDone(t *testing.T) {
 	if f.injectCount() != 1 {
 		t.Fatalf("want 1 inject, got %d", f.injectCount())
 	}
-	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 {
-		t.Fatalf("unconfirmed pending=%d done=%d failed=%d", p, doneN, failed)
+	if p, doneN, failed, unknown, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 || unknown != 0 {
+		t.Fatalf("unconfirmed pending=%d done=%d failed=%d unknown=%d", p, doneN, failed, unknown)
 	}
 }
 
@@ -220,8 +220,8 @@ func TestBusyPaneDeliversInOrderAfterFree(t *testing.T) {
 	if ids := d.pasteIDs(); len(ids) != 2 || ids[0] != "%1|a" || ids[1] != "%1|b" {
 		t.Fatalf("paste order: %v", ids)
 	}
-	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 2 || failed != 0 {
-		t.Fatalf("after both pending=%d done=%d failed=%d", p, doneN, failed)
+	if p, doneN, failed, unknown, _ := q.Counts(); p != 0 || doneN != 2 || failed != 0 || unknown != 0 {
+		t.Fatalf("after both pending=%d done=%d failed=%d unknown=%d", p, doneN, failed, unknown)
 	}
 }
 
@@ -281,8 +281,8 @@ func TestDispatchWaitsUntilPaneDrew(t *testing.T) {
 	if f.injectCount() != 1 || f.lastInject() != "FIRST-BRIEF" {
 		t.Fatalf("want brief after ready, got %q count=%d", f.lastInject(), f.injectCount())
 	}
-	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 {
-		t.Fatalf("after ready pending=%d done=%d failed=%d", p, doneN, failed)
+	if p, doneN, failed, unknown, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 || unknown != 0 {
+		t.Fatalf("after ready pending=%d done=%d failed=%d unknown=%d", p, doneN, failed, unknown)
 	}
 }
 
@@ -303,8 +303,8 @@ func TestDispatchDeadlineNotifiesParentNotChild(t *testing.T) {
 	if f.injectCount() != 0 {
 		t.Fatalf("timeout-pasted the brief into a cold pane: %d %q", f.injectCount(), f.lastInject())
 	}
-	if p, doneN, failed, _ := q.Counts(); doneN != 0 || failed != 1 || p != 1 {
-		t.Fatalf("want brief failed + parent notify pending, pending=%d done=%d failed=%d", p, doneN, failed)
+	if p, doneN, failed, unknown, _ := q.Counts(); doneN != 0 || failed != 1 || p != 1 || unknown != 0 {
+		t.Fatalf("want brief failed + parent notify pending, pending=%d done=%d failed=%d unknown=%d", p, doneN, failed, unknown)
 	}
 	pending, _ := q.Pending()
 	if len(pending) != 1 || pending[0].From != "broker" || pending[0].Pane != "%2" {
@@ -331,5 +331,68 @@ func TestDispatchDeadlineNotifiesParentNotChild(t *testing.T) {
 	}
 	if !strings.Contains(f.lastInject(), "dispatch failed") {
 		t.Fatalf("parent paste=%q", f.lastInject())
+	}
+}
+
+func TestCursorCollapsedPasteIsDelivered(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{captures: []string{"ready>", "[Pasted text +48 lines]"}, hideEcho: true}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	_ = q.Put(&Msg{
+		ID: "c1", Pane: "%372", From: "crisp-oak", To: "muxa-darwin",
+		Text:         "[muxa] from=crisp-oak\nCorrection, read before continuing. This addendum is long enough that Cursor will collapse it.\nReply: muxa send crisp-oak \"…\"\n",
+		DeadlineUnix: 2000,
+	})
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("want 1 inject, got %d", f.injectCount())
+	}
+	if p, doneN, failed, unknown, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 || unknown != 0 {
+		t.Fatalf("collapsed paste pending=%d done=%d failed=%d unknown=%d", p, doneN, failed, unknown)
+	}
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("retried a collapsed Cursor paste: %d", f.injectCount())
+	}
+}
+
+func TestBusyAfterPasteIsUnknownNoRetry(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{captures: []string{"ready>", "esc to interrupt\nworking"}, hideEcho: true}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	_ = q.Put(&Msg{
+		ID: "u2", Pane: "%269", From: "cp-dispatch", To: "crisp-oak",
+		Text: "NEVER-VISIBLE-BODY", DeadlineUnix: 2000,
+	})
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("want 1 inject, got %d", f.injectCount())
+	}
+	if p, doneN, failed, unknown, _ := q.Counts(); p != 0 || doneN != 0 || failed != 0 || unknown != 1 {
+		t.Fatalf("want unknown not pending, pending=%d done=%d failed=%d unknown=%d", p, doneN, failed, unknown)
+	}
+	f.mu.Lock()
+	f.captures = []string{"ready>"}
+	f.capI = 0
+	f.echo = ""
+	f.hideEcho = false
+	f.mu.Unlock()
+	d.Tick()
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("retried an unknown Cursor paste after the pane went idle: %d", f.injectCount())
+	}
+}
+
+func TestPasteCollapsed(t *testing.T) {
+	if !pasteCollapsed("[Pasted text +48 lines]") {
+		t.Fatal("cursor collapse marker")
+	}
+	if pasteCollapsed("ready>") {
+		t.Fatal("idle prompt is not a collapse")
 	}
 }

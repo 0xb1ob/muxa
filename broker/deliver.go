@@ -132,16 +132,25 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		log.Printf("inject %s: %v", m.ID, err)
 		return
 	}
-	if !d.confirmed(m) {
-		log.Printf("unconfirmed %s → %s id=%s (paste not visible; left queued)", m.From, m.To, m.ID)
-		return
+	switch d.confirm(m) {
+	case confirmLanded:
+		d.notePaste(m)
+		log.Printf("delivered %s → %s id=%s", m.From, m.To, m.ID)
+		_ = d.Q.MarkDone(m)
+	case confirmUnknown:
+		d.notePaste(m)
+		log.Printf("unknown %s → %s id=%s (paste accepted but payload not visible; will not retry)", m.From, m.To, m.ID)
+		_ = d.Q.MarkUnknown(m)
+	default:
+		log.Printf("unconfirmed %s → %s id=%s (pane still free; left queued)", m.From, m.To, m.ID)
 	}
+}
+
+func (d *Deliverer) notePaste(m *Msg) {
 	d.mu.Lock()
 	d.pastes = append(d.pastes, m.Pane+"|"+m.ID)
 	delete(d.held, m.ID)
 	d.mu.Unlock()
-	log.Printf("delivered %s → %s id=%s", m.From, m.To, m.ID)
-	_ = d.Q.MarkDone(m)
 }
 
 func (d *Deliverer) noteHeld(m *Msg) {
@@ -245,21 +254,47 @@ func visibleContent(capture string) bool {
 	return strings.TrimSpace(stripANSI(capture)) != ""
 }
 
-func (d *Deliverer) confirmed(m *Msg) bool {
+type confirmResult int
+
+const (
+	confirmMissed  confirmResult = iota // still free, payload absent — safe to retry
+	confirmLanded                       // payload or paste-collapse visible
+	confirmUnknown                      // pane reacted; must not retry
+)
+
+func (d *Deliverer) confirm(m *Msg) confirmResult {
 	needle := confirmNeedle(m.Text)
-	if needle == "" {
-		return false
-	}
+	var last string
 	for i := 0; i < 3; i++ {
 		cap, err := d.T.Capture(m.Pane)
-		if err == nil && landed(cap, needle) {
-			return true
+		if err == nil {
+			last = cap
+			if needle != "" && landed(cap, needle) {
+				return confirmLanded
+			}
+			if pasteCollapsed(cap) {
+				return confirmLanded
+			}
 		}
 		if i < 2 {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-	return false
+	if hist, err := d.T.CaptureHistory(m.Pane); err == nil {
+		if needle != "" && landed(hist, needle) {
+			return confirmLanded
+		}
+		if pasteCollapsed(hist) {
+			return confirmLanded
+		}
+	}
+	if last != "" && !LooksFree(last) {
+		return confirmUnknown
+	}
+	if d.drawing(m.Pane) {
+		return confirmUnknown
+	}
+	return confirmMissed
 }
 
 func confirmNeedle(text string) string {
@@ -284,6 +319,11 @@ func landed(capture, needle string) bool {
 		return true
 	}
 	return false
+}
+
+func pasteCollapsed(capture string) bool {
+	s := stripANSI(capture)
+	return strings.Contains(s, "[Pasted text") || strings.Contains(s, "Pasted text +")
 }
 
 func (d *Deliverer) pasteIDs() []string {

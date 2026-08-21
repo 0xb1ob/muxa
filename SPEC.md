@@ -241,8 +241,13 @@ is how long a *dead* pane is retried before the message is failed; a live
 busy pane keeps its mail in `pending/` past that deadline. The broker MUST
 NOT timeout-fallback paste: two fallbacks into one busy composer overwrite
 each other, both get filed as `done/`, and the agent never sees the first.
-`delivered` means the payload was visible in the pane after paste, not that
-`paste-buffer` exited 0. When the broker is down or the binary is missing,
+After a paste, confirmation has three outcomes: **delivered** (payload or
+Cursor's `[Pasted text +N lines]` collapse is visible), **not delivered**
+(pane still LooksFree — safe to retry), and **unknown** (the pane went busy
+or started drawing but the payload is not in the visible grid — Cursor
+collapses long pastes and scrolls them off). Unknown MUST NOT retry: a
+duplicate send re-runs work. `delivered` is never recorded for an
+overwritten timeout paste. When the broker is down or the binary is missing,
 `muxa send` exits non-zero and pastes nothing.
 
 An implementation MUST NOT paste into a pane that is dead or that is in
