@@ -497,17 +497,6 @@ case "$occ_err" in
   *) ok "sibling worktree does not warn" ;;
 esac
 
-set +e
-pf_occ="$(cd "$occ_git" && "$ROOT/bin/muxa" preflight "$occ_linked" 2>&1)"
-pf_occ_code=$?
-set -e
-[ "$pf_occ_code" -eq 0 ] && ok "preflight ignores occupied worktree roster" \
-  || bad "preflight ignores occupied worktree roster" "exit=$pf_occ_code out=$pf_occ"
-case "$pf_occ" in
-  *"live worker"*) bad "preflight stays git-only (no cwd occupancy warning)" "out=$pf_occ" ;;
-  *) ok "preflight stays git-only (no cwd occupancy warning)" ;;
-esac
-
 # --- kind detection: cursor-agent node vs claude SessionStart ---
 who_kind_for() {
   local who="$1" name="$2" k
@@ -905,303 +894,50 @@ sid2="$(tmux -L "$SOCK" display-message -p -t "$alice_pane" '#{@muxa_session}')"
 [ -z "$sid2" ] && ok "session-end clears @muxa_session" \
   || bad "session-end clears @muxa_session" "got: $sid2"
 
-# --- preflight (git only, no tmux) ---
-git_init_repo() {
-  local dir="$1"
-  mkdir -p "$dir"
-  git init -q "$dir" >/dev/null 2>&1
-  git -C "$dir" symbolic-ref HEAD refs/heads/main
-  git -C "$dir" -c user.email=muxa@example.com -c user.name=muxa -c commit.gpgsign=false \
-    commit -q --allow-empty -m init
-}
-
-pf_repo="$tmpdir/pf-repo"
-pf_wt="$tmpdir/pf-wt"
-pf_other="$tmpdir/pf-other"
-git_init_repo "$pf_repo"
-git_init_repo "$pf_other"
-git -C "$pf_repo" worktree add -q -b feat/pf "$pf_wt" >/dev/null 2>&1
-
-pf() {
-  local dir="$1"
-  shift
-  set +e
-  pf_out="$(cd "$dir" && "$ROOT/bin/muxa" preflight "$@" 2>&1)"
-  pf_code=$?
-  set -e
-}
-
-pf "$pf_repo" "$pf_wt"
-[ "$pf_code" -eq 0 ] && ok "preflight on default branch exits 0" \
-  || bad "preflight on default branch exits 0" "exit=$pf_code out=$pf_out"
-assert_contains "$pf_out" "ok   base branch main" "preflight defaults base to main"
-assert_contains "$pf_out" "on main" "preflight reports primary on main"
-assert_contains "$pf_out" "linked on feat/pf" "preflight accepts a linked worktree"
-case "$pf_out" in
-  *fail*) bad "preflight clean run prints no fail line" "out=$pf_out" ;;
-  *) ok "preflight clean run prints no fail line" ;;
-esac
-
-pf "$pf_wt" "$pf_wt"
-[ "$pf_code" -eq 0 ] && ok "preflight works from inside a linked worktree" \
-  || bad "preflight works from inside a linked worktree" "exit=$pf_code out=$pf_out"
-
-git -C "$pf_repo" checkout -q -b feat/onprimary
-pf "$pf_repo" "$pf_wt"
-[ "$pf_code" -eq 1 ] && ok "preflight on a feature branch exits 1" \
-  || bad "preflight on a feature branch exits 1" "exit=$pf_code out=$pf_out"
-assert_contains "$pf_out" "fail primary" "preflight names the tangled primary checkout"
-assert_contains "$pf_out" "(want main)" "preflight says which branch it wanted"
-
-pf "$pf_repo" --base feat/onprimary "$pf_wt"
-[ "$pf_code" -eq 0 ] && ok "preflight --base overrides the default branch" \
-  || bad "preflight --base overrides the default branch" "exit=$pf_code out=$pf_out"
-git -C "$pf_repo" checkout -q main
-
-pf "$pf_repo" "$pf_repo"
-[ "$pf_code" -eq 1 ] && ok "preflight rejects the primary as a worktree arg" \
-  || bad "preflight rejects the primary as a worktree arg" "exit=$pf_code out=$pf_out"
-assert_contains "$pf_out" "is the primary checkout" "preflight explains the primary-as-worktree failure"
-
-pf "$pf_repo" "$pf_other"
-[ "$pf_code" -eq 1 ] && ok "preflight rejects a worktree from another repo" \
-  || bad "preflight rejects a worktree from another repo" "exit=$pf_code out=$pf_out"
-assert_contains "$pf_out" "belongs to another repo" "preflight explains the foreign worktree"
-
-pf "$pf_repo" "$tmpdir/no-such-worktree"
-[ "$pf_code" -eq 1 ] && ok "preflight rejects a missing worktree" \
-  || bad "preflight rejects a missing worktree" "exit=$pf_code out=$pf_out"
-assert_contains "$pf_out" "does not exist" "preflight explains the missing worktree"
-
-set +e
-(cd "$pf_repo" && "$ROOT/bin/muxa" preflight --nope >/dev/null 2>&1)
-pf_code=$?
-set -e
-[ "$pf_code" -eq 2 ] && ok "preflight unknown flag exits 2" \
-  || bad "preflight unknown flag exits 2" "exit=$pf_code"
-
-# --- jobs runtime map (br durable fields; TSV worker/worktree/branch; no tmux) ---
-jobs_state="$tmpdir/state"
-jobs_cli() {
-  (cd "$pf_repo" && XDG_STATE_HOME="$jobs_state" "$ROOT/bin/muxa" jobs "$@")
-}
-jobs_code() {
-  set +e
-  jobs_cli "$@" >/dev/null 2>&1
-  jobs_status=$?
-  set -e
-}
-br_json() {
-  (cd "$pf_repo" && br --actor testdriver --json --no-color "$@")
-}
-br_create() {
-  br_json create "$@" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])'
-}
-br_total() {
-  br_json list --all | python3 -c 'import json,sys; d=json.load(sys.stdin); print(int(d.get("total") or 0))'
-}
-muxa_created_titles() {
-  br_json list --all | python3 -c '
-import json,sys
-d=json.load(sys.stdin)
-for i in d.get("issues") or []:
-    if i.get("created_by") == "muxa":
-        print(i.get("title") or "")
-'
-}
-
-nobr_path=""
-oldifs="$IFS"
-IFS=:
-for d in $PATH; do
-  [ -n "$d" ] || continue
-  [ -x "$d/br" ] && continue
-  if [ -z "$nobr_path" ]; then
-    nobr_path="$d"
-  else
-    nobr_path="$nobr_path:$d"
-  fi
+# --- jobs/preflight gone; muxa must not require br or git ---
+nobr_bin="$tmpdir/nobr-bin"
+mkdir -p "$nobr_bin"
+for cmd in tmux python3; do
+  loc="$(command -v "$cmd" 2>/dev/null || true)"
+  [ -n "$loc" ] || continue
+  ln -s "$loc" "$nobr_bin/$(basename "$loc")"
 done
-IFS="$oldifs"
-set +e
-jobs_nobr_err="$(cd "$pf_repo" && PATH="$nobr_path" XDG_STATE_HOME="$jobs_state" "$ROOT/bin/muxa" jobs list 2>&1)"
-jobs_nobr_rc=$?
-set -e
-[ "$jobs_nobr_rc" -eq 2 ] && ok "jobs without br exits 2" \
-  || bad "jobs without br exits 2" "exit=$jobs_nobr_rc err=$jobs_nobr_err"
-assert_contains "$jobs_nobr_err" "br is required" "missing br names the hard requirement"
-assert_contains "$jobs_nobr_err" "Dicklesworthstone/beads_rust" "missing br includes the install URL"
-[ ! -d "$pf_repo/.beads" ] && ok "missing br does not init .beads" \
-  || bad "missing br does not init .beads" "unexpected .beads under $pf_repo"
+nobr_path="$ROOT/bin:$nobr_bin:/usr/bin:/bin"
+[ -z "$(PATH="$nobr_path" command -v br 2>/dev/null || true)" ] && ok "test PATH has no br" \
+  || bad "test PATH has no br" "br=$(PATH="$nobr_path" command -v br)"
 
-jobs_out="$(jobs_cli list)"
-assert_contains "$jobs_out" "(no jobs)" "empty runtime map lists nothing"
-assert_contains "$jobs_out" "UPDATED" "jobs list header has UPDATED"
-assert_contains "$jobs_out" "TITLE" "jobs list header has TITLE"
-[ -d "$pf_repo/.beads" ] && ok "jobs list auto-inits .beads" \
-  || bad "jobs list auto-inits .beads" "no .beads under $pf_repo after muxa jobs list"
-
-api_id="$(br_create --title api -t task -l "kind:ship,delivery:pr" -d "wire the endpoint")"
-br_create --title notes -t task -l "kind:research,delivery:local" >/dev/null
-jobs_before="$(br_total)"
-jobs_out="$(jobs_cli add api worker=bob branch=feat/api)"
-assert_contains "$jobs_out" "added $api_id" "jobs add confirms the br id"
-jobs_cli add notes >/dev/null
-jobs_after="$(br_total)"
-[ "$jobs_before" = "$jobs_after" ] && ok "jobs add does not create a br issue" \
-  || bad "jobs add does not create a br issue" "before=$jobs_before after=$jobs_after"
-
-jobs_out="$(jobs_cli list)"
-assert_contains "$jobs_out" "$api_id" "jobs list JOB column is the br id"
-assert_contains "$jobs_out" "api" "jobs list shows the title"
-assert_contains "$jobs_out" "open" "jobs add starts at open"
-assert_contains "$jobs_out" "wire the endpoint" "jobs list shows the note"
-assert_contains "$jobs_out" "notes" "jobs list shows the second job"
-if printf '%s\n' "$jobs_out" | grep -Eq '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'; then
-  ok "jobs list shows an updated timestamp"
-else
-  bad "jobs list shows an updated timestamp" "out=$jobs_out"
-fi
-
-jobs_cli set api status=running worktree="$pf_wt" >/dev/null
-jobs_out="$(jobs_cli list)"
-assert_contains "$jobs_out" "running" "jobs set updates status"
-assert_contains "$jobs_out" "$pf_wt" "jobs set stores the worktree"
-
-jobs_out="$(jobs_cli done api pr=https://example.test/pr/1)"
-assert_contains "$jobs_out" "done api" "jobs done confirms"
-jobs_out="$(jobs_cli list)"
-assert_contains "$jobs_out" "done" "jobs done sets status=done"
-assert_contains "$jobs_out" "https://example.test/pr/1" "jobs done stores the PR url"
-assert_contains "$jobs_out" "notes" "unrelated job survives the update"
-
-tsv="$(find "$jobs_state/muxa/jobs" -name '*.tsv' | head -1)"
-if [ -n "$tsv" ]; then
-  ok "jobs runtime ledger persists to XDG state dir"
-else
-  bad "jobs runtime ledger persists to XDG state dir" "no tsv under $jobs_state/muxa/jobs"
-fi
-if [ -n "$tsv" ]; then
-  tsv_head="$(head -1 "$tsv")"
-  case "$tsv_head" in
-    $'#job\tworker\tworktree\tbranch') ok "runtime TSV has no durable columns" ;;
-    *) bad "runtime TSV has no durable columns" "header=$tsv_head" ;;
-  esac
-  if grep -Eq $'\t(ship|research|open|running|done|https://example.test/pr/1)\t' "$tsv"; then
-    bad "runtime TSV does not duplicate durable fields" "tsv=$(cat "$tsv")"
-  else
-    ok "runtime TSV does not duplicate durable fields"
-  fi
-  if grep -q "^${api_id}"$'\t' "$tsv"; then
-    ok "runtime TSV is keyed by br id"
-  else
-    bad "runtime TSV is keyed by br id" "tsv=$(cat "$tsv")"
-  fi
-  if grep -q "^api"$'\t' "$tsv"; then
-    bad "runtime TSV is not keyed by title" "tsv=$(cat "$tsv")"
-  else
-    ok "runtime TSV is not keyed by title"
-  fi
-fi
-
-muxa_stubs="$(muxa_created_titles)"
-[ -z "$muxa_stubs" ] && ok "jobs add leaves no created_by=muxa stub issues" \
-  || bad "jobs add leaves no created_by=muxa stub issues" "titles=$muxa_stubs"
-
-jobs_code set nope status=open
-[ "$jobs_status" -eq 2 ] && ok "jobs set unknown job exits 2" \
-  || bad "jobs set unknown job exits 2" "exit=$jobs_status"
-jobs_code done nope
-[ "$jobs_status" -eq 2 ] && ok "jobs done unknown job exits 2" \
-  || bad "jobs done unknown job exits 2" "exit=$jobs_status"
-jobs_code add api worker=bob
-[ "$jobs_status" -eq 2 ] && ok "duplicate jobs add exits 2" \
-  || bad "duplicate jobs add exits 2" "exit=$jobs_status"
-jobs_before="$(br_total)"
-jobs_code add missing-job worker=bob
-[ "$jobs_status" -eq 2 ] && ok "jobs add unknown br id exits 2" \
-  || bad "jobs add unknown br id exits 2" "exit=$jobs_status"
-jobs_after="$(br_total)"
-[ "$jobs_before" = "$jobs_after" ] && ok "unknown jobs add does not create a stub issue" \
-  || bad "unknown jobs add does not create a stub issue" "before=$jobs_before after=$jobs_after"
-jobs_code add other kind=nope delivery=pr
-[ "$jobs_status" -eq 2 ] && ok "jobs add bad kind exits 2" \
-  || bad "jobs add bad kind exits 2" "exit=$jobs_status"
-jobs_code set api bogus=1
-[ "$jobs_status" -eq 2 ] && ok "jobs set unknown key exits 2" \
-  || bad "jobs set unknown key exits 2" "exit=$jobs_status"
-
-(cd "$pf_repo" && br --actor testdriver create --title "stray-bead" -t task -d "not a muxa job" >/dev/null)
-jobs_out="$(jobs_cli list)"
-case "$jobs_out" in
-  *stray-bead*) bad "jobs list is the runtime map, not the br backlog" "out=$jobs_out" ;;
-  *) ok "jobs list is the runtime map, not the br backlog" ;;
+who_nobr="$(PATH="$nobr_path" muxa_as "$bob_pane" who)"
+assert_contains "$who_nobr" "bob" "who works with br absent from PATH"
+ver_nobr="$(PATH="$nobr_path" muxa version)"
+[ -n "$ver_nobr" ] && ok "version works with br absent from PATH" \
+  || bad "version works with br absent from PATH" "out=$ver_nobr"
+help_nobr="$(PATH="$nobr_path" muxa help)"
+assert_contains "$help_nobr" "muxa send" "help works with br absent from PATH"
+case "$help_nobr" in
+  *"muxa jobs"*|*"muxa preflight"*) bad "help does not mention jobs or preflight" "out=$help_nobr" ;;
+  *) ok "help does not mention jobs or preflight" ;;
 esac
 
-shared_id="$(br_create --title "shared-title" -t task -l "kind:research,delivery:local")"
-jobs_before="$(br_total)"
-jobs_cli add shared-title worker=pat >/dev/null
-jobs_after="$(br_total)"
-[ "$jobs_before" = "$jobs_after" ] && ok "jobs add attaches to an existing title without a duplicate issue" \
-  || bad "jobs add attaches to an existing title without a duplicate issue" "before=$jobs_before after=$jobs_after"
-jobs_out="$(jobs_cli list)"
-assert_contains "$jobs_out" "$shared_id" "jobs add by unique title records the br id"
-assert_contains "$jobs_out" "pat" "jobs add by title stores the worker"
-
-ws_id="$(br_create --title "command-post: foo" -t task -l "kind:ship,delivery:pr")"
-jobs_before="$(br_total)"
-jobs_out="$(jobs_cli add "$ws_id" worker=alice worktree="$pf_wt")"
-jobs_after="$(br_total)"
-[ "$jobs_before" = "$jobs_after" ] && ok "jobs add by id does not create a stub for a whitespace title" \
-  || bad "jobs add by id does not create a stub for a whitespace title" "before=$jobs_before after=$jobs_after"
-assert_contains "$jobs_out" "added $ws_id" "jobs add by id confirms"
-jobs_code set "command-post: foo" worker=x
-[ "$jobs_status" -eq 2 ] && ok "jobs set rejects a whitespace title" \
-  || bad "jobs set rejects a whitespace title" "exit=$jobs_status"
-jobs_cli set "$ws_id" worker=carol >/dev/null
-jobs_out="$(jobs_cli list)"
-assert_contains "$jobs_out" "$ws_id" "jobs list shows the br id for a whitespace title"
-assert_contains "$jobs_out" "command-post: foo" "jobs list shows the human title"
-assert_contains "$jobs_out" "carol" "jobs set by br id updates runtime fields"
-
-slug_id="$(br_create --title "ship the widget" --slug widget -t task -l "kind:ship,delivery:pr")"
-jobs_cli add widget worker=slugger >/dev/null
-jobs_out="$(jobs_cli list)"
-assert_contains "$jobs_out" "$slug_id" "jobs add by slug attaches the br id"
-assert_contains "$jobs_out" "slugger" "jobs add by slug stores the worker"
-
-bare_id="$(br_create --title bare -t task)"
-jobs_cli add "$bare_id" kind=research delivery=local worker=kim >/dev/null
-jobs_out="$(jobs_cli list)"
-assert_contains "$jobs_out" "research" "jobs add can stamp kind on an existing issue"
-assert_contains "$jobs_out" "local" "jobs add can stamp delivery on an existing issue"
-assert_contains "$jobs_out" "kim" "jobs add without prior kind still stores the worker"
-
-jobs_cli set api status=open >/dev/null
-jobs_out="$(jobs_cli list)"
-assert_contains "$jobs_out" "open" "jobs set reopens a closed job to open"
-jobs_cli done api pr=https://example.test/pr/1 >/dev/null
-jobs_cli set api status=running >/dev/null
-jobs_out="$(jobs_cli list)"
-assert_contains "$jobs_out" "running" "jobs set reopens a closed job to running"
-
-legacy_repo="$tmpdir/legacy-jobs"
-legacy_state="$tmpdir/legacy-state"
-git_init_repo "$legacy_repo"
-legacy_key="$(cd "$legacy_repo" && pwd -P)"
-legacy_slug="$(printf '%s' "$(basename "$legacy_key")" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^\.*//')"
-legacy_hash="$(printf '%s' "$legacy_key" | python3 -c 'import hashlib, sys; print(hashlib.sha1(sys.stdin.buffer.read()).hexdigest()[:8])')"
-legacy_tsv="$legacy_state/muxa/jobs/${legacy_slug}-${legacy_hash}.tsv"
-mkdir -p "$(dirname "$legacy_tsv")"
-printf '%s\n' $'#job\tkind\tdelivery\tworker\tworktree\tbranch\tstatus\tpr\tnote\tupdated' >"$legacy_tsv"
-printf '%s\n' $'oldjob\tship\tpr\t-\t-\t-\topen\t-\t-\t2026-01-01T00:00:00Z' >>"$legacy_tsv"
 set +e
-legacy_err="$(cd "$legacy_repo" && XDG_STATE_HOME="$legacy_state" "$ROOT/bin/muxa" jobs list 2>&1)"
-legacy_rc=$?
+PATH="$nobr_path" muxa jobs list >/dev/null 2>&1
+jobs_rc=$?
+PATH="$nobr_path" muxa preflight >/dev/null 2>&1
+pf_rc=$?
 set -e
-[ "$legacy_rc" -eq 2 ] && ok "legacy open TSV refuses to start" \
-  || bad "legacy open TSV refuses to start" "exit=$legacy_rc err=$legacy_err"
-assert_contains "$legacy_err" "leftover open jobs" "legacy open TSV names the leftover file"
+[ "$jobs_rc" -eq 1 ] && ok "jobs is not a command" \
+  || bad "jobs is not a command" "exit=$jobs_rc"
+[ "$pf_rc" -eq 1 ] && ok "preflight is not a command" \
+  || bad "preflight is not a command" "exit=$pf_rc"
+
+git_stub="$tmpdir/git-must-not-run"
+mkdir -p "$git_stub"
+printf '%s\n' '#!/bin/sh' 'echo "muxa must not invoke git" >&2' 'exit 127' >"$git_stub/git"
+chmod +x "$git_stub/git"
+who_nogit="$(PATH="$git_stub:$PATH" muxa_as "$bob_pane" who)"
+assert_contains "$who_nogit" "bob" "who works when git would fail if invoked"
+ver_nogit="$(PATH="$git_stub:$PATH" muxa version)"
+[ -n "$ver_nogit" ] && ok "version works when git would fail if invoked" \
+  || bad "version works when git would fail if invoked" "out=$ver_nogit"
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
