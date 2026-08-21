@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # muxa — tmux-native messaging for AI agent CLIs.
-# bash 3.2+ (macOS / Linux). Requires tmux. python3 used for JSON and spawn quoting.
+# bash 3.2+ (macOS / Linux). Requires tmux. JSON and broker RPC live in muxa-broker.
 set -euo pipefail
 
 VERSION=0.3.0
@@ -126,7 +126,7 @@ unset_pane_opt() {
 }
 
 new_muxa_id() {
-  python3 -c 'import uuid; print(uuid.uuid4().hex[:12])'
+  od -An -N6 -tx1 /dev/urandom | tr -dc '0-9a-f'
 }
 
 # pane_id  name  id  parent  kind  where  cwd  command
@@ -193,27 +193,7 @@ pane_who_state() {
 broker_drawing_ids() {
   [ -n "${BROKER_SOCK:-}" ] || broker_setup_paths
   [ -S "${BROKER_SOCK:-}" ] || return 0
-  python3 -c '
-import json, socket, sys
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(0.2)
-try:
-    s.connect(sys.argv[1])
-    s.sendall(b"{\"op\":\"status\"}\n")
-    s.shutdown(socket.SHUT_WR)
-    data = b""
-    while True:
-        chunk = s.recv(65536)
-        if not chunk:
-            break
-        data += chunk
-    resp = json.loads(data.decode() or "{}")
-except Exception:
-    sys.exit(0)
-if not resp.get("ok"):
-    sys.exit(0)
-print(" ".join(resp.get("drawing") or []))
-' "$BROKER_SOCK" 2>/dev/null || true
+  broker_cli drawing 2>/dev/null || true
 }
 
 clear_muxa_registration() {
@@ -453,8 +433,24 @@ parent_would_cycle() {
   return 1
 }
 
+# POSIX-safe single-quote, matching python shlex.quote for spawn env/argv.
+shlex_quote() {
+  case "$1" in
+    '') printf "''" ;;
+    *[!A-Za-z0-9_./:@%+=,-]*)
+      printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+      ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 shlex_join() {
-  python3 -c 'import shlex, sys; print(shlex.join(sys.argv[1:]))' "$@"
+  local i=0 s
+  for s in "$@"; do
+    [ "$i" -eq 0 ] || printf ' '
+    shlex_quote "$s"
+    i=1
+  done
 }
 
 format_one() {
@@ -539,33 +535,7 @@ cmd_who_json() {
     done <<EOF
 $(roster_lines)
 EOF
-  } | python3 -c '
-import json, sys
-
-def n(s):
-    return s if s else None
-
-rows = []
-for raw in sys.stdin:
-    raw = raw.rstrip("\n")
-    if not raw:
-        continue
-    p = raw.split("||")
-    p.extend([""] * (10 - len(p)))
-    rows.append({
-        "name": p[1],
-        "id": p[2],
-        "parent": n(p[3]),
-        "kind": p[4],
-        "state": p[9],
-        "pane": p[0],
-        "session": None,
-        "cwd": p[6],
-        "status": p[8],
-    })
-json.dump(rows, sys.stdout, separators=(",", ":"), ensure_ascii=False)
-sys.stdout.write("\n")
-'
+  } | broker_cli who-json || die "who --json: muxa-broker not found"
 }
 
 cmd_who() {
@@ -648,15 +618,16 @@ cmd_tail() {
   if [ -n "$n" ]; then
     # History includes the unused blank rows at the bottom of the grid.
     # Strip those, then take the last N content lines — a read, not a poll.
-    tmux_do capture-pane -p -S - -t "$pane" | python3 -c '
-import sys
-n = int(sys.argv[1])
-lines = sys.stdin.read().splitlines()
-while lines and lines[-1] == "":
-    lines.pop()
-for line in lines[-n:]:
-    sys.stdout.write(line + "\n")
-' "$n" || die "tail: could not read pane $pane"
+    tmux_do capture-pane -p -S - -t "$pane" | awk -v n="$n" '
+      { lines[NR] = $0 }
+      END {
+        end = NR
+        while (end > 0 && lines[end] == "") end--
+        start = end - n + 1
+        if (start < 1) start = 1
+        for (i = start; i <= end; i++) print lines[i]
+      }
+    ' || die "tail: could not read pane $pane"
   else
     tmux_do capture-pane -p -t "$pane" || die "tail: could not read pane $pane"
   fi
@@ -719,7 +690,26 @@ broker_bin_path() {
     printf '%s' "$MUXA_BROKER_BIN"
     return
   fi
-  python3 -c 'import os,sys; print(os.path.join(os.path.dirname(os.path.realpath(sys.argv[1])), "muxa-broker"))' "${BASH_SOURCE[0]}"
+  local src dir target
+  src="${BASH_SOURCE[0]}"
+  while [ -L "$src" ]; do
+    dir="$(dirname "$src")"
+    target="$(readlink "$src")"
+    case "$target" in
+      /*) src="$target" ;;
+      *) src="$dir/$target" ;;
+    esac
+  done
+  dir="$(cd "$(dirname "$src")" && pwd -P)"
+  printf '%s' "$dir/muxa-broker"
+}
+
+broker_cli() {
+  local bin
+  bin="$(broker_bin_path)"
+  [ -x "$bin" ] || return 1
+  [ -n "${BROKER_SOCK:-}" ] || broker_setup_paths
+  MUXA_BROKER_SOCK="$BROKER_SOCK" "$bin" "$@"
 }
 
 broker_setup_paths() {
@@ -733,23 +723,7 @@ broker_setup_paths() {
 broker_ping() {
   [ -n "${BROKER_SOCK:-}" ] || broker_setup_paths
   [ -S "$BROKER_SOCK" ] || return 1
-  python3 -c '
-import json, socket, sys
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(0.5)
-try:
-    s.connect(sys.argv[1])
-    s.sendall(b"{\"op\":\"ping\"}\n")
-    s.shutdown(socket.SHUT_WR)
-    data = s.recv(4096)
-except Exception:
-    sys.exit(1)
-try:
-    resp = json.loads(data.decode() or "{}")
-except Exception:
-    sys.exit(1)
-sys.exit(0 if resp.get("ok") else 1)
-' "$BROKER_SOCK"
+  broker_cli ping
 }
 
 # Auto-start a user-level broker if the socket is dead. Pidfile + socket only;
@@ -832,35 +806,12 @@ ensure_broker() {
 
 broker_enqueue() {
   local id="$1" pane="$2" from="$3" to="$4" text="$5" kind="${6:-}" parent_pane="${7:-}"
+  local -a args
   [ -n "${BROKER_SOCK:-}" ] || broker_setup_paths
-  python3 - "$BROKER_SOCK" "$id" "$pane" "$from" "$to" "$text" "$kind" "$parent_pane" <<'PY'
-import json, socket, sys
-sockpath, mid, pane, frm, to, text, kind, parent_pane = sys.argv[1:9]
-req = {"op": "enqueue", "id": mid, "pane": pane, "from": frm, "to": to, "text": text}
-if kind:
-    req["kind"] = kind
-if parent_pane:
-    req["parent_pane"] = parent_pane
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(3)
-s.connect(sockpath)
-s.sendall(json.dumps(req).encode() + b"\n")
-s.shutdown(socket.SHUT_WR)
-data = b""
-while True:
-    chunk = s.recv(65536)
-    if not chunk:
-        break
-    data += chunk
-try:
-    resp = json.loads(data.decode() or "{}")
-except Exception:
-    sys.stderr.write("muxa: broker: bad response\n")
-    sys.exit(1)
-if not resp.get("ok"):
-    sys.stderr.write("muxa: broker: %s\n" % (resp.get("error") or "enqueue failed"))
-    sys.exit(1)
-PY
+  args=(enqueue --id "$id" --pane "$pane" --from "$from" --to "$to")
+  [ -n "$kind" ] && args+=(--kind "$kind")
+  [ -n "$parent_pane" ] && args+=(--parent-pane "$parent_pane")
+  printf '%s' "$text" | broker_cli "${args[@]}"
 }
 
 cmd_broker() {
@@ -882,21 +833,7 @@ cmd_broker() {
       ;;
     status)
       if broker_ping; then
-        python3 -c '
-import json, socket, sys
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(2)
-s.connect(sys.argv[1])
-s.sendall(b"{\"op\":\"status\"}\n")
-s.shutdown(socket.SHUT_WR)
-data = b""
-while True:
-    chunk = s.recv(65536)
-    if not chunk:
-        break
-    data += chunk
-sys.stdout.write(data.decode())
-' "$BROKER_SOCK"
+        broker_cli status
       else
         printf 'broker down sock=%s\n' "$BROKER_SOCK"
         return 1
@@ -932,8 +869,7 @@ send_one() {
   ensure_broker || die "broker unreachable (could not start muxa-broker)"
   broker_enqueue "$id" "$pane" "$from" "$to" "$text" || die "broker enqueue failed"
   if [ "${SEND_JSON:-0}" -eq 1 ]; then
-    python3 -c 'import json,sys; print(json.dumps({"id":sys.argv[1],"pane":sys.argv[2],"from":sys.argv[3],"to":sys.argv[4]}, separators=(",", ":"), ensure_ascii=False))' \
-      "$id" "$pane" "$from" "$to"
+    broker_cli json-object id "$id" pane "$pane" from "$from" to "$to"
   else
     printf 'queued %s → %s id=%s (broker)\n' "$from" "$to" "$id"
   fi
@@ -993,12 +929,7 @@ cmd_send() {
 $(roster_lines)
 EOF
     if [ "$json" -eq 1 ]; then
-      printf '%s' "$all_json" | python3 -c '
-import json, sys
-rows = [json.loads(line) for line in sys.stdin if line.strip()]
-json.dump(rows, sys.stdout, separators=(",", ":"), ensure_ascii=False)
-sys.stdout.write("\n")
-'
+      printf '%s' "$all_json" | broker_cli json-array
       return 0
     fi
     if [ "$n" -eq 0 ]; then
@@ -1113,19 +1044,14 @@ cmd_dispatch() {
   ensure_broker || die "broker unreachable (could not start muxa-broker)"
   broker_enqueue "$id" "$SPAWN_PANE" "$SPAWN_PARENT" "$SPAWN_NAME" "$text" "dispatch" "$parent_pane" \
     || die "broker enqueue failed"
-  python3 -c '
-import json, sys
-json.dump({
-    "name": sys.argv[1],
-    "id": sys.argv[2],
-    "pane": sys.argv[3],
-    "cwd": sys.argv[4],
-    "state": "dispatched",
-    "from": sys.argv[5],
-    "to": sys.argv[1],
-}, sys.stdout, separators=(",", ":"), ensure_ascii=False)
-sys.stdout.write("\n")
-' "$SPAWN_NAME" "$id" "$SPAWN_PANE" "$SPAWN_CWD" "$SPAWN_PARENT"
+  broker_cli json-object \
+    name "$SPAWN_NAME" \
+    id "$id" \
+    pane "$SPAWN_PANE" \
+    cwd "$SPAWN_CWD" \
+    state "dispatched" \
+    from "$SPAWN_PARENT" \
+    to "$SPAWN_NAME"
 }
 
 spawn_child() {

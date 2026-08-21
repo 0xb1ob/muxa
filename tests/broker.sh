@@ -246,25 +246,29 @@ case "$cap_u" in
   *"$tok_u"*) ok "second queued message arrives after pane is free" ;;
   *) bad "second queued message arrives after pane is free" "cap: $cap_u" ;;
 esac
-python3 -c '
-import sys
-cap, a, b = sys.argv[1], sys.argv[2], sys.argv[3]
-ia, ib = cap.find(a), cap.find(b)
-sys.exit(0 if ia >= 0 and ib >= 0 and ia < ib else 1)
-' "$cap_u" "$tok_t" "$tok_u" \
-  && ok "queued messages arrive in order, none clobbered" \
-  || bad "queued messages arrive in order, none clobbered" "cap: $cap_u"
+# bash-native: both tokens present and first before second
+pre_t="${cap_u%%"$tok_t"*}"
+pre_u="${cap_u%%"$tok_u"*}"
+if [ "$pre_t" != "$cap_u" ] && [ "$pre_u" != "$cap_u" ] && [ ${#pre_t} -lt ${#pre_u} ]; then
+  ok "queued messages arrive in order, none clobbered"
+else
+  bad "queued messages arrive in order, none clobbered" "cap: $cap_u"
+fi
 
 # --- dispatch: first brief after ready; never-ready fails to parent, not child ---
 tok_dsp="BRKDSP_$$"
 dsp_json="$(printf '%s\n' "$tok_dsp" | muxa_as "$parent_pane" dispatch --window --name dspkid -- bash -c "$prompt_loop")"
-python3 -c '
-import json, sys
-o = json.loads(sys.argv[1])
-assert o["state"] == "dispatched" and o["name"] == "dspkid" and o["pane"].startswith("%")
-' "$dsp_json" && ok "dispatch enqueues with JSON dispatched" \
-  || bad "dispatch enqueues with JSON dispatched" "got: $dsp_json"
-dsp_pane="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["pane"])' "$dsp_json")"
+if [ "$(printf '%s' "$dsp_json" | muxa-broker json-get state)" = "dispatched" ] \
+  && [ "$(printf '%s' "$dsp_json" | muxa-broker json-get name)" = "dspkid" ]; then
+  dsp_pane="$(printf '%s' "$dsp_json" | muxa-broker json-get pane)"
+  case "$dsp_pane" in
+    %*) ok "dispatch enqueues with JSON dispatched" ;;
+    *) bad "dispatch enqueues with JSON dispatched" "got: $dsp_json" ;;
+  esac
+else
+  bad "dispatch enqueues with JSON dispatched" "got: $dsp_json"
+  dsp_pane=""
+fi
 cap_dsp="$(wait_capture "$dsp_pane" "$tok_dsp" 50 || true)"
 case "$cap_dsp" in
   *"$tok_dsp"*) ok "dispatch pastes the brief once the child is ready" ;;
@@ -277,7 +281,7 @@ n_dsp="$(printf '%s\n' "$cap_dsp" | grep -c "$tok_dsp" || true)"
 tok_nr="BRKNR_$$"
 start_nr="$(date +%s)"
 nr_json="$(printf '%s\n' "$tok_nr" | muxa_as "$parent_pane" dispatch --window --name dspstuck -- sleep 3600)"
-nr_pane="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["pane"])' "$nr_json")"
+nr_pane="$(printf '%s' "$nr_json" | muxa-broker json-get pane)"
 cap_nr_parent="$(wait_capture "$parent_pane" "dispatch failed: dspstuck" 80 || true)"
 elapsed_nr=$(( $(date +%s) - start_nr ))
 case "$cap_nr_parent" in
@@ -368,11 +372,7 @@ composer_holds "F busy composer is not pasted over" busy "BRKFB_$$"
 # down, and require the queue to still have an owner that drains.
 muxa_as "$parent_pane" broker stop >/dev/null 2>&1 || true
 sleep 0.3
-python3 - "$ROOT/bin/muxa" <<'PY' >/dev/null 2>&1 || true
-import os, subprocess, sys
-subprocess.run([sys.argv[1], "broker", "start"], preexec_fn=os.setsid,
-               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-PY
+muxa_as "$parent_pane" broker start >/dev/null 2>&1 || true
 sleep 0.3
 daemon_pid="$(cat "$MUXA_BROKER_PID" 2>/dev/null || true)"
 if [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null; then
@@ -544,14 +544,8 @@ st_state="${st_state%"${st_state##*[![:space:]]}"}"
 [ "$st_state" = "busy" ] && ok "who STATE is busy for a pane emitting %output" \
   || bad "who STATE is busy for a pane emitting %output" "state=$st_state who=$who_tick"
 who_tickj="$(muxa_as "$parent_pane" who --json)"
-python3 -c '
-import json, sys
-rows = json.loads(sys.stdin.read())
-row = next((r for r in rows if r.get("name")=="ticker"), None)
-st = row.get("status") if row else None
-state = row.get("state") if row else None
-sys.exit(0 if st=="drawing" and state=="busy" else 1)
-' <<<"$who_tickj" \
+[ "$(printf '%s' "$who_tickj" | muxa-broker json-get ticker status)" = "drawing" ] \
+  && [ "$(printf '%s' "$who_tickj" | muxa-broker json-get ticker state)" = "busy" ] \
   && ok "who --json status is drawing and state is busy for a pane emitting %output" \
   || bad "who --json status is drawing and state is busy for a pane emitting %output" "json=$who_tickj"
 
