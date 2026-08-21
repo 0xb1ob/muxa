@@ -14,10 +14,13 @@ case "$(uname -s)" in
 esac
 # darwin 25+ aborts a test binary without LC_UUID; only the external linker emits it.
 "$GO" test "${ldflags[@]}" "$ROOT/broker"
-"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-broker" "$ROOT/broker"
+"$GO" test "${ldflags[@]}" "$ROOT/tests/jsonhelper"
+"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-test-json" "$ROOT/tests/jsonhelper"
 if [ "$(uname -s)" = Darwin ]; then
   xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true
   codesign -s - --force --timestamp=none "$ROOT/bin/muxa-broker" 2>/dev/null || true
+  xattr -c "$ROOT/bin/muxa-test-json" 2>/dev/null || true
+  codesign -s - --force --timestamp=none "$ROOT/bin/muxa-test-json" 2>/dev/null || true
 fi
 
 SOCK="muxabroker-$$"
@@ -268,9 +271,9 @@ fi
 # --- dispatch: first brief after ready; never-ready fails to parent, not child ---
 tok_dsp="BRKDSP_$$"
 dsp_json="$(printf '%s\n' "$tok_dsp" | muxa_as "$parent_pane" dispatch --window --name dspkid -- bash -c "$prompt_loop")"
-if [ "$(printf '%s' "$dsp_json" | muxa-broker json-get state)" = "dispatched" ] \
-  && [ "$(printf '%s' "$dsp_json" | muxa-broker json-get name)" = "dspkid" ]; then
-  dsp_pane="$(printf '%s' "$dsp_json" | muxa-broker json-get pane)"
+if [ "$(printf '%s' "$dsp_json" | muxa-test-json json-get state)" = "dispatched" ] \
+  && [ "$(printf '%s' "$dsp_json" | muxa-test-json json-get name)" = "dspkid" ]; then
+  dsp_pane="$(printf '%s' "$dsp_json" | muxa-test-json json-get pane)"
   case "$dsp_pane" in
     %*) ok "dispatch enqueues with JSON dispatched" ;;
     *) bad "dispatch enqueues with JSON dispatched" "got: $dsp_json" ;;
@@ -291,7 +294,7 @@ n_dsp="$(printf '%s\n' "$cap_dsp" | grep -c "$tok_dsp" || true)"
 tok_nr="BRKNR_$$"
 start_nr="$(date +%s)"
 nr_json="$(printf '%s\n' "$tok_nr" | muxa_as "$parent_pane" dispatch --window --name dspstuck -- sleep 3600)"
-nr_pane="$(printf '%s' "$nr_json" | muxa-broker json-get pane)"
+nr_pane="$(printf '%s' "$nr_json" | muxa-test-json json-get pane)"
 cap_nr_parent="$(wait_capture "$parent_pane" "dispatch failed: dspstuck" 80 || true)"
 elapsed_nr=$(( $(date +%s) - start_nr ))
 case "$cap_nr_parent" in
@@ -556,8 +559,8 @@ st_state="${st_state%"${st_state##*[![:space:]]}"}"
 [ "$st_state" = "busy" ] && ok "who STATE is busy for a pane emitting %output" \
   || bad "who STATE is busy for a pane emitting %output" "state=$st_state who=$who_tick"
 who_tickj="$(muxa_as "$parent_pane" who --json)"
-[ "$(printf '%s' "$who_tickj" | muxa-broker json-get ticker status)" = "drawing" ] \
-  && [ "$(printf '%s' "$who_tickj" | muxa-broker json-get ticker state)" = "busy" ] \
+[ "$(printf '%s' "$who_tickj" | muxa-test-json json-get ticker status)" = "drawing" ] \
+  && [ "$(printf '%s' "$who_tickj" | muxa-test-json json-get ticker state)" = "busy" ] \
   && ok "who --json status is drawing and state is busy for a pane emitting %output" \
   || bad "who --json status is drawing and state is busy for a pane emitting %output" "json=$who_tickj"
 

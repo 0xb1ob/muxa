@@ -20,8 +20,7 @@ func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "ping", "status", "drawing", "enqueue",
-			"json-object", "json-array", "who-json",
-			"json-type", "json-keys", "json-get", "json-values":
+			"json-object", "json-array", "who-json":
 			os.Exit(runCLI(os.Args[1:]))
 		}
 	}
