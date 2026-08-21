@@ -65,9 +65,9 @@ Spawn only the CLI and optional `--model`. Do not pass trust, yolo, skip-permiss
 
 The worker's cwd is already set — do not tell the worker to `cd` unless dispatch `cwd` was wrong.
 
-`muxa who` STATUS `ghost` means the CLI is gone or the pane cwd is missing (a `generic` shell is still `live`). Do not brief ghosts. `muxa kill NAME|ID` removes the pane so it is no longer on the roster.
+`muxa who` STATE `ghost` means the CLI is gone or the pane cwd is missing (a `generic` shell is still `idle`). Do not brief ghosts. `muxa kill NAME|ID` removes the pane so it is no longer on the roster.
 
-For a `ghost` STATUS or a child that looks stuck, inspect **once** with `muxa tail NAME` (`-n N` for the last N lines). Do not read the pane through tmux.
+For a `ghost` STATE or a child that looks stuck, inspect **once** with `muxa tail NAME` (`-n N` for the last N lines). Do not read the pane through tmux.
 
 ```bash
 muxa tail swift-oak

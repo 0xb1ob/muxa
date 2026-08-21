@@ -22,7 +22,7 @@ muxa — message other AI CLIs in this tmux server
                                 stdout: {"name","id","pane","cwd","state":"dispatched","from","to"}
                                 broker waits until the CLI has drawn, gone quiet, and looks free
                                 if it never becomes ready: [muxa] from=broker in the parent, child unbriefed
-  muxa who [--json]                 roster (tmux pane options, cwd, STATUS; STATE from broker drawing)
+  muxa who [--json]                 roster (tmux pane options, cwd, STATE: idle|busy|ghost)
   muxa whoami                       this pane's alias
   muxa kill NAME|ID                 remove the pane (gone from muxa who)
   muxa parent                       this pane's parent alias (empty if root)
@@ -124,25 +124,15 @@ pane_status() {
   printf 'live'
 }
 
-# Overlay control-mode drawing onto a live status. Ghost stays ghost: a
-# missing cwd is not "drawing". Occupancy still uses pane_status.
-pane_who_status() {
-  local st pane drawing
-  st="$(pane_status "$1" "$2" "$3")"
-  pane="$4"
-  drawing="$5"
-  if [ "$st" = "live" ] && [ -n "$pane" ]; then
-    case " $drawing " in
-      *" $pane "*) st=drawing ;;
-    esac
-  fi
-  printf '%s' "$st"
-}
-
-# STATE is the broker's drawing list, not a hook-written pane option.
-# drawing → busy; otherwise idle. blocked is gone: nothing observes it.
+# One roster field: ghost wins over drawing. Occupancy still uses
+# pane_status (live vs ghost) and does not talk to the broker.
+# busy = in the broker drawing list; idle = registered and not drawing.
 pane_who_state() {
-  local pane="$1" drawing="$2"
+  local kind="$1" cwd="$2" cmd="$3" pane="$4" drawing="$5"
+  if [ "$(pane_status "$kind" "$cwd" "$cmd")" = "ghost" ]; then
+    printf 'ghost'
+    return
+  fi
   case " $drawing " in
     *" $pane "*) printf 'busy' ;;
     *) printf 'idle' ;;
@@ -531,7 +521,7 @@ cmd_register() {
 cmd_who_json() {
   # who --json is tmux-only, but JSON encoding lives in muxa-broker (who-json).
   # The daemon socket is not used; the binary must still exist on disk.
-  local line kind cwd cmd status state pane drawing
+  local line kind cwd cmd state pane drawing
   drawing="$(broker_drawing_ids)"
   {
     while IFS= read -r line; do
@@ -540,9 +530,8 @@ cmd_who_json() {
       kind="$(printf '%s\n' "$line" | field 5)"
       cwd="$(printf '%s\n' "$line" | field 7)"
       cmd="$(printf '%s\n' "$line" | field 8)"
-      status="$(pane_who_status "$kind" "$cwd" "$cmd" "$pane" "$drawing")"
-      state="$(pane_who_state "$pane" "$drawing")"
-      printf '%s||%s||%s\n' "$line" "$status" "$state"
+      state="$(pane_who_state "$kind" "$cwd" "$cmd" "$pane" "$drawing")"
+      printf '%s||%s\n' "$line" "$state"
     done <<EOF
 $(roster_lines)
 EOF
@@ -563,9 +552,9 @@ cmd_who() {
     cmd_who_json
     return
   fi
-  printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-16s %s\n' \
-    NAME ID SESSION PARENT KIND STATE STATUS PANE WHERE CWD
-  local line kind cwd cmd status state name pane drawing
+  printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-16s %s\n' \
+    NAME ID SESSION PARENT KIND STATE PANE WHERE CWD
+  local line kind cwd cmd state name pane drawing
   drawing="$(broker_drawing_ids)"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -573,17 +562,15 @@ cmd_who() {
     kind="$(printf '%s\n' "$line" | field 5)"
     cwd="$(printf '%s\n' "$line" | field 7)"
     cmd="$(printf '%s\n' "$line" | field 8)"
-    status="$(pane_who_status "$kind" "$cwd" "$cmd" "$pane" "$drawing")"
-    state="$(pane_who_state "$pane" "$drawing")"
+    state="$(pane_who_state "$kind" "$cwd" "$cmd" "$pane" "$drawing")"
     name="$(printf '%s\n' "$line" | field 2)"
-    printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-8s %-16s %s\n' \
+    printf '%-16s %-14s %-36s %-16s %-8s %-8s %-8s %-16s %s\n' \
       "$name" \
       "$(printf '%s\n' "$line" | field 3)" \
       "" \
       "$(printf '%s\n' "$line" | field 4)" \
       "$kind" \
       "$state" \
-      "$status" \
       "$(printf '%s\n' "$line" | field 1)" \
       "$(printf '%s\n' "$line" | field 6)" \
       "$cwd"

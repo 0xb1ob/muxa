@@ -260,7 +260,7 @@ func cliWhoJSON() int {
 			continue
 		}
 		p := strings.Split(raw, "||")
-		for len(p) < 10 {
+		for len(p) < 9 {
 			p = append(p, "")
 		}
 		parent := any(p[3])
@@ -272,11 +272,10 @@ func cliWhoJSON() int {
 			"id":      p[2],
 			"parent":  parent,
 			"kind":    p[4],
-			"state":   p[9],
+			"state":   p[8],
 			"pane":    p[0],
 			"session": nil,
 			"cwd":     p[6],
-			"status":  p[8],
 		})
 	}
 	if rows == nil {
