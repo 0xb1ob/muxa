@@ -33,10 +33,14 @@ Only continue if `muxa parent` is empty (this pane is a root).
 
 ```bash
 muxa who
+muxa who --json
 muxa whoami
 muxa children
 muxa unregister <name|id>
+muxa tail <name>
+muxa tail <name> -n 40
 muxa send <name> <text>
+muxa send --json <name> <text>
 muxa send --no-reply <name> <text>
 muxa send --all <text>
 muxa spawn -- agent --model composer-2.5-fast
@@ -61,10 +65,10 @@ Brief immediately with `muxa send`. Do not leave a new pane unbriefed. The worke
 
 `muxa who` STATUS `ghost` means the CLI is gone or the pane cwd is missing (a `generic` shell is still `live`). Do not brief ghosts. `muxa unregister NAME|ID` clears muxa identity and leaves the pane.
 
-For a `ghost` STATUS or a child that looks stuck, inspect **once** with the pane id from `muxa who` (PANE column) or spawn stdout (`pane=`):
+For a `ghost` STATUS or a child that looks stuck, inspect **once** with `muxa tail NAME` (`-n N` for the last N lines). Do not read the pane through tmux.
 
 ```bash
-tmux capture-pane -pt %7
+muxa tail swift-oak
 ```
 
 Unknown means inspect — never assume idle or busy. One read, not a poll: do not loop it and do not `muxa peek`. Do not auto-restart a stuck worker; ask it, or ask the user.

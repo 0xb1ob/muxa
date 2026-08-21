@@ -43,7 +43,15 @@ Each participating pane sets tmux user options:
 Roster is `tmux list-panes -a`. There is no registry file. `muxa who`
 prints that roster plus each pane's current working directory and a
 **STATUS** column so agents on the same tmux server, in different
-projects, can tell which is which.
+projects, can tell which is which. `muxa who --json` is the same roster
+as objects (`name`, `id`, `parent`, `kind`, `state`, `pane`, `session`,
+`cwd`, `status`). Empty `parent` and `session` are JSON `null`. Default
+`muxa who` is unchanged.
+
+`muxa tail NAME [-n N]` is a one-shot pane read so a parent never has to
+call `tmux capture-pane`. With no `-n` it prints the visible grid; `-n N`
+prints the last N lines of history plus the visible grid, ignoring trailing
+blank rows. One read, never a poll. Unknown names exit 2.
 
 **STATUS** is informational only; ghosts are not filtered from the roster
 and remain reachable via `muxa send`:
@@ -258,7 +266,10 @@ turn.
 muxa send <name> <text…>
 muxa send --all <text…>
 muxa send --no-reply <name> <text…>
+muxa send --json <name> <text…>
 muxa who
+muxa who --json
+muxa tail <name> [-n N]
 muxa unregister <name|id>
 muxa whoami
 muxa id
@@ -269,8 +280,13 @@ muxa spawn [--name worker] [--cwd DIR] [--window] -- command…
 muxa broker [start|status|stop]
 ```
 
+`muxa send --json` prints `{"id","pane","from","to"}` (an array of those
+objects for `--all`) so a fire-and-forget caller can correlate a later
+failure turn with the enqueue. Human send output is unchanged without
+`--json`.
+
 Exit 0 on queued. Exit 2 if the name is unknown (including
-`muxa unregister`) or the broker cannot be started/enqueued. Exit 3 if not
+`muxa unregister` and `muxa tail`) or the broker cannot be started/enqueued. Exit 3 if not
 running under tmux when tmux is required. Exit 4 if the send is forbidden
 by reachability.
 
