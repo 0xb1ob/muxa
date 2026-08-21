@@ -281,12 +281,12 @@ func TestDaemonPrunesStaleQueueOnStartup(t *testing.T) {
 	for time.Now().Before(deadline) {
 		b, _ := os.ReadFile(logPath)
 		logs = string(b)
-		if strings.Contains(logs, "pruned 1 done, 1 failed/unknown") {
+		if strings.Contains(logs, "pruned 1 done, 1 failed") {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if !strings.Contains(logs, "pruned 1 done, 1 failed/unknown") {
+	if !strings.Contains(logs, "pruned 1 done, 1 failed") {
 		t.Fatalf("startup did not log prune pass:\n%s", logs)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "done", "stale.json")); !os.IsNotExist(err) {

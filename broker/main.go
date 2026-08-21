@@ -104,13 +104,13 @@ func main() {
 		sock, os.Getpid(), processGroup(), deadline, poll, quiet)
 	// A restart re-adopts whatever the previous owner had not delivered;
 	// say so, so "queued" with no "delivered" is never a silent hole.
-	if n, _, _, _, err := q.Counts(); err == nil && n > 0 {
+	if n, _, _, err := q.Counts(); err == nil && n > 0 {
 		log.Printf("re-adopted %d pending from %s", n, filepath.Join(dir, "pending"))
 	}
-	if doneN, failedN, unknownN, err := q.Prune(time.Now()); err != nil {
+	if doneN, failedN, err := q.Prune(time.Now()); err != nil {
 		log.Printf("queue prune failed: %v", err)
-	} else if doneN > 0 || failedN > 0 || unknownN > 0 {
-		log.Printf("pruned %d done, %d failed/unknown", doneN, failedN+unknownN)
+	} else if doneN > 0 || failedN > 0 {
+		log.Printf("pruned %d done, %d failed", doneN, failedN)
 	}
 
 	ch := make(chan os.Signal, 1)
@@ -123,7 +123,7 @@ func main() {
 	// files are durable, so nothing is lost either way — but it must be in
 	// the log, not inferred from an empty tail.
 	d.Tick()
-	if n, _, _, _, err := q.Counts(); err != nil {
+	if n, _, _, err := q.Counts(); err != nil {
 		log.Printf("shutdown signal=%s: queue count failed: %v", sig, err)
 	} else if n > 0 {
 		log.Printf("shutdown signal=%s: %d pending left in %s (re-adopted on next start)",

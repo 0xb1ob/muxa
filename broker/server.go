@@ -32,7 +32,6 @@ type Response struct {
 	Queued  int      `json:"queued,omitempty"`
 	Done    int      `json:"done,omitempty"`
 	Failed  int      `json:"failed,omitempty"`
-	Unknown int      `json:"unknown,omitempty"`
 	Socket  string   `json:"socket,omitempty"`
 	Drawing []string `json:"drawing,omitempty"`
 }
@@ -115,11 +114,11 @@ func (s *Server) dispatch(req Request) Response {
 	case "ping":
 		return Response{OK: true, State: "pong", PID: os.Getpid(), Socket: s.Sock}
 	case "status":
-		p, d, f, u, err := s.Q.Counts()
+		p, d, f, err := s.Q.Counts()
 		if err != nil {
 			return Response{OK: false, Error: err.Error()}
 		}
-		resp := Response{OK: true, PID: os.Getpid(), Queued: p, Done: d, Failed: f, Unknown: u, Socket: s.Sock}
+		resp := Response{OK: true, PID: os.Getpid(), Queued: p, Done: d, Failed: f, Socket: s.Sock}
 		if s.Drawing != nil {
 			resp.Drawing = s.Drawing()
 		}

@@ -50,9 +50,9 @@ The broker pastes with load-buffer + Enter when the target pane looks free.
 If the pane is mid-typing or drawing, the broker retries and leaves mail
 queued even after `MUXA_BROKER_DEADLINE` (default 10 minutes). It does not
 paste into a busy pane just because the clock ran out. After paste,
-`delivered` means the payload (or Cursor's `[Pasted text +N lines]`
-collapse) was visible; if the pane went busy without that, the message is
-filed `unknown/` and is not retried. If the
+`delivered` (filed `done/`, never retried) means the pane reacted — cursor
+row no longer empty/prompt, or drawing. If the pane stayed free, the
+message stays queued and may be retried. If the
 broker is down, `muxa send` exits non-zero and pastes nothing.
 
 The broker daemonizes itself with `setsid(2)` and owns its pidfile. That is

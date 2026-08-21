@@ -227,15 +227,14 @@ is how long a *dead* pane is retried before the message is failed; a live
 busy pane keeps its mail in `pending/` past that deadline. The broker MUST
 NOT timeout-fallback paste: two fallbacks into one busy composer overwrite
 each other, both get filed as `done/`, and the agent never sees the first.
-After a paste, confirmation has three outcomes: **delivered** (payload or
-Cursor's `[Pasted text +N lines]` collapse is visible), **pending-safe-retry**
-(pane still free — cursor row still empty/prompt),
-and **unknown-no-retry** (the pane went busy or started drawing but the
-payload is not in the visible grid — Cursor collapses long pastes and
-scrolls them off). Unknown MUST NOT retry: a duplicate first brief re-runs
-work. `delivered` is never recorded for an overwritten timeout paste. When
-the broker is down or the binary is missing, `muxa send` exits non-zero and
-pastes nothing.
+After a paste, confirmation has two outcomes, from one snapshot. **delivered**
+(filed `done/`, never retried): the pane reacted — cursor row no longer
+empty/prompt, or control-mode drawing. **pending-safe-retry**: the pane
+stayed free (cursor row still empty/prompt, not drawing). A pane that
+reacted MUST NOT be retried: a duplicate first brief re-runs work. The
+broker does not match the payload against pane captures. `delivered` is
+never recorded for an overwritten timeout paste. When the broker is down
+or the binary is missing, `muxa send` exits non-zero and pastes nothing.
 
 An implementation MUST NOT paste into a pane that is dead or that is in
 copy-mode (`#{pane_in_mode}`). Copy-mode is a silent-loss mode:
