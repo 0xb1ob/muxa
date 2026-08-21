@@ -46,15 +46,11 @@ func emptyAtCursor(capture string, cursorY, cursorX int) bool {
 	if cursorY >= len(lines) {
 		return false
 	}
-	cells := attrCells(lines[cursorY])
-	if cursorX > len(cells) {
-		cursorX = len(cells)
+	runes := visibleRunes(lines[cursorY])
+	if cursorX > len(runes) {
+		cursorX = len(runes)
 	}
-	var b strings.Builder
-	for _, c := range cells[:cursorX] {
-		b.WriteRune(c.r)
-	}
-	s := strings.TrimRightFunc(b.String(), unicode.IsSpace)
+	s := strings.TrimRightFunc(string(runes[:cursorX]), unicode.IsSpace)
 	if s == "" {
 		return true
 	}
