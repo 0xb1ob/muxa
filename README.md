@@ -168,7 +168,7 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 | `muxa spawn [--name NAME] [--cwd DIR] [--split] [--window] -- CMD` | Split a child pane into a tiled grid in the parent's window. Child cwd is `--cwd`, else process `$PWD`, else the parent pane path. Warns on stderr if a live worker already has that cwd (does not refuse). Omit `--name` for a unique `adjective-noun` alias. `--window` for a dedicated window; `--split` is compat |
 | `muxa dispatch [--name NAME] [--cwd DIR] [--brief-file F] -- CMD` | Spawn + first brief. Brief on stdin or `--brief-file`. stdout `{"name","id","pane","cwd","state":"dispatched","from","to"}`. Broker waits for drawn-then-quiet-and-free; never-ready mails `[muxa] from=broker` to the parent |
 | `muxa who` | Roster (name, id, session, parent, cwd, STATE, STATUS, …) |
-| `muxa who --json` | Same roster as objects (`parent`/`session` are `null` when empty; `state` is `idle`/`busy` from the broker drawing list) |
+| `muxa who --json` | Same roster as objects (`parent`/`session` are `null` when empty; `state` is `idle`/`busy` from the broker drawing list). Requires `muxa-broker` on disk: `bin/muxa` delegates JSON encoding to the broker CLI (`who-json`), not to a daemon RPC, but the binary must exist and be executable |
 | `muxa tail NAME [-n N]` | One-shot pane read (visible grid, or last N lines of history) |
 | `muxa unregister NAME\|ID` | Clear muxa registration; leave pane running |
 | `muxa kill NAME\|ID` | Remove the pane (`kill-pane`); gone from `muxa who` |
@@ -192,7 +192,8 @@ tests/e2e.sh          # live agent-CLI smoke (optional)
 Needs `tmux`. Broker tests also need Go 1.21+ (not required to install
 muxa). On darwin 25+, `go test` must use `-ldflags=-linkmode=external`
 (same LC_UUID requirement as the release broker build). Uses a private tmux
-socket, not your session.
+socket, not your session. Shell tests build a test-only `muxa-test-json`
+helper (`tests/jsonhelper/`); it is not installed.
 
 ## Environment
 

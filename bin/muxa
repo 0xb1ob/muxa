@@ -587,6 +587,8 @@ cmd_register() {
 }
 
 cmd_who_json() {
+  # who --json is tmux-only, but JSON encoding lives in muxa-broker (who-json).
+  # The daemon socket is not used; the binary must still exist on disk.
   local line kind cwd cmd status state pane drawing
   drawing="$(broker_drawing_ids)"
   {

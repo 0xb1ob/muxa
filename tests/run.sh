@@ -12,10 +12,13 @@ case "$(uname -s)" in
 esac
 # darwin 25+ aborts a test binary without LC_UUID; only the external linker emits it.
 "$GO" test "${ldflags[@]}" "$ROOT/broker"
-"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-broker" "$ROOT/broker"
+"$GO" test "${ldflags[@]}" "$ROOT/tests/jsonhelper"
+"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-test-json" "$ROOT/tests/jsonhelper"
 if [ "$(uname -s)" = Darwin ]; then
   xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true
   codesign -s - --force --timestamp=none "$ROOT/bin/muxa-broker" 2>/dev/null || true
+  xattr -c "$ROOT/bin/muxa-test-json" 2>/dev/null || true
+  codesign -s - --force --timestamp=none "$ROOT/bin/muxa-test-json" 2>/dev/null || true
 fi
 
 for skill in muxa-parent muxa-worker; do
@@ -99,20 +102,20 @@ same_dir() {
 }
 
 who_json_get() {
-  printf '%s' "$1" | muxa-broker json-get "$2" "$3"
+  printf '%s' "$1" | muxa-test-json json-get "$2" "$3"
 }
 
 who_json_is_null() {
   local rc
   set +e
-  printf '%s' "$1" | muxa-broker json-get "$2" "$3" >/dev/null
+  printf '%s' "$1" | muxa-test-json json-get "$2" "$3" >/dev/null
   rc=$?
   set -e
   [ "$rc" -eq 3 ]
 }
 
 json_get() {
-  printf '%s' "$1" | muxa-broker json-get "$2"
+  printf '%s' "$1" | muxa-test-json json-get "$2"
 }
 
 pyc="$(grep -c python3 "$ROOT/bin/muxa" || true)"
@@ -874,8 +877,8 @@ assert_contains "$who_hdr" "STATE" "who header has STATE"
 assert_contains "$who_hdr" "STATUS" "who header has STATUS"
 
 whoj="$(muxa_as "$bob_pane" who --json)"
-if [ "$(printf '%s' "$whoj" | muxa-broker json-type)" = "array" ] \
-  && printf '%s' "$whoj" | muxa-broker json-keys name id parent kind state pane session cwd status; then
+if [ "$(printf '%s' "$whoj" | muxa-test-json json-type)" = "array" ] \
+  && printf '%s' "$whoj" | muxa-test-json json-keys name id parent kind state pane session cwd status; then
   ok "who --json is an array of roster objects"
 else
   bad "who --json is an array of roster objects" "got: $whoj"
@@ -918,7 +921,7 @@ while IFS= read -r n; do
     shape_bad="${shape_bad}${n}.session!=null; "
   fi
 done <<EOF
-$(printf '%s' "$whoj" | muxa-broker json-values name)
+$(printf '%s' "$whoj" | muxa-test-json json-values name)
 EOF
 [ -z "$shape_bad" ] && ok "who --json fail-closed: state idle|busy, status live|drawing|ghost, session null" \
   || bad "who --json fail-closed: state idle|busy, status live|drawing|ghost, session null" "$shape_bad"
@@ -932,7 +935,7 @@ while IFS= read -r n; do
     if [ -n "$occ" ]; then occ="$occ,$n"; else occ="$n"; fi
   fi
 done <<EOF
-$(printf '%s' "$whoj" | muxa-broker json-values name)
+$(printf '%s' "$whoj" | muxa-test-json json-values name)
 EOF
 [ "$occ" = "projagent" ] && ok "who --json occupancy consumes cwd+status with no awk" \
   || bad "who --json occupancy consumes cwd+status with no awk" "got: $occ"
@@ -952,7 +955,7 @@ else
 fi
 
 jsent="$(muxa_as "$bob_pane" send --json carol json-body)"
-if printf '%s' "$jsent" | muxa-broker json-keys id pane from to \
+if printf '%s' "$jsent" | muxa-test-json json-keys id pane from to \
   && [ "$(json_get "$jsent" from)" = "bob" ] \
   && [ "$(json_get "$jsent" to)" = "carol" ]; then
   pane_js="$(json_get "$jsent" pane)"
@@ -983,7 +986,7 @@ esc_spawn="$(muxa_as "$bob_pane" spawn --window --name escrecv -- bash -c "$esc_
 esc_recv_pane="$(printf '%s\n' "$esc_spawn" | awk '{ sub(/^pane=/,"",$6); print $6 }')"
 sleep 0.4
 jsent_esc="$(muxa_as "$bob_pane" send --json escrecv "$body")"
-if printf '%s' "$jsent_esc" | muxa-broker json-keys id pane from to \
+if printf '%s' "$jsent_esc" | muxa-test-json json-keys id pane from to \
   && [ "$(json_get "$jsent_esc" to)" = "escrecv" ]; then
   ok "send --json stays valid when the body has quote, backslash, newline"
 else
@@ -1015,10 +1018,10 @@ case "$esc_cap" in
 esac
 
 allj="$(muxa_as "$bob_pane" send --json --all json-all-body)"
-all_tos="$(printf '%s' "$allj" | muxa-broker json-values to)"
-all_froms="$(printf '%s' "$allj" | muxa-broker json-values from)"
-if [ "$(printf '%s' "$allj" | muxa-broker json-type)" = "array" ] \
-  && printf '%s' "$allj" | muxa-broker json-keys id pane from to; then
+all_tos="$(printf '%s' "$allj" | muxa-test-json json-values to)"
+all_froms="$(printf '%s' "$allj" | muxa-test-json json-values from)"
+if [ "$(printf '%s' "$allj" | muxa-test-json json-type)" = "array" ] \
+  && printf '%s' "$allj" | muxa-test-json json-keys id pane from to; then
   case "$all_tos" in
     *carol*)
       case "$all_tos" in
@@ -1044,7 +1047,7 @@ nonej="$(muxa_as "$eve_pane" send --json --all json-none)"
 tok_disp="DISPJ_$$"
 disp_loop='while true; do printf "ready> "; read -r _ || break; done'
 disp_out="$(printf 'dispatch-body-%s\n' "$tok_disp" | muxa_as "$bob_pane" dispatch --window --name dispkid -- bash -c "$disp_loop")"
-if printf '%s' "$disp_out" | muxa-broker json-keys name id pane cwd state from to \
+if printf '%s' "$disp_out" | muxa-test-json json-keys name id pane cwd state from to \
   && [ "$(json_get "$disp_out" name)" = "dispkid" ] \
   && [ "$(json_get "$disp_out" to)" = "dispkid" ] \
   && [ "$(json_get "$disp_out" from)" = "bob" ] \
@@ -1269,7 +1272,7 @@ rc_unsigned=$?
 set -e
 export MUXA_BROKER_BIN="$saved_bin_sign"
 if [ "$rc_unsigned" -eq 0 ] \
-  && [ "$(printf '%s' "$who_unsigned" | muxa-broker json-type)" = "array" ]; then
+  && [ "$(printf '%s' "$who_unsigned" | muxa-test-json json-type)" = "array" ]; then
   ok "who --json RPC works through an unsigned source broker (isolated daemon untouched)"
 else
   bad "who --json RPC works through an unsigned source broker (isolated daemon untouched)" \
@@ -1311,8 +1314,8 @@ nobr_path="$ROOT/bin:$nobr_bin:/usr/bin:/bin"
 who_nobr="$(PATH="$nobr_path" muxa_as "$bob_pane" who)"
 assert_contains "$who_nobr" "bob" "who works with br absent from PATH"
 whoj_nopy="$(PATH="$nobr_path" muxa_as "$bob_pane" who --json)"
-if [ "$(printf '%s' "$whoj_nopy" | PATH="$nobr_path" muxa-broker json-type)" = "array" ] \
-  && printf '%s' "$whoj_nopy" | PATH="$nobr_path" muxa-broker json-keys name id parent kind state pane session cwd status; then
+if [ "$(printf '%s' "$whoj_nopy" | PATH="$nobr_path" muxa-test-json json-type)" = "array" ] \
+  && printf '%s' "$whoj_nopy" | PATH="$nobr_path" muxa-test-json json-keys name id parent kind state pane session cwd status; then
   ok "who --json works when python3 would fail if invoked"
 else
   bad "who --json works when python3 would fail if invoked" "got: $whoj_nopy"

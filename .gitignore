@@ -4,4 +4,6 @@ node_modules/
 .lavish/
 .muxa-e2e-artifacts/
 bin/muxa-broker
+bin/muxa-test-json
+tests/fixtures/composer/*-harvest.*
 .beads/

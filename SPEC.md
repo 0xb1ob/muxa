@@ -45,6 +45,12 @@ which. `muxa who --json` is the same roster as objects (`name`, `id`,
 `parent` is JSON `null`. `session` is always JSON `null` (CLI conversation
 ids are not tracked). Default `muxa who` has no DELIVER column.
 
+`who --json` reads tmux pane options only; it does not talk to the broker
+daemon. It still requires the `muxa-broker` binary: `bin/muxa` pipes roster
+rows to the broker CLI subcommand `who-json` for encoding (same helper used
+by `send --json`). Install always ships that binary; command-post occupancy
+checks therefore depend on it being present even though no socket RPC occurs.
+
 `muxa tail NAME [-n N]` is a one-shot pane read so a parent never has to
 call `tmux capture-pane`. With no `-n` it prints the visible grid; `-n N`
 prints the last N lines of history plus the visible grid, ignoring trailing
