@@ -84,6 +84,19 @@ func TestWhoJSONShapeAndNulls(t *testing.T) {
 	if rows[1]["parent"] != nil || rows[1]["session"] != nil {
 		t.Fatalf("bob: %+v", rows[1])
 	}
+	for _, row := range rows {
+		st, _ := row["state"].(string)
+		if st != "idle" && st != "busy" {
+			t.Fatalf("state must be idle|busy, not %q (blocked is gone)", st)
+		}
+		status, _ := row["status"].(string)
+		if status != "live" && status != "drawing" && status != "ghost" {
+			t.Fatalf("status must be live|drawing|ghost, not %q", status)
+		}
+		if row["session"] != nil {
+			t.Fatalf("session must be null: %+v", row)
+		}
+	}
 }
 
 func TestWhoJSONEscapesCwd(t *testing.T) {
