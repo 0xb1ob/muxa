@@ -1142,6 +1142,21 @@ spawn_child() {
   if [ -n "${MUXA_BIN:-}" ]; then
     envcmd="$envcmd MUXA_BIN=$(shlex_join "$MUXA_BIN")"
   fi
+  if [ -n "${MUXA_BROKER_DIR:-}" ]; then
+    envcmd="$envcmd MUXA_BROKER_DIR=$(shlex_join "$MUXA_BROKER_DIR")"
+  fi
+  if [ -n "${MUXA_BROKER_SOCK:-}" ]; then
+    envcmd="$envcmd MUXA_BROKER_SOCK=$(shlex_join "$MUXA_BROKER_SOCK")"
+  fi
+  if [ -n "${MUXA_BROKER_PID:-}" ]; then
+    envcmd="$envcmd MUXA_BROKER_PID=$(shlex_join "$MUXA_BROKER_PID")"
+  fi
+  if [ -n "${MUXA_BROKER_BIN:-}" ]; then
+    envcmd="$envcmd MUXA_BROKER_BIN=$(shlex_join "$MUXA_BROKER_BIN")"
+  fi
+  if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    envcmd="$envcmd XDG_RUNTIME_DIR=$(shlex_join "$XDG_RUNTIME_DIR")"
+  fi
   local spawn_tmux="tmux"
   if [ -n "${MUXA_TMUX_SOCKET:-}" ]; then
     envcmd="$envcmd MUXA_TMUX_SOCKET=$(shlex_join "$MUXA_TMUX_SOCKET")"

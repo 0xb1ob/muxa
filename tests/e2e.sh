@@ -20,6 +20,17 @@ OMP_BIN="${OMP_BIN:-$(command -v omp)}"
 PANE_PATH="$ROOT/bin:/Users/mbaranovski/.local/bin:/Users/mbaranovski/.bun/bin:/opt/homebrew/bin:/usr/bin:/bin"
 PATH="$ROOT/bin:$PATH"
 export MUXA_BIN="$ROOT/bin/muxa"
+GO="${GO:-/usr/local/go/bin/go}"
+command -v "$GO" >/dev/null 2>&1 || GO="$(command -v go)"
+ldflags=()
+case "$(uname -s)" in
+  Darwin) ldflags=(-ldflags=-linkmode=external) ;;
+esac
+"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-broker" "$ROOT/broker"
+if [ "$(uname -s)" = Darwin ]; then
+  xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true
+  codesign -s - --force --timestamp=none "$ROOT/bin/muxa-broker" 2>/dev/null || true
+fi
 SOCK="muxae2e$$"
 SESSION="muxae2e"
 ART="${MUXA_E2E_ART:-$ROOT/.muxa-e2e-artifacts}"
@@ -27,10 +38,23 @@ HOOK_LOG="$ART/hooks.log"
 TOKEN="E2E_$(date +%s)_$$"
 BOOT_S="${MUXA_E2E_BOOT_S:-90}"
 HOP_S="${MUXA_E2E_HOP_S:-120}"
+tmpdir="$(mktemp -d /tmp/muxa-e2e.XXXXXX)"
 export MUXA_TMUX_SOCKET="$SOCK"
 export MUXA_ENTER_DELAY="${MUXA_ENTER_DELAY:-0.4}"
 export MUXA_HOOK_LOG="$HOOK_LOG"
-unset TMUX || true
+export MUXA_BROKER=1
+export MUXA_BROKER_DIR="$tmpdir/broker"
+export MUXA_BROKER_SOCK="$tmpdir/broker/broker.sock"
+export MUXA_BROKER_PID="$tmpdir/broker/broker.pid"
+export MUXA_BROKER_BIN="$ROOT/bin/muxa-broker"
+export XDG_RUNTIME_DIR="$tmpdir/run"
+mkdir -p "$tmpdir/run" "$tmpdir/broker"
+# Do not inherit the operator mailbox or this worker's identity.
+unset TMUX MUXA_NAME MUXA_PARENT MUXA_ID MUXA_HOME || true
+case "$MUXA_BROKER_DIR" in
+  "$tmpdir"/*) ;;
+  *) echo "tests/e2e.sh: MUXA_BROKER_DIR must be under $tmpdir" >&2; exit 1 ;;
+esac
 
 pass=0
 fail=0
@@ -38,7 +62,17 @@ mkdir -p "$ART"
 : >"$HOOK_LOG"
 
 cleanup() {
+  # Fail closed: never SIGTERM a pidfile outside this run's tmpdir
+  # (that would be the operator daemon on /tmp/muxa-UID/...).
+  case "${MUXA_BROKER_PID:-}" in
+    "$tmpdir"/*)
+      if [ -f "$MUXA_BROKER_PID" ]; then
+        kill "$(cat "$MUXA_BROKER_PID")" 2>/dev/null || true
+      fi
+      ;;
+  esac
   tmux -L "$SOCK" kill-server 2>/dev/null || true
+  rm -rf "$tmpdir"
 }
 trap cleanup EXIT
 
@@ -157,8 +191,11 @@ sys.exit(1)
 
 wait_pane_has() {
   local target="$1" needle="$2" seconds="$3" i=0
+  # Composer wraps long tokens and indents continuation lines.
+  local compact
+  compact="$(printf '%s' "$needle" | tr -d '[:space:]')"
   while [ "$i" -lt "$seconds" ]; do
-    if pane_text "$target" | grep -Fq "$needle"; then
+    if pane_text "$target" | tr -d '[:space:]' | grep -Fq "$compact"; then
       return 0
     fi
     sleep 1
@@ -177,7 +214,7 @@ muxa_as() {
 tmux_e new-session -d -s "$SESSION" -n ctl "exec sleep 3600"
 tmux_e set-option -t "$SESSION" remain-on-exit on
 tmux_e new-window -t "$SESSION" -n claude \
-  "cd '$ROOT' && export PATH='$PANE_PATH' MUXA_BIN='$MUXA_BIN' MUXA_HOOK_LOG='$HOOK_LOG' MUXA_NAME=claude && exec '$CLAUDE_BIN' --dangerously-skip-permissions --model haiku"
+  "cd '$ROOT' && export PATH='$PANE_PATH' MUXA_BIN='$MUXA_BIN' MUXA_HOOK_LOG='$HOOK_LOG' MUXA_NAME=claude MUXA_TMUX_SOCKET='$SOCK' MUXA_BROKER=1 MUXA_BROKER_DIR='$MUXA_BROKER_DIR' MUXA_BROKER_SOCK='$MUXA_BROKER_SOCK' MUXA_BROKER_PID='$MUXA_BROKER_PID' MUXA_BROKER_BIN='$MUXA_BROKER_BIN' XDG_RUNTIME_DIR='$XDG_RUNTIME_DIR' && exec '$CLAUDE_BIN' --dangerously-skip-permissions --model haiku"
 sleep 1
 
 if ! tmux_e has-session -t "$SESSION" 2>/dev/null; then
