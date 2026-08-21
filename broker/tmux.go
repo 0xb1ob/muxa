@@ -24,12 +24,7 @@ func NewTMUX() *TMUX {
 	if bin == "" {
 		bin = "tmux"
 	}
-	delay := 150 * time.Millisecond
-	if v := os.Getenv("MUXA_ENTER_DELAY"); v != "" {
-		if d, err := time.ParseDuration(v + "s"); err == nil {
-			delay = d
-		}
-	}
+	delay := enterDelayFromEnv()
 	t := &TMUX{Bin: bin, Socket: os.Getenv("MUXA_TMUX_SOCKET"), Delay: delay}
 	t.Run = t.exec
 	return t
@@ -100,6 +95,33 @@ func (t *TMUX) Snapshot(pane string) (Snapshot, error) {
 	return Snapshot{Capture: cap, CursorY: y, CursorX: x}, nil
 }
 
+func enterDelayFromEnv() time.Duration {
+	const defaultDelay = 400 * time.Millisecond
+	v := os.Getenv("MUXA_ENTER_DELAY")
+	if v == "" {
+		return defaultDelay
+	}
+	if d, err := time.ParseDuration(v); err == nil {
+		return d
+	}
+	// Legacy: bare decimal seconds (tests/run.sh uses "0.05").
+	if d, err := time.ParseDuration(v + "s"); err == nil {
+		return d
+	}
+	return defaultDelay
+}
+
+func (t *TMUX) SubmitEnter(pane string) error {
+	time.Sleep(t.Delay)
+	if _, err := t.Run([]string{"send-keys", "-t", pane, "Enter"}, nil); err != nil {
+		return fmt.Errorf("send-keys: %w", err)
+	}
+	if t.PaneDead(pane) {
+		return fmt.Errorf("pane %s died during enter", pane)
+	}
+	return nil
+}
+
 func (t *TMUX) Inject(pane, text string) error {
 	buf := fmt.Sprintf("muxa-broker-%d", time.Now().UnixNano())
 	if _, err := t.Run([]string{"load-buffer", "-b", buf, "-"}, []byte(text)); err != nil {
@@ -109,14 +131,7 @@ func (t *TMUX) Inject(pane, text string) error {
 		_, _ = t.Run([]string{"delete-buffer", "-b", buf}, nil)
 		return fmt.Errorf("paste-buffer: %w", err)
 	}
-	time.Sleep(t.Delay)
-	if _, err := t.Run([]string{"send-keys", "-t", pane, "Enter"}, nil); err != nil {
-		return fmt.Errorf("send-keys: %w", err)
-	}
-	if t.PaneDead(pane) {
-		return fmt.Errorf("pane %s died during inject", pane)
-	}
-	return nil
+	return t.SubmitEnter(pane)
 }
 
 // CaptureHistory is the visible grid plus scrollback. Confirmation may find a

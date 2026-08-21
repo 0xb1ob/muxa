@@ -132,17 +132,32 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		log.Printf("inject %s: %v", m.ID, err)
 		return
 	}
-	switch d.confirm(m) {
-	case confirmLanded:
-		d.notePaste(m)
-		log.Printf("delivered %s → %s id=%s", m.From, m.To, m.ID)
-		_ = d.Q.MarkDone(m)
-	case confirmUnknown:
-		d.notePaste(m)
-		log.Printf("unknown %s → %s id=%s (paste accepted but payload not visible; will not retry)", m.From, m.To, m.ID)
-		_ = d.Q.MarkUnknown(m)
-	default:
-		log.Printf("unconfirmed %s → %s id=%s (pane still free; left queued)", m.From, m.To, m.ID)
+	for enterTry := 0; ; enterTry++ {
+		switch d.confirm(m) {
+		case confirmLanded:
+			d.notePaste(m)
+			log.Printf("delivered %s → %s id=%s", m.From, m.To, m.ID)
+			_ = d.Q.MarkDone(m)
+			return
+		case confirmUnknown:
+			d.notePaste(m)
+			log.Printf("unknown %s → %s id=%s (paste accepted but payload not visible; will not retry)", m.From, m.To, m.ID)
+			_ = d.Q.MarkUnknown(m)
+			return
+		case confirmNeedsEnter:
+			if enterTry >= maxEnterRetries {
+				log.Printf("unconfirmed %s → %s id=%s (collapsed paste still idle after enter retries; left queued)", m.From, m.To, m.ID)
+				return
+			}
+			if err := d.T.SubmitEnter(m.Pane); err != nil {
+				log.Printf("enter %s: %v", m.ID, err)
+				return
+			}
+			continue
+		default:
+			log.Printf("unconfirmed %s → %s id=%s (pane still free; left queued)", m.From, m.To, m.ID)
+			return
+		}
 	}
 }
 
@@ -259,16 +274,20 @@ func visibleContent(capture string) bool {
 type confirmResult int
 
 const (
-	confirmMissed  confirmResult = iota // still free, payload absent — safe to retry
-	confirmLanded                       // payload or paste-collapse visible
-	confirmUnknown                      // pane reacted; must not retry
+	confirmMissed     confirmResult = iota // still free, payload absent — safe to retry
+	confirmLanded                          // payload or paste-collapse visible
+	confirmUnknown                         // pane reacted; must not retry
+	confirmNeedsEnter                      // collapsed paste visible but composer still idle
 )
+
+const maxEnterRetries = 3
 
 func (d *Deliverer) confirm(m *Msg) confirmResult {
 	needle := confirmNeedle(m.Text)
 	var last string
 	var lastY, lastX int
-	for i := 0; i < 3; i++ {
+	sawCollapsed := false
+	for i := 0; i < 5; i++ {
 		snap, err := d.T.Snapshot(m.Pane)
 		if err == nil {
 			last = snap.Capture
@@ -277,19 +296,22 @@ func (d *Deliverer) confirm(m *Msg) confirmResult {
 				return confirmLanded
 			}
 			if pasteCollapsed(last) {
-				return confirmLanded
+				sawCollapsed = true
 			}
 		}
-		if i < 2 {
+		if i < 4 {
 			time.Sleep(50 * time.Millisecond)
 		}
+	}
+	if sawCollapsed {
+		return d.collapsedPasteConfirm(m.Pane, last, lastY, lastX)
 	}
 	if hist, err := d.T.CaptureHistory(m.Pane); err == nil {
 		if needle != "" && landed(hist, needle) {
 			return confirmLanded
 		}
 		if pasteCollapsed(hist) {
-			return confirmLanded
+			return d.collapsedPasteConfirm(m.Pane, hist, lastY, lastX)
 		}
 	}
 	// unknown-no-retry: the pane reacted (cursor row no longer empty/prompt)
@@ -331,6 +353,27 @@ func landed(capture, needle string) bool {
 func pasteCollapsed(capture string) bool {
 	s := stripANSI(capture)
 	return strings.Contains(s, "[Pasted text") || strings.Contains(s, "Pasted text +")
+}
+
+// collapsedPasteConfirm treats Cursor's paste placeholder as delivered only when
+// the pane has reacted. A stable collapsed placeholder on an empty cursor row
+// means the paste landed but Enter did not submit (muxa#79).
+func (d *Deliverer) collapsedPasteConfirm(pane, capture string, cursorY, cursorX int) confirmResult {
+	if d.drawing(pane) {
+		return confirmLanded
+	}
+	if !pasteCollapsed(capture) || !emptyAtCursor(capture, cursorY, cursorX) {
+		return confirmLanded
+	}
+	snap2, err := d.T.Snapshot(pane)
+	if err != nil {
+		return confirmLanded
+	}
+	if snap2.Capture == capture &&
+		emptyAtCursor(snap2.Capture, snap2.CursorY, snap2.CursorX) {
+		return confirmNeedsEnter
+	}
+	return confirmLanded
 }
 
 func (d *Deliverer) pasteIDs() []string {

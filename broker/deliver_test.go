@@ -16,10 +16,12 @@ type fakeTMUX struct {
 	captures []string
 	capI     int
 	injects  []string
+	enters   int
 	failInj  bool
 	echo     string
 	hideEcho bool
 	lastCap  string
+	cursor   string // optional "#{cursor_y} #{cursor_x}" override
 }
 
 func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
@@ -43,6 +45,9 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 			}
 			return "0", nil
 		case "#{cursor_y} #{cursor_x}":
+			if f.cursor != "" {
+				return f.cursor, nil
+			}
 			return fakeCursorPos(f.lastCap), nil
 		}
 		return "0", nil
@@ -62,6 +67,11 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 			}
 		}
 		f.lastCap = s
+		if pasteCollapsed(stripANSI(s)) {
+			f.cursor = "1 0"
+		} else {
+			f.cursor = ""
+		}
 		return s, nil
 	case "load-buffer":
 		if f.failInj {
@@ -76,6 +86,7 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 		}
 		return "", nil
 	case "send-keys":
+		f.enters++
 		return "", nil
 	case "delete-buffer":
 		return "", nil
@@ -114,6 +125,12 @@ func (f *fakeTMUX) injectCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.injects)
+}
+
+func (f *fakeTMUX) enterCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.enters
 }
 
 func (f *fakeTMUX) lastInject() string {
@@ -375,7 +392,7 @@ func TestDispatchDeadlineNotifiesParentNotChild(t *testing.T) {
 func TestCursorCollapsedPasteIsDelivered(t *testing.T) {
 	dir := t.TempDir()
 	q, _ := OpenQueue(dir)
-	f := &fakeTMUX{captures: []string{"ready>", "[Pasted text +48 lines]"}, hideEcho: true}
+	f := &fakeTMUX{captures: []string{"ready>", "[Pasted text +48 lines]", "working..."}, hideEcho: true}
 	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
 	d.now = func() time.Time { return time.Unix(1000, 0) }
 	_ = q.Put(&Msg{
@@ -393,6 +410,36 @@ func TestCursorCollapsedPasteIsDelivered(t *testing.T) {
 	d.Tick()
 	if f.injectCount() != 1 {
 		t.Fatalf("retried a collapsed Cursor paste: %d", f.injectCount())
+	}
+}
+
+func TestCollapsedPasteIdleRetriesEnter(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	// Cursor Agent: collapsed paste in the composer, hardware cursor on the
+	// empty row below (muxa#44 hole).
+	collapsed := "[Pasted text #1 +48 lines]\n"
+	f := &fakeTMUX{
+		captures: []string{"ready>", collapsed},
+		hideEcho: true,
+	}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	_ = q.Put(&Msg{
+		ID: "e1", Pane: "%1", From: "parent", To: "kid",
+		Text:         "[muxa] from=parent\nLong brief Cursor collapses.\n",
+		DeadlineUnix: 2000, Kind: kindDispatch, ParentPane: "%2",
+	})
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("want 1 paste, got %d", f.injectCount())
+	}
+	wantEnters := 1 + maxEnterRetries
+	if got := f.enterCount(); got != wantEnters {
+		t.Fatalf("enter retries: got %d want %d", got, wantEnters)
+	}
+	if p, doneN, failed, unknown, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 || unknown != 0 {
+		t.Fatalf("idle collapsed paste pending=%d done=%d failed=%d unknown=%d", p, doneN, failed, unknown)
 	}
 }
 
