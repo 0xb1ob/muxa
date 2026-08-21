@@ -629,6 +629,102 @@ who_kind="$(muxa_as "$bob_pane" who)"
   || bad "who KIND matches cursor foreground after leftover hook" \
      "got=$(who_kind_for "$who_kind" "kind-agent")"
 
+# Cursor IDE: pane_pid stays a shell; foreground child is node whose argv
+# contains cursor-agent. pane_pid argv must not mention cursor-agent, or
+# looking only at #{pane_pid} would hide the regression.
+printf '%s\n' "$kind_fakebin/cursor-agent/node" > "$kind_fakebin/ide-child-path"
+cat > "$kind_fakebin/ide-shell" <<'EOF'
+#!/bin/sh
+dir=$(dirname "$0")
+child=$(cat "$dir/ide-child-path")
+"$child"
+while sleep 3600; do :; done
+EOF
+chmod +x "$kind_fakebin/ide-shell"
+
+wait_cursor_child() {
+  local pane="$1" pid tries=0
+  pid="$(tmux -L "$SOCK" display-message -t "$pane" -p '#{pane_pid}')"
+  while [ "$tries" -lt 50 ]; do
+    if ps -ax -o pid=,ppid=,args= 2>/dev/null | awk -v root="$pid" '
+      BEGIN { p[root] = 1 }
+      {
+        if (p[$2]) {
+          p[$1] = 1
+          if ($0 ~ /cursor-agent/) found = 1
+        }
+      }
+      END { exit found ? 0 : 1 }
+    '; then
+      return 0
+    fi
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  return 1
+}
+
+tmux -L "$SOCK" new-window -t muxa -n kindide "$kind_fakebin/ide-shell"
+sleep 0.2
+kindide_pane="$(tmux -L "$SOCK" list-panes -t muxa:kindide -F '#{pane_id}' | head -1)"
+wait_cursor_child "$kindide_pane" \
+  && ok "Cursor IDE stub child is running before SessionStart" \
+  || bad "Cursor IDE stub child is running before SessionStart" "no cursor-agent child of pane_pid"
+kindide_pid="$(tmux -L "$SOCK" display-message -t "$kindide_pane" -p '#{pane_pid}')"
+kindide_pid_args="$(ps -p "$kindide_pid" -o args= 2>/dev/null | head -1)"
+case "$kindide_pid_args" in
+  *cursor-agent*)
+    bad "ide-shell pane_pid argv has no cursor-agent" "args=$kindide_pid_args"
+    ;;
+  *) ok "ide-shell pane_pid argv has no cursor-agent" ;;
+esac
+kindide_cmd="$(tmux -L "$SOCK" display-message -t "$kindide_pane" -p '#{pane_current_command}')"
+case "$kindide_cmd" in
+  node|sh|ide-shell|sleep)
+    ok "Cursor IDE stub foreground is $kindide_cmd"
+    ;;
+  *)
+    ok "Cursor IDE stub foreground is $kindide_cmd (tree still classifies)"
+    ;;
+esac
+muxa_as "$kindide_pane" hook session-start --kind claude >/dev/null
+kindide_kind="$(tmux -L "$SOCK" display-message -t "$kindide_pane" -p '#{@muxa_kind}')"
+[ "$kindide_kind" = "cursor" ] \
+  && ok "cmd=node Cursor IDE survives claude SessionStart" \
+  || bad "cmd=node Cursor IDE survives claude SessionStart" "got=$kindide_kind"
+kindide_name="$(tmux -L "$SOCK" display-message -t "$kindide_pane" -p '#{@muxa_name}')"
+who_json="$(muxa_as "$bob_pane" who --json)"
+kindide_json_kind="$(who_json_get "$who_json" "$kindide_name" kind)"
+[ "$kindide_json_kind" = "cursor" ] \
+  && ok "who --json kind stays cursor after claude SessionStart" \
+  || bad "who --json kind stays cursor after claude SessionStart" \
+     "got=$kindide_json_kind name=$kindide_name"
+muxa_as "$kindide_pane" hook session-start --kind claude >/dev/null
+kindide_kind2="$(tmux -L "$SOCK" display-message -t "$kindide_pane" -p '#{@muxa_kind}')"
+[ "$kindide_kind2" = "cursor" ] && [ "$kindide_name" = "$(tmux -L "$SOCK" display-message -t "$kindide_pane" -p '#{@muxa_name}')" ] \
+  && ok "second claude SessionStart does not rename or flip Cursor IDE" \
+  || bad "second claude SessionStart does not rename or flip Cursor IDE" \
+     "kind=$kindide_kind2"
+
+tmux -L "$SOCK" new-window -t muxa -n kindide2 "$kind_fakebin/ide-shell"
+sleep 0.2
+kindide2_pane="$(tmux -L "$SOCK" list-panes -t muxa:kindide2 -F '#{pane_id}' | head -1)"
+wait_cursor_child "$kindide2_pane" \
+  && ok "kind-ide2 child is running before register" \
+  || bad "kind-ide2 child is running before register" "no cursor-agent child of pane_pid"
+muxa_as "$kindide2_pane" register --name kind-ide2 >/dev/null
+kindide2_kind="$(tmux -L "$SOCK" display-message -t "$kindide2_pane" -p '#{@muxa_kind}')"
+[ "$kindide2_kind" = "cursor" ] \
+  && ok "register detects cursor from node child under a shell pane_pid" \
+  || bad "register detects cursor from node child under a shell pane_pid" \
+     "got=$kindide2_kind"
+muxa_as "$kindide2_pane" hook session-start --kind claude >/dev/null
+kindide2_kind="$(tmux -L "$SOCK" display-message -t "$kindide2_pane" -p '#{@muxa_kind}')"
+[ "$kindide2_kind" = "cursor" ] \
+  && ok "registered Cursor IDE kind stays cursor after claude SessionStart" \
+  || bad "registered Cursor IDE kind stays cursor after claude SessionStart" \
+     "got=$kindide2_kind"
+
 mkdir -p "$kind_fakebin/has-component" "$kind_fakebin/docker-compose"
 cat > "$kind_fakebin/has-component/run" <<'EOF'
 #!/bin/sh
