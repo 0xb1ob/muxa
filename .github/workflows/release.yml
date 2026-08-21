@@ -6,8 +6,6 @@ name: Release binaries
 # Backfill an existing tag: gh workflow run release.yml -f tag=1.0.1
 
 on:
-  push:
-    tags: ["*"]
   release:
     types: [published]
   workflow_dispatch:
