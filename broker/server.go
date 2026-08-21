@@ -40,7 +40,16 @@ type Server struct {
 	ln       net.Listener
 }
 
+// sunPathMax is the smallest sockaddr_un.sun_path across the platforms we
+// run on (104 on darwin, 108 on linux). Past it the kernel answers "invalid
+// argument", which reads like a bug in the caller rather than a long path.
+const sunPathMax = 104
+
 func (s *Server) Listen() error {
+	if len(s.Sock) >= sunPathMax {
+		return fmt.Errorf("socket path is %d bytes, limit is %d: %s (set MUXA_BROKER_SOCK to something shorter)",
+			len(s.Sock), sunPathMax-1, s.Sock)
+	}
 	if err := os.Remove(s.Sock); err != nil && !os.IsNotExist(err) {
 		return err
 	}

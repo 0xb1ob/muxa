@@ -98,6 +98,25 @@ wait_capture() {
   return 1
 }
 
+# Wait until the pane stops changing. Inject pastes, waits MUXA_ENTER_DELAY,
+# then sends Enter — so wait_capture returns while that Enter is still in
+# flight. Typing straight after it races the Enter, the test's own keystrokes
+# get submitted, and "held while typed" fails for a reason that has nothing to
+# do with the broker. Two identical captures mean the Enter has landed.
+settle() {
+  local pane="$1" prev="" cur i=0
+  while [ "$i" -lt 40 ]; do
+    cur="$(tmux -L "$SOCK" capture-pane -p -t "$pane" 2>/dev/null || true)"
+    if [ "$i" -gt 0 ] && [ "$cur" = "$prev" ]; then
+      return 0
+    fi
+    prev="$cur"
+    sleep 0.15
+    i=$((i + 1))
+  done
+  return 0
+}
+
 dump_cap() {
   local pane="$1" label="$2"
   {
@@ -125,6 +144,7 @@ kw="$(tmux -L "$SOCK" display-message -t "$child_pane" -p '#{@muxa_kick_wait}')"
 # B
 tok_b="E2E_B_WAIT_$$"
 log "=== B non-empty input then clear ==="
+settle "$child_pane"
 log "\$ tmux send-keys -t $child_pane 'TYPED'"
 tmux -L "$SOCK" send-keys -t "$child_pane" "TYPED"
 sleep 0.15
@@ -181,7 +201,11 @@ case "$cap_c" in *"$tok_c"*) bad "C nothing pasted" "$cap_c" ;; *) ok "C nothing
 
 # Confirm live ~/.muxa / default runtime did not handle tokens
 log "=== isolation: operator mailbox must not contain tokens ==="
-op_hits="$(grep -R -l -E "E2E_[ABCD]_" "$HOME/.muxa" /tmp/muxa-"$(id -u)"/muxa 2>/dev/null || true)"
+# Scope to *this* run's tokens. A bare "E2E_[ABCD]_" also matches the
+# installed copy of this script (where the token is still an unexpanded $$)
+# and any residue an older, unisolated run left in the operator runtime —
+# neither of which says anything about whether this run stayed isolated.
+op_hits="$(grep -R -l -E "E2E_[ABCD]_[A-Z]+_$$\b" "$HOME/.muxa" /tmp/muxa-"$(id -u)"/muxa 2>/dev/null || true)"
 # exclude our iso dir if it lives under /tmp/muxa-uid (it does not)
 if [ -n "$op_hits" ]; then
   bad "operator paths have no E2E tokens" "$op_hits"

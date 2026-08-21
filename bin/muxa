@@ -828,9 +828,17 @@ sys.exit(0 if resp.get("ok") else 1)
 }
 
 # Auto-start a user-level broker if the socket is dead. Pidfile + socket only;
-# keep this small. The child is disowned so muxa send cannot take it down.
+# keep this small.
+#
+# muxa-broker re-execs itself with setsid(2) and writes its own pidfile, so the
+# daemon lives in a session of its own. That is the part that matters: nohup and
+# disown only detach the job from this shell's table, they leave the child in
+# this shell's process group, and one group-directed signal when the caller's
+# tool call ends then kills the broker before it delivers anything. macOS has no
+# setsid(1), so the escape has to come from the binary. Do not write $! here —
+# it is the forking parent, which exits in milliseconds.
 ensure_broker() {
-  local bin pid i lock runbin
+  local bin i lock runbin held=0 rc=1
   if [ "${MUXA_BROKER:-1}" = "0" ]; then
     return 1
   fi
@@ -840,7 +848,13 @@ ensure_broker() {
   bin="$(broker_bin_path)"
   [ -x "$bin" ] || return 1
   lock="$BROKER_DIR/start.lock"
+  # A lock whose starter was killed before it could rmdir must not wedge every
+  # later start — that turns one lost broker into permanently failing sends.
+  if [ -d "$lock" ] && [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+    rmdir "$lock" 2>/dev/null || true
+  fi
   if mkdir "$lock" 2>/dev/null; then
+    held=1
     runbin="$BROKER_DIR/muxa-broker"
     if ! cp "$bin" "$runbin"; then
       rmdir "$lock" 2>/dev/null || true
@@ -852,23 +866,43 @@ ensure_broker() {
       xattr -c "$runbin" 2>/dev/null || true
       codesign -s - --force --timestamp=none "$runbin" 2>/dev/null || true
     fi
-    rm -f "$BROKER_SOCK"
+    rm -f "$BROKER_SOCK" "$BROKER_PID"
+    # Still backgrounded, even though the binary now forks its own daemon:
+    # bin/muxa-broker is gitignored and versioned separately from this script,
+    # so a checkout can pair a new muxa with an older broker that runs in the
+    # foreground forever. Backgrounding costs nothing — the poll below is what
+    # makes this synchronous — and it keeps that pairing from hanging every
+    # send. Force the fork on: an inherited MUXA_BROKER_FOREGROUND would stop
+    # a current binary from detaching at all.
     MUXA_BROKER_DIR="$BROKER_DIR" \
     MUXA_BROKER_SOCK="$BROKER_SOCK" \
     MUXA_BROKER_PID="$BROKER_PID" \
+    MUXA_BROKER_FOREGROUND=0 \
+    MUXA_BROKER_DAEMONIZED=0 \
       nohup "$runbin" >>"$BROKER_DIR/broker.log" 2>&1 &
-    pid=$!
-    printf '%s\n' "$pid" >"$BROKER_PID"
-    disown "$pid" 2>/dev/null || true
-    rmdir "$lock" 2>/dev/null || true
+    disown 2>/dev/null || true
   fi
+  # Hold the lock across the wait, not just the launch. The daemon re-execs
+  # with setsid and only binds the socket a moment later; releasing at launch
+  # leaves a gap in which a second starter takes the lock, deletes
+  # broker.sock/broker.pid out from under the daemon coming up, and runs a
+  # second one against the same MUXA_BROKER_DIR — two owners polling one
+  # pending/. A starter that did not get the lock never touches those files;
+  # it only waits for whoever holds it. muxa-broker also flocks the queue, so
+  # a bypassed lock still cannot produce a second owner.
   i=0
-  while [ "$i" -lt 40 ]; do
-    broker_ping && return 0
+  while [ "$i" -lt 120 ]; do
+    if broker_ping; then
+      rc=0
+      break
+    fi
     sleep 0.05
     i=$((i + 1))
   done
-  return 1
+  if [ "$held" -eq 1 ]; then
+    rmdir "$lock" 2>/dev/null || true
+  fi
+  return "$rc"
 }
 
 broker_enqueue() {

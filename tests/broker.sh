@@ -50,6 +50,54 @@ trap cleanup EXIT
 
 prompt_loop='while true; do printf "ready> "; read -r _ || break; done'
 
+# Stand-in for an agent-CLI pane: a half-block composer box whose input row
+# holds only a faint placeholder, with status chrome *below* the box — the
+# shape a freshly spawned Cursor Agent / Claude / pi pane actually shows. The
+# old last-non-empty-line rule read the cwd row as command output, so a first
+# brief to a pane like this never looked free and waited out the deadline.
+#
+# The input row is driven by a state file so the test can put the pane into a
+# state a real CLI would render — a shell's own echo lands wherever the cursor
+# is, never inside the box, so faking "typed" any other way would make the
+# assertion pass for the wrong reason.
+#
+# Each frame is one write, and only on a state change or new input. A real TUI
+# emits a frame atomically; clearing and then drawing line by line on a timer
+# leaves a window where capture-pane sees a blank or half-drawn pane, which
+# reads as free and makes this case flaky in the broker's favour.
+composer_log="$HOME_ISO/composer.log"
+composer_state="$HOME_ISO/composer.state"
+: >"$composer_log"
+printf 'idle\n' >"$composer_state"
+composer_loop='
+top="\033[38;2;38;38;38m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\033[0m"
+bot="\033[38;2;38;38;38m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\033[0m"
+frame() {
+  local row log out
+  case "$1" in
+    busy)  row="\033[48;2;38;38;38m \033[2m→ Add a follow-up   ctrl+c to stop\033[0m" ;;
+    typed) row="\033[48;2;38;38;38m HUMANTYPING\033[0m" ;;
+    *)     row="\033[48;2;38;38;38m \033[2m→ Plan, search, build anything\033[0m" ;;
+  esac
+  log="$(cat '"$composer_log"' 2>/dev/null || true)"
+  out="\033[H\033[2J"
+  [ -n "$log" ] && out="$out$log\n"
+  out="$out$top\n$row\n$bot\n Composer 2.5 Fast\n /tmp/fake-worktree\n"
+  printf "%b" "$out"
+}
+prev=""
+while true; do
+  st="$(cat '"$composer_state"' 2>/dev/null || true)"
+  if [ "$st" != "$prev" ]; then
+    prev="$st"
+    frame "$st"
+  fi
+  if IFS= read -r -t 0.3 line; then
+    printf "%s\n" "$line" >>'"$composer_log"'
+    frame "$st"
+  fi
+done'
+
 tmux -L "$SOCK" new-session -d -s muxa -n parent "$prompt_loop"
 tmux -L "$SOCK" split-window -h -t muxa:parent "$prompt_loop"
 sleep 0.3
@@ -82,6 +130,25 @@ wait_capture() {
   return 1
 }
 
+# Wait until the pane stops changing. Inject pastes, waits MUXA_ENTER_DELAY,
+# then sends Enter — so wait_capture returns while that Enter is still in
+# flight. Typing immediately after it races the Enter and the test's own
+# keystrokes get submitted, which looks exactly like the broker pasting over
+# typed text. Two identical captures mean the Enter has landed.
+settle() {
+  local pane="$1" prev="" cur i=0
+  while [ "$i" -lt 40 ]; do
+    cur="$(tmux -L "$SOCK" capture-pane -p -t "$pane" 2>/dev/null || true)"
+    if [ "$i" -gt 0 ] && [ "$cur" = "$prev" ]; then
+      return 0
+    fi
+    prev="$cur"
+    sleep 0.15
+    i=$((i + 1))
+  done
+  return 0
+}
+
 # --- A: idle empty prompt → paste + enter ---
 tok_a="BRKA_$$"
 sent_a="$(muxa_as "$parent_pane" send child "$tok_a")"
@@ -103,6 +170,7 @@ n_a="$(printf '%s\n' "$cap_a" | grep -c "$tok_a" || true)"
 
 # --- B: typing → wait → deliver after clear ---
 tok_b="BRKB_$$"
+settle "$child_pane"
 tmux -L "$SOCK" send-keys -t "$child_pane" "STILLTYPING"
 sleep 0.1
 sent_b="$(muxa_as "$parent_pane" send child "$tok_b")"
@@ -138,6 +206,7 @@ esac
 
 # --- timeout fallback: never-free pane still pastes after deadline ---
 tok_t="BRKT_$$"
+settle "$child_pane"
 tmux -L "$SOCK" send-keys -t "$child_pane" "BLOCKEDINPUT"
 sent_t="$(muxa_as "$parent_pane" send child "$tok_t")"
 case "$sent_t" in
@@ -151,6 +220,232 @@ case "$cap_t" in
 esac
 tmux -L "$SOCK" send-keys -t "$child_pane" C-u
 sleep 0.2
+
+# --- E: agent-CLI composer pane takes the first brief immediately ---
+# The regression is timing as much as delivery: before the composer rule this
+# pane only ever got a timeout fallback paste, so assert both that the token
+# lands well inside the deadline and that the log does not call it a fallback.
+tmux -L "$SOCK" split-window -v -t muxa:parent "$composer_loop"
+sleep 0.5
+composer_pane="$(tmux -L "$SOCK" list-panes -t muxa:parent -F '#{pane_id} #{pane_top}' | sort -k2,2n | awk 'END{print $1}')"
+muxa_as "$composer_pane" register --name composer --kind generic --deliver inject --parent parent >/dev/null
+cap_e0="$(tmux -L "$SOCK" capture-pane -p -t "$composer_pane")"
+# Check the border glyph too: if the box does not render, the rest of this
+# case fails as a mysterious delivery timeout instead of naming the cause.
+case "$cap_e0" in
+  *"Composer 2.5 Fast"*"▀"*|*"▀"*"Composer 2.5 Fast"*) ok "E composer pane painted its box" ;;
+  *) bad "E composer pane painted its box (half-block borders missing?)" "cap: $cap_e0" ;;
+esac
+tok_e="BRKE_$$"
+start_e="$(date +%s)"
+sent_e="$(muxa_as "$parent_pane" send composer "$tok_e")"
+case "$sent_e" in
+  *broker*) ok "E send enqueues for composer pane" ;;
+  *) bad "E send enqueues for composer pane" "got: $sent_e" ;;
+esac
+cap_e="$(wait_capture "$composer_pane" "$tok_e" 30 || true)"
+elapsed_e=$(( $(date +%s) - start_e ))
+case "$cap_e" in
+  *"$tok_e"*) ok "E idle composer received the first brief" ;;
+  *) bad "E idle composer received the first brief" "cap: $cap_e" ;;
+esac
+[ "$elapsed_e" -lt "$MUXA_BROKER_DEADLINE" ] \
+  && ok "E delivered before the deadline (${elapsed_e}s < ${MUXA_BROKER_DEADLINE}s)" \
+  || bad "E delivered before the deadline" "took ${elapsed_e}s, deadline ${MUXA_BROKER_DEADLINE}s"
+line_e="$(grep -F "$tok_e" "$MUXA_BROKER_DIR/broker.log" 2>/dev/null || grep 'delivered parent → composer' "$MUXA_BROKER_DIR/broker.log" 2>/dev/null || true)"
+case "$line_e" in
+  *"timeout fallback"*) bad "E was not a timeout fallback paste" "log: $line_e" ;;
+  *) ok "E was not a timeout fallback paste" ;;
+esac
+
+# --- F: a composer that is typed-in or mid-turn is left alone ---
+# Widening the heuristic must not cost the protection it replaces: text a human
+# typed and a live interrupt hint both still mean "not free".
+composer_holds() {
+  local label="$1" state="$2" tok="$3" cap
+  settle "$composer_pane"
+  printf '%s\n' "$state" >"$composer_state"
+  sleep 0.5
+  muxa_as "$parent_pane" send composer "$tok" >/dev/null
+  sleep 1.5
+  cap="$(tmux -L "$SOCK" capture-pane -p -t "$composer_pane")"
+  case "$cap" in
+    *"$tok"*) bad "$label" "cap: $cap" ;;
+    *) ok "$label" ;;
+  esac
+  printf 'idle\n' >"$composer_state"
+  cap="$(wait_capture "$composer_pane" "$tok" 40 || true)"
+  case "$cap" in
+    *"$tok"*) ok "$label → delivered once idle" ;;
+    *) bad "$label → delivered once idle" "cap: $cap" ;;
+  esac
+}
+composer_holds "F typed composer is not pasted over" typed "BRKF_$$"
+composer_holds "F busy composer is not pasted over" busy "BRKFB_$$"
+
+# --- G: the daemon outlives its starter's process group ---
+# The incident: nohup + disown left the broker in the caller's process group,
+# so the teardown at the end of the calling tool call killed it before its
+# first delivery. Start it from a throwaway session, tear that whole group
+# down, and require the queue to still have an owner that drains.
+muxa_as "$parent_pane" broker stop >/dev/null 2>&1 || true
+sleep 0.3
+python3 - "$ROOT/bin/muxa" <<'PY' >/dev/null 2>&1 || true
+import os, subprocess, sys
+subprocess.run([sys.argv[1], "broker", "start"], preexec_fn=os.setsid,
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+PY
+sleep 0.3
+daemon_pid="$(cat "$MUXA_BROKER_PID" 2>/dev/null || true)"
+if [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null; then
+  ok "G daemon started from a throwaway session"
+else
+  bad "G daemon started from a throwaway session" "pid=${daemon_pid:-none}"
+fi
+daemon_sid="$(ps -p "$daemon_pid" -o sess= 2>/dev/null | tr -d ' ' || true)"
+own_sid="$(ps -p $$ -o sess= 2>/dev/null | tr -d ' ' || true)"
+daemon_pgid="$(ps -p "$daemon_pid" -o pgid= 2>/dev/null | tr -d ' ' || true)"
+if [ -n "$daemon_pgid" ] && [ "$daemon_pgid" = "$daemon_pid" ]; then
+  ok "G daemon leads its own process group (pgid=$daemon_pgid)"
+else
+  bad "G daemon leads its own process group" "pid=$daemon_pid pgid=${daemon_pgid:-?} sid=${daemon_sid:-?} own_sid=${own_sid:-?}"
+fi
+# Kill every group except the daemon's that could plausibly have started it.
+kill -TERM -- "-$daemon_pgid" 2>/dev/null && sleep 0.5
+if kill -0 "$daemon_pid" 2>/dev/null; then
+  bad "G group TERM aimed at the daemon's own group stops it" "still alive"
+else
+  ok "G group TERM aimed at the daemon's own group stops it"
+fi
+# Now the real shape: restart, then kill the *starter's* group and require survival.
+muxa_as "$parent_pane" broker start >/dev/null 2>&1 || true
+sleep 0.3
+daemon_pid="$(cat "$MUXA_BROKER_PID" 2>/dev/null || true)"
+starter_pgid="$(ps -p $$ -o pgid= 2>/dev/null | tr -d ' ' || true)"
+daemon_pgid="$(ps -p "$daemon_pid" -o pgid= 2>/dev/null | tr -d ' ' || true)"
+if [ -n "$daemon_pgid" ] && [ "$daemon_pgid" != "$starter_pgid" ]; then
+  ok "G daemon left the starting shell's process group"
+else
+  bad "G daemon left the starting shell's process group" "daemon_pgid=${daemon_pgid:-?} starter_pgid=${starter_pgid:-?}"
+fi
+tok_g="BRKG_$$"
+muxa_as "$parent_pane" send child "$tok_g" >/dev/null
+cap_g="$(wait_capture "$child_pane" "$tok_g" 40 || true)"
+case "$cap_g" in
+  *"$tok_g"*) ok "G restarted daemon drains the queue" ;;
+  *) bad "G restarted daemon drains the queue" "cap: $cap_g" ;;
+esac
+
+# --- H: a stopped daemon accounts for what it could not hand over ---
+tok_h="BRKH_$$"
+settle "$child_pane"
+tmux -L "$SOCK" send-keys -t "$child_pane" "BLOCKSHUTDOWN"
+sleep 0.2
+muxa_as "$parent_pane" send child "$tok_h" >/dev/null
+sleep 0.5
+muxa_as "$parent_pane" broker stop >/dev/null 2>&1 || true
+sleep 0.8
+case "$(cat "$MUXA_BROKER_DIR/broker.log" 2>/dev/null)" in
+  *"shutdown signal="*) ok "H shutdown is logged" ;;
+  *) bad "H shutdown is logged" "log tail: $(tail -3 "$MUXA_BROKER_DIR/broker.log" 2>/dev/null)" ;;
+esac
+case "$(cat "$MUXA_BROKER_DIR/broker.log" 2>/dev/null)" in
+  *"pending left in"*|*"queue drained"*) ok "H shutdown accounts for the queue" ;;
+  *) bad "H shutdown accounts for the queue" "log tail: $(tail -3 "$MUXA_BROKER_DIR/broker.log" 2>/dev/null)" ;;
+esac
+if [ -n "$(ls -A "$MUXA_BROKER_DIR/pending" 2>/dev/null)" ]; then
+  muxa_as "$parent_pane" broker start >/dev/null 2>&1 || true
+  sleep 0.5
+  case "$(cat "$MUXA_BROKER_DIR/broker.log" 2>/dev/null)" in
+    *"re-adopted"*) ok "H restart re-adopts stranded mail" ;;
+    *) bad "H restart re-adopts stranded mail" "log tail: $(tail -3 "$MUXA_BROKER_DIR/broker.log" 2>/dev/null)" ;;
+  esac
+  tmux -L "$SOCK" send-keys -t "$child_pane" C-u
+  cap_h="$(wait_capture "$child_pane" "$tok_h" 60 || true)"
+  case "$cap_h" in
+    *"$tok_h"*) ok "H stranded mail is delivered after restart" ;;
+    *) bad "H stranded mail is delivered after restart" "cap: $cap_h" ;;
+  esac
+else
+  ok "H restart re-adopts stranded mail (queue already drained on shutdown)"
+  ok "H stranded mail is delivered after restart (drained on shutdown)"
+  tmux -L "$SOCK" send-keys -t "$child_pane" C-u
+fi
+sleep 0.2
+
+# --- I: a concurrent auto-start must not race the first daemon's bind ---
+# ensure_broker used to drop start.lock as soon as it had backgrounded the
+# broker, but the daemon re-execs with setsid and binds a moment later. In that
+# gap a second starter took the lock, deleted broker.sock/broker.pid, and ran a
+# second daemon against the same dir — two owners polling one pending/. The
+# shim below binds late so the gap is wide on purpose; without the fix this
+# logs two "listening" lines.
+muxa_as "$parent_pane" broker stop >/dev/null 2>&1 || true
+sleep 0.3
+race_shim="$HOME_ISO/slow-broker"
+cat >"$race_shim" <<SHIM
+#!/bin/sh
+sleep 2
+exec "$ROOT/bin/muxa-broker" "\$@"
+SHIM
+chmod +x "$race_shim"
+: >"$MUXA_BROKER_DIR/broker.log"
+rm -f "$MUXA_BROKER_SOCK" "$MUXA_BROKER_PID"
+rmdir "$MUXA_BROKER_DIR/start.lock" 2>/dev/null || true
+( MUXA_BROKER_BIN="$race_shim" muxa_as "$parent_pane" broker start >/dev/null 2>&1 ) &
+race_a=$!
+# Mid-gap: the shim has not exec'd the real binary yet, so nothing is bound.
+# The lock must still be held here — that is the whole fix. Asserting the held
+# lock rather than racing a second starter keeps this deterministic; the
+# destructive window (a non-owner deleting a *live* socket) is only a few
+# hundred ms wide and would make the test flaky either way.
+sleep 0.8
+if muxa_as "$parent_pane" broker status >/dev/null 2>&1; then
+  bad "I precondition: daemon not yet bound mid-gap" "socket already answering"
+else
+  ok "I precondition: daemon not yet bound mid-gap"
+fi
+if [ -d "$MUXA_BROKER_DIR/start.lock" ]; then
+  ok "I start.lock is held until the daemon answers"
+else
+  bad "I start.lock is held until the daemon answers" \
+      "lock already released while nothing was bound — a second starter could now delete the socket and pidfile of the daemon coming up"
+fi
+# A second starter arriving in the gap must not be able to claim the lock.
+if mkdir "$MUXA_BROKER_DIR/start.lock" 2>/dev/null; then
+  bad "I a second starter cannot claim the lock mid-gap" "took the lock"
+  rmdir "$MUXA_BROKER_DIR/start.lock" 2>/dev/null || true
+else
+  ok "I a second starter cannot claim the lock mid-gap"
+fi
+( MUXA_BROKER_BIN="$race_shim" muxa_as "$parent_pane" broker start >/dev/null 2>&1 ) &
+race_b=$!
+wait "$race_a" "$race_b" 2>/dev/null || true
+sleep 0.5
+owners="$(grep -c 'listening' "$MUXA_BROKER_DIR/broker.log" 2>/dev/null || true)"
+[ "$owners" = 1 ] && ok "I concurrent starts leave exactly one queue owner" \
+  || bad "I concurrent starts leave exactly one queue owner" \
+         "listening lines=$owners log: $(cat "$MUXA_BROKER_DIR/broker.log" 2>/dev/null)"
+race_pid="$(cat "$MUXA_BROKER_PID" 2>/dev/null || true)"
+if [ -n "$race_pid" ] && kill -0 "$race_pid" 2>/dev/null; then
+  ok "I the surviving owner is the one in the pidfile"
+else
+  bad "I the surviving owner is the one in the pidfile" "pid=${race_pid:-none}"
+fi
+if [ -d "$MUXA_BROKER_DIR/start.lock" ]; then
+  bad "I start.lock is released once the daemon is up" "lock still held"
+else
+  ok "I start.lock is released once the daemon is up"
+fi
+# The queue must still work through a real daemon afterwards.
+tok_i="BRKI_$$"
+settle "$child_pane"
+muxa_as "$parent_pane" send child "$tok_i" >/dev/null
+cap_i="$(wait_capture "$child_pane" "$tok_i" 60 || true)"
+case "$cap_i" in
+  *"$tok_i"*) ok "I the single owner still delivers" ;;
+  *) bad "I the single owner still delivers" "cap: $cap_i" ;;
+esac
 
 # --- C: broker down + binary hidden → fail closed, nothing pasted ---
 muxa_as "$parent_pane" broker stop >/dev/null || true
