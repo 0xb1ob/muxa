@@ -73,7 +73,7 @@ func TestCursorIdleVsTypedSignals(t *testing.T) {
 		t.Fatal("two-signal separated idle from typed; update this test and the detector")
 	}
 	if !LooksFree(idle.Capture) || LooksFree(typed.Capture) {
-		t.Fatal("parser still separates them; paste stays on LooksFree")
+		t.Fatal("typed-in-box still separates them; paste keeps that conjunct")
 	}
 	if strings.Contains(typed.Capture, "hello world") == false {
 		t.Fatal("typed fixture lost the composer text")
@@ -121,7 +121,7 @@ func TestTwoSignalCorpus(t *testing.T) {
 			t.Errorf("%s: two-signal=%v want %v (%s)", tc.file, two, want, tc.why)
 		}
 		if parser != tc.free {
-			t.Errorf("%s: LooksFree=%v want %v (parser assertions must stay honest)", tc.file, parser, tc.free)
+			t.Errorf("%s: LooksFree=%v want %v (typed-in-box assertions must stay honest)", tc.file, parser, tc.free)
 		}
 	}
 }

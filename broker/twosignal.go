@@ -28,9 +28,9 @@ type Snapshot struct {
 // Known hole (muxa#44): Cursor Agent draws typed input inside the composer
 // box and leaves the hardware cursor on the blank row below the splash
 // footer. cursor-idle and cursor-typed are both quiescent and both empty at
-// that cursor, so this rule cannot tell them apart. Paste still goes through
-// LooksFree until a third signal exists. Do not "fix" that by re-entering
-// the composer parser here.
+// that cursor, so this rule cannot tell them apart. The typed-in-box
+// conjunct in LooksFree is the paste-gate half that can; do not "fix" the
+// hole by re-entering chrome modelling here.
 func TwoSignalFree(prev, cur string, cursorY, cursorX int) bool {
 	if prev == "" || prev != cur {
 		return false

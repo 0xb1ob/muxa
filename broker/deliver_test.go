@@ -1,10 +1,12 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 )
 
 type fakeTMUX struct {
@@ -17,6 +19,7 @@ type fakeTMUX struct {
 	failInj  bool
 	echo     string
 	hideEcho bool
+	lastCap  string
 }
 
 func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
@@ -40,7 +43,7 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 			}
 			return "0", nil
 		case "#{cursor_y} #{cursor_x}":
-			return "0 0", nil
+			return fakeCursorPos(f.lastCap), nil
 		}
 		return "0", nil
 	case "capture-pane":
@@ -53,10 +56,12 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 		}
 		if f.echo != "" && !f.hideEcho {
 			if s == "" {
-				return f.echo, nil
+				s = f.echo
+			} else {
+				s = f.echo + "\n" + s
 			}
-			return f.echo + "\n" + s, nil
 		}
+		f.lastCap = s
 		return s, nil
 	case "load-buffer":
 		if f.failInj {
@@ -76,6 +81,27 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 		return "", nil
 	}
 	return "", nil
+}
+
+func fakeCursorPos(cap string) string {
+	lines := strings.Split(cap, "\n")
+	y, x := 0, 0
+	for i, l := range lines {
+		cells := attrCells(l)
+		empty := true
+		for _, c := range cells {
+			if !unicode.IsSpace(c.r) {
+				empty = false
+				break
+			}
+		}
+		if empty {
+			continue
+		}
+		y = i
+		x = len(cells)
+	}
+	return strconv.Itoa(y) + " " + strconv.Itoa(x)
 }
 
 type pasteErr string
@@ -123,6 +149,10 @@ func TestRetryUntilFree(t *testing.T) {
 	d.Tick()
 	if f.injectCount() != 0 {
 		t.Fatalf("pasted on second busy capture")
+	}
+	d.Tick()
+	if f.injectCount() != 0 {
+		t.Fatalf("pasted on first free frame (two-signal needs a pair)")
 	}
 	d.Tick()
 	if f.injectCount() != 1 {
@@ -202,6 +232,10 @@ func TestBusyPaneDeliversInOrderAfterFree(t *testing.T) {
 	f.capI = 0
 	f.mu.Unlock()
 	d.Tick()
+	if f.injectCount() != 0 {
+		t.Fatalf("pasted on first free frame after busy (two-signal needs a pair): %d", f.injectCount())
+	}
+	d.Tick()
 	if f.injectCount() != 1 || f.lastInject() != "first-mail" {
 		t.Fatalf("first paste=%q count=%d", f.lastInject(), f.injectCount())
 	}
@@ -276,6 +310,10 @@ func TestDispatchWaitsUntilPaneDrew(t *testing.T) {
 	d.Tick()
 	if f.injectCount() != 0 {
 		t.Fatalf("pasted into a pane that has not drawn: %d", f.injectCount())
+	}
+	d.Tick()
+	if f.injectCount() != 0 {
+		t.Fatalf("pasted on first ready frame (two-signal needs a pair): %d", f.injectCount())
 	}
 	d.Tick()
 	if f.injectCount() != 1 || f.lastInject() != "FIRST-BRIEF" {

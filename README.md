@@ -64,20 +64,25 @@ load-bearing, not tidiness: `nohup … & disown` leaves the process in the
 tool call kills the broker before it delivers anything. macOS has no
 `setsid(1)`, so the binary has to do it.
 
-Heuristic (documented in [SPEC.md](SPEC.md)), two shapes:
+Heuristic (documented in [SPEC.md](SPEC.md)), two layers that must stay
+straight:
 
-- **Agent CLI** — the input line is inside a `▄`/`▀` composer box and the
-  last lines of the pane are chrome, so the box decides: faint (SGR 2) text
-  and the reverse-video cursor are placeholder and cursor → free; anything
-  else in the box is typed → wait; a braille spinner, or `esc to
-  interrupt`/`ctrl+c to stop` **inside** the box → a turn is running → wait.
-- **Shell** — last non-empty line; empty → free; prompt marker (`$%#>❯`)
-  with text after it → typing → wait; prompt marker at end of line → free;
-  anything else → wait.
-
-Both are CLI-agnostic: the composer rule reads terminal attributes and box
-chrome, never a Claude/Cursor/pi string. Without it, every agent CLI's idle
-pane read as busy and every first brief waited out the full deadline.
+- **Free-detection (broker)** — whether the pane is idle, not what its
+  chrome looks like. `pane_dead` / copy-mode wait; control-mode `%output`
+  silence (a busy agent draws, an idle one does not); two-signal
+  quiescence AND empty at the hardware cursor. The bottom line is
+  user-configurable, so no fixed prompt/status model can be correct.
+- **Typed-in-box conjunct (parser remnant)** — the only signal that can
+  see unsubmitted human input in a Cursor Agent composer. A `▄`/`▀` box
+  with non-faint, non-reverse text (or a visible row with no faint run)
+  waits. No box → vacuously true, free-detection decides. MUST NOT be
+  used to decide a pane is at a prompt, or to model spinners / interrupt
+  phrases / status chrome. It cannot currently be deleted: hardware
+  cursor, second-capture frame diff, and control-mode silence are all
+  blind to a half-typed Cursor composer (`cursor_x=0` in both idle and
+  typed, `t1==t2` in both, `%output` goes quiet after a pause). The one
+  untested idea is a stateful observer that tracks "composer went
+  non-empty and has not submitted" across `%output` events.
 
 tmux user options are the roster (`@muxa_name`, `@muxa_kind`, `@muxa_parent`,
 `@muxa_id`). `muxa who` STATE is the broker's drawing list (`busy` if the

@@ -187,62 +187,67 @@ downloaded and checksum-verified by `install.sh`. Install never compiles Go;
 a Go toolchain is a test-only dependency.
 
 For each queued message the broker captures the target pane (`tmux
-capture-pane -p -e`, attributes retained) and pastes only when input looks
-**free**:
+capture-pane -p -e`, attributes retained) and pastes only when the pane is
+**free**. That decision has two layers. They must not be collapsed.
+
+**Free-detection is the broker's job.** It asks what the pane *does*, not
+what its chrome looks like. The bottom line of an agent CLI is
+user-configurable, so no fixed prompt/status model can be correct:
 
 1. `#{pane_dead}` or `#{pane_in_mode}` → not free (copy-mode paste is
    silent-loss).
-2. If the capture contains a **composer box** — a row of `▄` above a row of
-   `▀` with at least one row between them — decide on the box, because an
-   agent CLI's input line is inside it and the last lines of the pane are
-   chrome (status row, model, cwd):
-   - A braille spinner in the box or on the row directly above it → not free
-     (a turn is running).
-   - `esc to interrupt` / `ctrl+c to stop` **inside** the box → not free.
-     These phrases are only trusted inside the box; above it they are
-     transcript text from a finished turn.
-   - Any text in the box that is neither faint (SGR 2) nor under the reverse
-     video cursor (SGR 7) → not free (a human typed it).
-   - Otherwise → free (blank row, or a faint placeholder / prompt marker).
-3. Otherwise the last non-empty line *is* the input line:
-   - Strip ANSI/OSC. Empty line → free (blank pane / empty input).
-   - A prompt marker (`$`, `%`, `#`, `>`, `❯`) followed by whitespace and
-     then non-space → not free (typing after the prompt).
-   - Line ends with a prompt marker → free (idle prompt).
-   - Anything else → not free (output, spinner, busy TUI).
+2. Drawing — `%output` inside the quiet window (muxa#46) → not free. A busy
+   agent draws continuously; an idle one draws nothing. Delivery wakes on
+   silence rather than a 250 ms poll. `muxa who` STATUS `drawing` is this
+   same window, with no hook involvement.
+3. Two-signal (muxa#44), sharing the same decision as the poll fallback so
+   the paths cannot drift: (a) this capture equals the previous poll
+   (quiescence); (b) text left of the hardware cursor is empty or a prompt
+   marker. Neither half is enough alone — a busy Claude pane parks the
+   cursor on an empty composer. On the first observation there is no frame
+   pair; control-mode silence already covers quiescence, and empty-at-cursor
+   is the remaining half.
 
-This heuristic is tmux-only and CLI-agnostic. It does not parse composer
-JSON, Stop hooks, or SessionStart, and it MUST NOT match on any CLI's
-strings or layout: the composer rule keys off terminal attributes and
-half-block box chrome, which Claude, Cursor Agent and pi all render. Rule 3
-alone is not enough — every agent CLI's idle pane ends in chrome, so it read
-as busy and every first brief waited out the whole deadline.
+**Typed-in-box is a bounded remnant, not a prompt model.** If the capture
+contains a composer box (a row of `▄` above a row of `▀` with at least one
+row between them), any text between the borders that is neither faint
+(SGR 2) nor the reverse-video cursor (SGR 7) is unsubmitted human input →
+not free. A visible row with no faint run is also typed (one character
+under the block cursor). No box → the conjunct is vacuously true and
+free-detection decides.
 
-**Two-signal rule (beside the parser, muxa#44).** A second detector asks
-what the pane does: (1) is this capture identical to the previous poll
-(quiescence — the pane is not drawing)? (2) is the text left of the
-hardware cursor empty or a prompt (nothing typed at `cursor_x` on
-`cursor_y`)? `muxa-broker -check-pane %id` prints both verdicts. Paste still
-follows the composer/shell parser above. The two-signal rule cannot see
-paused typing in Cursor Agent: the hardware cursor stays on the blank row
-below the `cwd · branch` splash footer while `hello world` sits in the
-composer box, and both idle-empty and idle-typed snapshots are internally
-static. Pasting over a half-typed prompt is worse than a slow brief, so
-LooksFree remains the paste gate until a third signal exists.
+This remnant MAY be used only to protect unsubmitted composer input. It
+MUST NOT be used to decide that a pane is at a prompt, and MUST NOT model
+anything chrome-shaped (spinners, `esc to interrupt` / `ctrl+c to stop`,
+status footers, bottom-line prompt markers). Those were a chrome model;
+they are deleted. Default-foreground hint text inside the box
+(Claude's `Image in clipboard · ctrl+v to paste`) is indistinguishable
+from typing and is treated as typed: the cost is a delayed paste, not
+lost input. Capture must keep `-e`; without SGR a faint placeholder is
+the same bytes as typed text.
 
-**Control-mode silence (muxa#46) is not that third signal for Cursor Agent.**
-`tmux -C -f read-only,ignore-size attach` streams `%output` per pane. A busy
-agent draws continuously; an idle one draws nothing, so delivery wakes on
-silence rather than a 250 ms poll. Typing in a Cursor composer *does* emit
-`%output` (a redraw of the box containing `→ hello`). After the user pauses,
-`%output` stops — the same silence as an empty idle composer. Control mode
-therefore cannot distinguish a half-typed Cursor composer from an empty one,
-and the typed-in-box conjunct in LooksFree must stay. `muxa who` STATUS
-`drawing` is this same `%output` window, with no hook involvement.
+**Why the remnant cannot currently be deleted.** It is the only signal
+that can see a human's unsubmitted input in a Cursor Agent composer.
+Three candidates for a third free-detection signal were tried and all
+three are blind to that input:
 
-Faint means chrome, so default-foreground text inside the box counts as
-typed even when it is really a hint. That is deliberate: the cost is a
-delayed paste, whereas the other way round overwrites a human's input.
+- Hardware cursor position (muxa#44): `cursor-idle` and `cursor-typed`
+  fixtures are identical, `cursor_x=0` in both. Cursor Agent parks the
+  cursor on the blank row below the `cwd · branch` splash footer.
+- Second-capture frame diff (muxa#44): both snapshots are internally
+  static, `t1==t2` in both.
+- Control-mode silence (muxa#46): typing emits `%output` (a redraw of the
+  box containing `→ hello`), then after a pause `%output` stops — the
+  same silence as an empty idle composer.
+
+Pasting over someone mid-prompt is worse than a slow brief, so the
+conjunct stays until a signal exists that can see that input.
+
+**Untested, out of scope here.** A stateful observer that tracks
+"composer went non-empty and has not submitted" across `%output` events,
+rather than sampling a point in time. Do not implement that in this
+change; it is the one idea a future attempt should start from. `muxa-broker
+-check-pane %id` prints the typed-in-box and two-signal verdicts.
 
 Retry until the pane is actually free. `MUXA_BROKER_DEADLINE` (default 600)
 is how long a *dead* pane is retried before the message is failed; a live
@@ -250,13 +255,14 @@ busy pane keeps its mail in `pending/` past that deadline. The broker MUST
 NOT timeout-fallback paste: two fallbacks into one busy composer overwrite
 each other, both get filed as `done/`, and the agent never sees the first.
 After a paste, confirmation has three outcomes: **delivered** (payload or
-Cursor's `[Pasted text +N lines]` collapse is visible), **not delivered**
-(pane still LooksFree — safe to retry), and **unknown** (the pane went busy
-or started drawing but the payload is not in the visible grid — Cursor
-collapses long pastes and scrolls them off). Unknown MUST NOT retry: a
-duplicate first brief re-runs work. `delivered` is never recorded for an
-overwritten timeout paste. When the broker is down or the binary is missing,
-`muxa send` exits non-zero and pastes nothing.
+Cursor's `[Pasted text +N lines]` collapse is visible), **pending-safe-retry**
+(pane still free — typed-in-box empty and cursor row still empty/prompt),
+and **unknown-no-retry** (the pane went busy or started drawing but the
+payload is not in the visible grid — Cursor collapses long pastes and
+scrolls them off). Unknown MUST NOT retry: a duplicate first brief re-runs
+work. `delivered` is never recorded for an overwritten timeout paste. When
+the broker is down or the binary is missing, `muxa send` exits non-zero and
+pastes nothing.
 
 An implementation MUST NOT paste into a pane that is dead or that is in
 copy-mode (`#{pane_in_mode}`). Copy-mode is a silent-loss mode:
@@ -316,7 +322,8 @@ failure turn with the enqueue. Human send output is unchanged without
 
 `muxa dispatch` prints `{"name","id","pane","cwd","state":"dispatched","from","to"}`
 and exits 0 once the pane exists and the brief is queued. The broker then
-waits until the child has drawn, gone quiet, and LooksFree, and pastes
+waits until the child has drawn, gone quiet, and is free (broker
+free-detection plus the typed-in-box conjunct), and pastes
 once. A CLI that never becomes ready produces a `[muxa] from=broker` turn
 in the parent; the brief is not pasted into the child. Brief on stdin or
 `--brief-file`, never a positional string. No worktree, lease, retry

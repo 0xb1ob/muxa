@@ -104,7 +104,7 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		free = false
 	}
 	if m.isDispatch() && !d.sawDraw(m.Pane) {
-		// Cold CLI: empty capture LooksFree, but nothing has painted yet.
+		// Cold CLI: empty capture is vacuously box-free, but nothing has painted yet.
 		free = false
 	}
 	if !free {
@@ -199,8 +199,10 @@ func (d *Deliverer) sawDraw(pane string) bool {
 }
 
 // canPaste is the single paste gate for both the poll loop and control-mode
-// silence. Drawing (%output inside the quiet window) waits; so does a pane
-// that LooksFree rejects. Two-signal is observed and logged, not followed.
+// silence. Free-detection is the broker's: drawing (%output inside the
+// quiet window) waits, and so does a pane two-signal rejects. LooksFree is
+// only the typed-in-box conjunct — it cannot see chrome and must not be
+// asked whether the pane is at a prompt.
 func (d *Deliverer) canPaste(pane string) (bool, error) {
 	if d.T.PaneDead(pane) {
 		return false, nil
@@ -211,43 +213,55 @@ func (d *Deliverer) canPaste(pane string) (bool, error) {
 	if d.drawing(pane) {
 		return false, nil
 	}
-	parserFree, two, err := d.observe(pane)
+	boxFree, two, empty, first, err := d.observe(pane)
 	if err != nil {
 		return false, err
 	}
-	if two != parserFree {
-		log.Printf("free-detection %s: parser=%v two-signal=%v", pane, parserFree, two)
+	if two != boxFree {
+		log.Printf("free-detection %s: typed-in-box=%v two-signal=%v", pane, boxFree, two)
 	}
-	return parserFree, nil
+	if !boxFree {
+		return false, nil
+	}
+	if first {
+		// No frame pair yet. Control-mode silence already passed (not
+		// drawing); empty-at-cursor is the remaining two-signal half.
+		// Without it a first tick would paste over shell typing.
+		return empty, nil
+	}
+	return two, nil
 }
 
 func (d *Deliverer) drawing(pane string) bool {
 	return d.Ctrl != nil && d.Ctrl.Live() && d.Ctrl.Drawing(pane)
 }
 
-// observe runs both free-detection rules. Paste still follows the parser
-// (LooksFree): two-signal cannot see paused typing in a Cursor Agent
-// composer, and neither can control-mode silence — a paused half-typed
-// composer emits no %output, same as an empty one.
-func (d *Deliverer) observe(pane string) (parserFree, twoFree bool, err error) {
+// observe runs free-detection (two-signal) and the typed-in-box conjunct.
+// Two-signal cannot see paused typing in a Cursor Agent composer, and
+// neither can control-mode silence — a paused half-typed composer emits no
+// %output, same as an empty one. LooksFree is that conjunct, not a prompt
+// model.
+func (d *Deliverer) observe(pane string) (boxFree, twoFree, empty, first bool, err error) {
 	if d.T.PaneDead(pane) {
-		return false, false, nil
+		return false, false, false, false, nil
 	}
 	if d.T.InMode(pane) {
-		return false, false, nil
+		return false, false, false, false, nil
 	}
 	snap, err := d.T.Snapshot(pane)
 	if err != nil {
-		return false, false, err
+		return false, false, false, false, err
 	}
 	d.mu.Lock()
 	prev := d.prev[pane]
+	first = prev == ""
 	d.prev[pane] = snap.Capture
 	if visibleContent(snap.Capture) {
 		d.drew[pane] = true
 	}
 	d.mu.Unlock()
-	return LooksFree(snap.Capture), TwoSignalFree(prev, snap.Capture, snap.CursorY, snap.CursorX), nil
+	empty = emptyAtCursor(snap.Capture, snap.CursorY, snap.CursorX)
+	return LooksFree(snap.Capture), TwoSignalFree(prev, snap.Capture, snap.CursorY, snap.CursorX), empty, first, nil
 }
 
 func visibleContent(capture string) bool {
@@ -265,14 +279,16 @@ const (
 func (d *Deliverer) confirm(m *Msg) confirmResult {
 	needle := confirmNeedle(m.Text)
 	var last string
+	var lastY, lastX int
 	for i := 0; i < 3; i++ {
-		cap, err := d.T.Capture(m.Pane)
+		snap, err := d.T.Snapshot(m.Pane)
 		if err == nil {
-			last = cap
-			if needle != "" && landed(cap, needle) {
+			last = snap.Capture
+			lastY, lastX = snap.CursorY, snap.CursorX
+			if needle != "" && landed(last, needle) {
 				return confirmLanded
 			}
-			if pasteCollapsed(cap) {
+			if pasteCollapsed(last) {
 				return confirmLanded
 			}
 		}
@@ -288,7 +304,11 @@ func (d *Deliverer) confirm(m *Msg) confirmResult {
 			return confirmLanded
 		}
 	}
-	if last != "" && !LooksFree(last) {
+	// unknown-no-retry: the pane reacted (typed-in-box, or the cursor row
+	// is no longer empty/prompt) or started drawing, but the payload is
+	// not visible. Do not use chrome phrases here — that is the deleted
+	// prompt model. pending-safe-retry is the remaining case.
+	if last != "" && (!LooksFree(last) || !emptyAtCursor(last, lastY, lastX)) {
 		return confirmUnknown
 	}
 	if d.drawing(m.Pane) {

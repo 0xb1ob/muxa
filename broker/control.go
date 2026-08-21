@@ -61,7 +61,7 @@ func (h *ControlHub) Live() bool {
 }
 
 // Drawing reports whether this pane produced %output inside the quiet window.
-// Unknown panes are not drawing: poll + LooksFree still decide.
+// Unknown panes are not drawing: poll + two-signal + typed-in-box still decide.
 func (h *ControlHub) Drawing(pane string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
