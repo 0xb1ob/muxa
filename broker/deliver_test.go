@@ -36,6 +36,8 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 				return "1", nil
 			}
 			return "0", nil
+		case "#{cursor_y} #{cursor_x}":
+			return "0 0", nil
 		}
 		return "0", nil
 	case "capture-pane":

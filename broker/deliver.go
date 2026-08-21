@@ -12,8 +12,9 @@ type Deliverer struct {
 	Poll     time.Duration
 	now      func() time.Time
 	mu       sync.Mutex
-	inflight map[string]bool // pane currently being injected
-	pastes   []string        // test hook: pane ids pasted, in order
+	inflight map[string]bool   // pane currently being injected
+	pastes   []string          // test hook: pane ids pasted, in order
+	prev     map[string]string // last capture-pane per pane, for two-signal
 }
 
 func NewDeliverer(q *Queue, t *TMUX, poll time.Duration) *Deliverer {
@@ -26,6 +27,7 @@ func NewDeliverer(q *Queue, t *TMUX, poll time.Duration) *Deliverer {
 		Poll:     poll,
 		now:      time.Now,
 		inflight: map[string]bool{},
+		prev:     map[string]string{},
 	}
 }
 
@@ -79,10 +81,13 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		}
 		return
 	}
-	free, err := d.T.Free(m.Pane)
+	free, two, err := d.observe(m.Pane)
 	if err != nil {
 		log.Printf("free %s: %v", m.Pane, err)
 		free = false
+	}
+	if two != free {
+		log.Printf("free-detection %s: parser=%v two-signal=%v", m.Pane, free, two)
 	}
 	fallback := !free && now >= m.DeadlineUnix
 	if !free && !fallback {
@@ -115,6 +120,27 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		log.Printf("delivered %s → %s id=%s", m.From, m.To, m.ID)
 	}
 	_ = d.Q.MarkDone(m)
+}
+
+// observe runs both free-detection rules. Paste still follows the parser
+// (LooksFree): two-signal cannot see paused typing in a Cursor Agent
+// composer, and pasting over a half-typed prompt is worse than a slow brief.
+func (d *Deliverer) observe(pane string) (parserFree, twoFree bool, err error) {
+	if d.T.PaneDead(pane) {
+		return false, false, nil
+	}
+	if d.T.InMode(pane) {
+		return false, false, nil
+	}
+	snap, err := d.T.Snapshot(pane)
+	if err != nil {
+		return false, false, err
+	}
+	d.mu.Lock()
+	prev := d.prev[pane]
+	d.prev[pane] = snap.Capture
+	d.mu.Unlock()
+	return LooksFree(snap.Capture), TwoSignalFree(prev, snap.Capture, snap.CursorY, snap.CursorX), nil
 }
 
 func (d *Deliverer) pasteIDs() []string {

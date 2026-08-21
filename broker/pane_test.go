@@ -20,6 +20,7 @@ type composerFixture struct {
 	HasMeta bool
 	T2      string
 	HasT2   bool
+	Origin  string
 }
 
 func composerFixtureDir() string {
@@ -55,6 +56,8 @@ func loadComposerFixture(t *testing.T, file string) composerFixture {
 					t.Fatalf("%s.meta cursor_x=%q: %v", base, val, err)
 				}
 				out.CursorX = n
+			case "origin":
+				out.Origin = val
 			}
 		}
 	}
