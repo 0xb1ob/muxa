@@ -77,42 +77,6 @@ pane_fmt() {
   tmux_do display-message -t "$1" -p "$2" 2>/dev/null || true
 }
 
-# ceil(sqrt(n)) for a positive integer. Used to size the next grid.
-ceil_sqrt() {
-  local n="$1" i=1
-  [ "$n" -gt 0 ] || { printf '1'; return; }
-  while [ $((i * i)) -lt "$n" ]; do
-    i=$((i + 1))
-  done
-  printf '%s' "$i"
-}
-
-# Largest pane (by area, then rightmost) in the last row of the window
-# containing $1. Last row = maximum #{pane_top}.
-grid_split_target() {
-  local win="$1" id top left w h area
-  local max_top=-1 best_id="" best_area=-1 best_left=-1
-  while read -r id top left w h; do
-    [ -n "$id" ] && [ -n "$top" ] && [ -n "$left" ] && [ -n "$w" ] && [ -n "$h" ] || continue
-    area=$((w * h))
-    if [ "$top" -gt "$max_top" ]; then
-      max_top=$top
-      best_id=$id
-      best_area=$area
-      best_left=$left
-    elif [ "$top" -eq "$max_top" ]; then
-      if [ "$area" -gt "$best_area" ] || { [ "$area" -eq "$best_area" ] && [ "$left" -gt "$best_left" ]; }; then
-        best_id=$id
-        best_area=$area
-        best_left=$left
-      fi
-    fi
-  done <<EOF
-$(tmux_do list-panes -t "$win" -F '#{pane_id} #{pane_top} #{pane_left} #{pane_width} #{pane_height}')
-EOF
-  printf '%s' "$best_id"
-}
-
 set_pane_opt() {
   tmux_do set-option -p -t "$1" "$2" "$3"
 }
@@ -1120,19 +1084,17 @@ spawn_child() {
   if [ "$new_window" -eq 1 ]; then
     child="$(tmux_do new-window -t "$sess" -n "$name" -c "$cwd" -P -F '#{pane_id}' "$envcmd")"
   else
-    local n cols target winid
-    n="$(tmux_do list-panes -t "$pane" -F '#{pane_id}' | awk 'END { print NR }')"
-    [ -n "$n" ] || n=1
-    cols="$(ceil_sqrt $((n + 1)))"
-    target="$(grid_split_target "$pane")"
-    [ -n "$target" ] || target="$pane"
-    # Complete rectangle (n divisible by next-grid cols) → new row; else add a column.
-    if [ $((n % cols)) -eq 0 ]; then
-      child="$(tmux_do split-window -v -t "$target" -c "$cwd" -P -F '#{pane_id}' "$envcmd")"
-    else
-      child="$(tmux_do split-window -h -t "$target" -c "$cwd" -P -F '#{pane_id}' "$envcmd")"
-    fi
+    local winid largest
     winid="$(pane_fmt "$pane" '#{window_id}')"
+    child="$(tmux_do split-window -h -t "$pane" -c "$cwd" -P -F '#{pane_id}' "$envcmd")" \
+      || child="$(tmux_do split-window -v -t "$pane" -c "$cwd" -P -F '#{pane_id}' "$envcmd")"
+    if [ -z "$child" ]; then
+      largest="$(tmux_do list-panes -t "$pane" -F '#{pane_id} #{pane_width} #{pane_height}' \
+        | awk '{ a=$2*$3; if (a>ma || (a==ma && $1>best)) { ma=a; best=$1 } } END { print best }')"
+      [ -n "$largest" ] || largest="$pane"
+      child="$(tmux_do split-window -h -t "$largest" -c "$cwd" -P -F '#{pane_id}' "$envcmd")" \
+        || child="$(tmux_do split-window -v -t "$largest" -c "$cwd" -P -F '#{pane_id}' "$envcmd")"
+    fi
     tmux_do select-layout -t "$winid" tiled
   fi
   [ -n "$child" ] || die "spawn: tmux did not return a pane id"

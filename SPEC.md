@@ -90,11 +90,9 @@ splits a pane in the parent's window. The child's start directory is
 `--cwd DIR` if given, otherwise the `muxa` process working directory
 (`$PWD`), otherwise the parent pane's `#{pane_current_path}`. `$PWD` is
 what `cd worktree && muxa spawn` sets when the agent's shell is a
-subprocess (Cursor) and does not change the tmux pane path. Split
-direction follows pane count
-(`cols = ceil(sqrt(n+1))`: a complete rectangle starts a new row with
-`split-window -v`, otherwise a column with `-h`) so successive children fill
-a 2D grid rather than a single row. Then `select-layout tiled` on the window.
+subprocess (Cursor) and does not change the tmux pane path. Splits the parent pane (`split-window -h`, falling back to `-v` on failure,
+then against the largest pane if both fail), then `select-layout tiled` on
+the window so successive children fill a 2D grid rather than a single row.
 `--window` opens a dedicated tmux window instead. If a live registered worker already
 occupies that start directory (same physical path, including a worktree),
 spawn prints a warning on stderr and still creates the pane. Ghosts and
