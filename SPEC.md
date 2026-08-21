@@ -72,7 +72,7 @@ and remain reachable via `muxa send`:
 shell.
 
 `muxa unregister NAME|ID` clears `@muxa_name`, `@muxa_id`, `@muxa_parent`,
-`@muxa_kind` (and leftover options from older installs), resets
+`@muxa_kind`, resets
 the pane title, and leaves the tmux pane running. Lookup prefers an exact
 name match, then a 12-hex id match. Unknown targets exit 2.
 
@@ -94,8 +94,7 @@ direction follows pane count
 (`cols = ceil(sqrt(n+1))`: a complete rectangle starts a new row with
 `split-window -v`, otherwise a column with `-h`) so successive children fill
 a 2D grid rather than a single row. Then `select-layout tiled` on the window.
-`--window` opens a dedicated tmux window instead. `--split` is accepted for
-compatibility (split is the default). If a live registered worker already
+`--window` opens a dedicated tmux window instead. If a live registered worker already
 occupies that start directory (same physical path, including a worktree),
 spawn prints a warning on stderr and still creates the pane. Ghosts and
 roots occupying the path do not warn; name conflicts still fail as today.
@@ -113,8 +112,7 @@ a shell still as `pane_pid`) registers as `cursor` and stays `cursor` after
 a later Claude `SessionStart`. If the pane is already registered, the hook
 does not rename or re-parent it; it may correct `@muxa_kind` only when
 process evidence says so, and must not flip a live `claude`/`cursor`/`pi`
-registration to a different family without that evidence. Presence events
-(`busy` / `idle` / `blocked` / `stop`) are not part of muxa.
+registration to a different family without that evidence.
 
 ## Reachability
 
@@ -132,8 +130,7 @@ muxa does not know about orchestrators. It only enforces a tree:
 `muxa send` talks to **muxa-broker** over a unix socket. The broker is
 required. If `ensure_broker` or enqueue fails, send exits non-zero and
 does not paste. There is no paste-buffer fallback, no maildir
-`write_mail` path, and no Stop-hook drain for send. `MUXA_BROKER=0` is
-an error, not a switch back to the old bash delivery stack.
+`write_mail` path, and no Stop-hook drain for send.
 
 ```
 send(name, body):
@@ -288,8 +285,6 @@ process inside a tmux pane. There is no hook-resolution ladder.
 `TMUX_PANE` if it is not already registered. Spawned panes skip identity
 creation; a leftover hook still must not overwrite their kind to a
 different CLI family without process/argv evidence. Stdin is ignored.
-Leftover presence events (`busy`, `idle`, `blocked`, `stop`,
-`session-end`) exit 0 and change nothing.
 
 Native continue payloads are not used. Incoming mail is a user turn
 pasted by the broker:

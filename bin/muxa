@@ -11,7 +11,7 @@ usage() {
 muxa — message other AI CLIs in this tmux server
 
   muxa register [--name NAME] [--id ID] [--parent NAME] [--kind claude|cursor|pi|generic]
-  muxa spawn [--name NAME] [--kind KIND] [--cwd DIR] [--split] [--window] -- COMMAND...
+  muxa spawn [--name NAME] [--kind KIND] [--cwd DIR] [--window] -- COMMAND...
                                 spawn flags must precede -- or the command word
                                 omit --name to get a unique adjective-noun alias (swift-oak)
                                 default: split into a tiled grid in this window (--window for a new window)
@@ -203,14 +203,6 @@ clear_muxa_registration() {
   unset_pane_opt "$pane" @muxa_id
   unset_pane_opt "$pane" @muxa_parent
   unset_pane_opt "$pane" @muxa_kind
-  unset_pane_opt "$pane" @muxa_state
-  unset_pane_opt "$pane" @muxa_deliver
-  unset_pane_opt "$pane" @muxa_session
-  unset_pane_opt "$pane" @muxa_hook_ok
-  unset_pane_opt "$pane" @muxa_unread
-  unset_pane_opt "$pane" @muxa_kick_wait
-  unset_pane_opt "$pane" @muxa_stop_pending
-  unset_pane_opt "$pane" @muxa_stop_pending_batch
   set_pane_title "$pane" ""
 }
 
@@ -834,9 +826,6 @@ broker_ping() {
 # it is the forking parent, which exits in milliseconds.
 ensure_broker() {
   local bin i lock runbin held=0 rc=1
-  if [ "${MUXA_BROKER:-1}" = "0" ]; then
-    return 1
-  fi
   broker_setup_paths
   mkdir -p "$BROKER_DIR" || return 1
   broker_ping && return 0
@@ -914,9 +903,6 @@ cmd_broker() {
   broker_setup_paths
   case "$sub" in
     start)
-      if [ "${MUXA_BROKER:-1}" = "0" ]; then
-        die "broker is required (MUXA_BROKER=0 is not supported)"
-      fi
       if ensure_broker; then
         pid="$(cat "$BROKER_PID" 2>/dev/null || printf '?')"
         printf 'broker pid=%s sock=%s dir=%s\n' "$pid" "$BROKER_SOCK" "$BROKER_DIR"
@@ -954,9 +940,6 @@ send_one() {
   fi
   pane="$(find_pane_by_name "$to")" || die "unknown agent '$to' — muxa who"
   can_send "$from" "$to" || forbid "forbidden $from → $to (only parent↔child)"
-  if [ "${MUXA_BROKER:-1}" = "0" ]; then
-    die "broker is required (MUXA_BROKER=0 is not supported)"
-  fi
   text="$(format_one "$from" "$flags" "$body")"
   id="$(date +%s)-$$-$(printf '%05d' "$RANDOM")"
   ensure_broker || die "broker unreachable (could not start muxa-broker)"
@@ -1131,9 +1114,6 @@ cmd_dispatch() {
   parent_pane="$(this_pane)"
   text="$(format_one "$SPAWN_PARENT" "" "$brief")"
   id="$(date +%s)-$$-$(printf '%05d' "$RANDOM")"
-  if [ "${MUXA_BROKER:-1}" = "0" ]; then
-    die "broker is required (MUXA_BROKER=0 is not supported)"
-  fi
   ensure_broker || die "broker unreachable (could not start muxa-broker)"
   broker_enqueue "$id" "$SPAWN_PANE" "$SPAWN_PARENT" "$SPAWN_NAME" "$text" "dispatch" "$parent_pane" \
     || die "broker enqueue failed"
@@ -1161,7 +1141,6 @@ spawn_child() {
       --name) name="$2"; shift 2 ;;
       --kind) kind="$2"; shift 2 ;;
       --cwd) cwd_flag="$2"; shift 2 ;;
-      --split) shift ;; # compat: split into the parent window is the default
       --window) new_window=1; shift ;;
       --) explicit_cmd=1; shift; break ;;
       -*) die "spawn: unknown flag $1" ;;
@@ -1175,7 +1154,7 @@ spawn_child() {
     for arg in "$@"; do
       case "$arg" in
         --) break ;;
-        --name|--kind|--cwd|--split|--window)
+        --name|--kind|--cwd|--window)
           die "spawn: $arg must precede the command (use: muxa spawn --name NAME --cwd DIR -- COMMAND…)"
           ;;
       esac
@@ -1298,8 +1277,6 @@ hook_register_pane() {
 
 # Optional root self-registration. Spawned panes are already registered by
 # spawn; TMUX_PANE is enough — no stdin payload, no resolution ladder.
-# Leftover presence events (busy/idle/blocked/stop/session-end) no-op so
-# previously merged per-CLI hooks do not fail closed on upgrade.
 # SessionStart does not rename a live pane; it may correct @muxa_kind when
 # process/argv evidence disagrees with --kind.
 cmd_hook() {
@@ -1319,9 +1296,6 @@ cmd_hook() {
   fi
   case "$event" in
     session-start|SessionStart|sessionStart) event="session-start" ;;
-    session-end|SessionEnd|sessionEnd|busy|PreToolUse|preToolUse|blocked|PermissionRequest|idle|afterAgentResponse|stop|Stop|session_stop)
-      return 0
-      ;;
     "") die "hook: event required" ;;
     *) die "hook: unknown event $event" ;;
   esac
@@ -1346,7 +1320,7 @@ main() {
     register) cmd_register "$@" ;;
     spawn) cmd_spawn "$@" ;;
     dispatch) cmd_dispatch "$@" ;;
-    who|ls|roster) cmd_who "$@" ;;
+    who) cmd_who "$@" ;;
     tail) cmd_tail "$@" ;;
     unregister) cmd_unregister "$@" ;;
     kill) cmd_kill "$@" ;;
