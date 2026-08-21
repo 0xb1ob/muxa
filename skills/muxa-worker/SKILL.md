@@ -29,7 +29,7 @@ muxa parent          # who to reply to
 muxa send <parent> <text>
 ```
 
-One Bash call. Incoming mail is already a user turn — do not poll `muxa peek`.
+One Bash call. Incoming mail is already a user turn — do not poll for mail.
 
 ## You may
 
@@ -41,7 +41,7 @@ One Bash call. Incoming mail is already a user turn — do not poll `muxa peek`.
 
 - Message sibling panes or other roots
 - `cd` to this cwd or prefix commands with `cd /absolute/path` — spawn already set cwd; `pwd` is correct
-- Poll `muxa peek` or inject `tmux send-keys`
+- Poll for mail or inject `tmux send-keys`
 - Ack, thank, or narrate progress
 - Add MCP tools for muxa
 

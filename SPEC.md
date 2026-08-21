@@ -111,7 +111,7 @@ a shell still as `pane_pid`) registers as `cursor` and stays `cursor` after
 a later Claude `SessionStart`. If the pane is already registered, the hook
 does not rename or re-parent it; it may correct `@muxa_kind` only when
 process evidence says so, and must not flip a live `claude`/`cursor`/`pi`
-registration to a different family without that evidence.
+registration to a different family without that evidence. Presence events (`busy`, `idle`, `blocked`, `stop`) are not part of muxa.
 
 ## Reachability
 
