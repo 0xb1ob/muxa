@@ -107,6 +107,11 @@ func main() {
 	if n, _, _, _, err := q.Counts(); err == nil && n > 0 {
 		log.Printf("re-adopted %d pending from %s", n, filepath.Join(dir, "pending"))
 	}
+	if doneN, failedN, unknownN, err := q.Prune(time.Now()); err != nil {
+		log.Printf("queue prune failed: %v", err)
+	} else if doneN > 0 || failedN > 0 || unknownN > 0 {
+		log.Printf("pruned %d done, %d failed/unknown", doneN, failedN+unknownN)
+	}
 
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)

@@ -167,6 +167,56 @@ func (q *Queue) move(m *Msg, dest string) error {
 	return os.Remove(filepath.Join(q.pending, m.ID+".json"))
 }
 
+const (
+	pruneDoneMaxAge   = 24 * time.Hour
+	pruneFailedMaxAge = 7 * 24 * time.Hour
+)
+
+// Prune deletes stale entries from done/, failed/, and unknown/. Done
+// entries older than 24h and failed/unknown older than 7d are removed.
+// Call on startup (and periodically) while holding no other queue work;
+// the mutex makes concurrent delivery safe.
+func (q *Queue) Prune(now time.Time) (done, failed, unknown int, err error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	done, err = q.pruneDir(q.done, now, pruneDoneMaxAge)
+	if err != nil {
+		return
+	}
+	failed, err = q.pruneDir(q.failed, now, pruneFailedMaxAge)
+	if err != nil {
+		return
+	}
+	unknown, err = q.pruneDir(q.unknown, now, pruneFailedMaxAge)
+	return
+}
+
+func (q *Queue) pruneDir(dir string, now time.Time, maxAge time.Duration) (int, error) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	cutoff := now.Add(-maxAge)
+	n := 0
+	for _, e := range ents {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if !info.ModTime().Before(cutoff) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
 func countJSON(dir string) (int, error) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
