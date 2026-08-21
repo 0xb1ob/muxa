@@ -179,6 +179,7 @@ Never ack. `--no-reply` for status dumps. Etiquette: [SPEC.md](SPEC.md).
 | `muxa who --json` | Same roster as objects (`parent`/`session` are `null` when empty; `state` is `idle`/`busy` from the broker drawing list) |
 | `muxa tail NAME [-n N]` | One-shot pane read (visible grid, or last N lines of history) |
 | `muxa unregister NAME\|ID` | Clear muxa registration; leave pane running |
+| `muxa kill NAME\|ID` | Remove the pane (`kill-pane`); gone from `muxa who` |
 | `muxa session` | Empty (CLI session id is not tracked) |
 | `muxa children` | Direct children of this pane |
 | `muxa send NAME TEXT` | Enqueue on the broker (parent↔child). Auto-starts the daemon if the socket is dead; fails closed if it cannot |

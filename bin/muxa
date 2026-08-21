@@ -25,6 +25,7 @@ muxa — message other AI CLIs in this tmux server
   muxa who [--json]                 roster (tmux pane options, cwd, STATUS; STATE from broker drawing)
   muxa whoami                       this pane's alias
   muxa unregister NAME|ID           clear muxa registration; leave pane running
+  muxa kill NAME|ID                 remove the pane (gone from muxa who)
   muxa id                           this pane's unique muxa id
   muxa session                      empty (CLI session id is not tracked)
   muxa parent                       this pane's parent alias (empty if root)
@@ -644,6 +645,19 @@ cmd_unregister() {
   printf 'unregistered %s id=%s pane=%s\n' "$name" "$id" "$pane"
 }
 
+# kill-pane counterpart of spawn. NAME|ID lookup matches unregister.
+# Does not take a job id. unregister remains identity-only.
+cmd_kill() {
+  need_tmux
+  local target="${1:-}" pane name id
+  [ -n "$target" ] || die "kill: NAME or ID required"
+  pane="$(find_pane_by_target "$target")" || die "unknown agent '$target' — muxa who"
+  name="$(pane_fmt "$pane" '#{@muxa_name}')"
+  id="$(pane_fmt "$pane" '#{@muxa_id}')"
+  tmux_do kill-pane -t "$pane" || die "kill: could not remove pane $pane"
+  printf 'killed %s id=%s pane=%s\n' "$name" "$id" "$pane"
+}
+
 cmd_whoami() {
   need_tmux
   local n
@@ -1246,6 +1260,7 @@ main() {
     who|ls|roster) cmd_who "$@" ;;
     tail) cmd_tail "$@" ;;
     unregister) cmd_unregister "$@" ;;
+    kill) cmd_kill "$@" ;;
     whoami) cmd_whoami "$@" ;;
     id) cmd_id "$@" ;;
     session) cmd_session "$@" ;;

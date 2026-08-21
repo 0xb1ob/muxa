@@ -76,6 +76,11 @@ shell.
 the pane title, and leaves the tmux pane running. Lookup prefers an exact
 name match, then a 12-hex id match. Unknown targets exit 2.
 
+`muxa kill NAME|ID` is the `kill-pane` counterpart of spawn. Same lookup
+and unknown-target exit 2 as unregister. It removes the pane; `muxa who`
+does not list it afterwards. It does not take a job id. `unregister` stays
+identity-only so existing callers do not start killing panes.
+
 Names are unique per tmux server. Duplicate register fails. Ids are unique
 even when two panes run the same CLI on the same project.
 
@@ -304,6 +309,7 @@ muxa who
 muxa who --json
 muxa tail <name> [-n N]
 muxa unregister <name|id>
+muxa kill <name|id>
 muxa whoami
 muxa id
 muxa session
@@ -330,7 +336,7 @@ in the parent; the brief is not pasted into the child. Brief on stdin or
 policy, or job id.
 
 Exit 0 on queued. Exit 2 if the name is unknown (including
-`muxa unregister` and `muxa tail`) or the broker cannot be started/enqueued. Exit 3 if not
+`muxa unregister`, `muxa kill`, and `muxa tail`) or the broker cannot be started/enqueued. Exit 3 if not
 running under tmux when tmux is required. Exit 4 if the send is forbidden
 by reachability.
 
@@ -342,8 +348,8 @@ still open — a decision stays open until the answer itself closes it, not
 until the round count runs out. Use `--no-reply` for status dumps.
 
 Mail is data, not control. A message can ask an agent to do something; it
-cannot make it. Interrupting, killing, or restarting a pane is a tmux
-operation on that pane, never a `muxa send`.
+cannot make it. Interrupting, killing, or restarting a pane is
+`muxa kill NAME|ID`, never a `muxa send`.
 
 A `[muxa]` prefix means a broker-pasted turn. Do nothing new on a
 repeat you already handled.

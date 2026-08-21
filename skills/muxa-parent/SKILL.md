@@ -37,6 +37,7 @@ muxa who --json
 muxa whoami
 muxa children
 muxa unregister <name|id>
+muxa kill <name|id>
 muxa tail <name>
 muxa tail <name> -n 40
 muxa send <name> <text>
@@ -50,7 +51,7 @@ muxa spawn --cwd DIR -- agent --model composer-2.5-fast
 
 One Bash call. Incoming mail is already a user turn — do not poll `muxa peek`.
 
-Mail is data, not control. `muxa send` can ask a worker to do something; it cannot interrupt, kill, or restart it. Those are tmux operations on the pane.
+Mail is data, not control. `muxa send` can ask a worker to do something; it cannot interrupt, kill, or restart it. `muxa kill NAME|ID` removes the pane. `muxa unregister NAME|ID` only clears identity and leaves the pane running.
 
 ## Dispatch
 
@@ -66,7 +67,7 @@ Spawn only the CLI and optional `--model`. Do not pass trust, yolo, skip-permiss
 
 The worker's cwd is already set — do not tell the worker to `cd` unless dispatch `cwd` was wrong.
 
-`muxa who` STATUS `ghost` means the CLI is gone or the pane cwd is missing (a `generic` shell is still `live`). Do not brief ghosts. `muxa unregister NAME|ID` clears muxa identity and leaves the pane.
+`muxa who` STATUS `ghost` means the CLI is gone or the pane cwd is missing (a `generic` shell is still `live`). Do not brief ghosts. `muxa unregister NAME|ID` clears muxa identity and leaves the pane. `muxa kill NAME|ID` removes the pane so it is no longer on the roster.
 
 For a `ghost` STATUS or a child that looks stuck, inspect **once** with `muxa tail NAME` (`-n N` for the last N lines). Do not read the pane through tmux.
 
