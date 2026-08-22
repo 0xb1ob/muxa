@@ -223,12 +223,17 @@ is how long a *dead* pane is retried before the message is failed; a live
 busy pane keeps its mail in `pending/` past that deadline. The broker MUST
 NOT timeout-fallback paste: two fallbacks into one busy composer overwrite
 each other, both get filed as `done/`, and the agent never sees the first.
-After a paste, confirmation has two outcomes, from one snapshot. **delivered**
+After a paste, confirmation has two snapshot outcomes. **delivered**
 (filed `done/`, never retried): the pane reacted — cursor row no longer
-empty/prompt, or control-mode drawing. **pending-safe-retry**: the pane
-stayed free (cursor row still empty/prompt, not drawing). A pane that
-reacted MUST NOT be retried: a duplicate first brief re-runs work. The
-broker does not match the payload against pane captures. `delivered` is
+empty/prompt, or control-mode drawing. **inconclusive**: the pane stayed
+free (cursor row still empty/prompt, not drawing). A first brief
+(`Kind=dispatch`) whose `Inject` returned nil MUST NOT be retried when
+confirm is inconclusive — Cursor Agent parks the hardware cursor on a blank
+footer row, so "still free" is a false negative and a later Tick would
+re-run the job. File that brief `done/` (no third queue directory). Later
+mail (`muxa send`) that stayed free remains **pending-safe-retry**. A pane
+that reacted MUST NOT be retried. The broker does not match the payload
+against pane captures. `delivered` is
 never recorded for an overwritten timeout paste. When the broker is down
 or the binary is missing, `muxa send` exits non-zero and pastes nothing.
 

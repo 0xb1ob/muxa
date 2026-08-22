@@ -138,6 +138,16 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		log.Printf("delivered %s → %s id=%s", m.From, m.To, m.ID)
 		_ = d.Q.MarkDone(m)
 	default:
+		// Cursor Agent parks the hardware cursor on a blank footer row, so
+		// confirmMissed is a false negative after a first brief already
+		// submitted. Leaving Kind=dispatch queued would re-paste on the
+		// next Tick. Later mail (muxa send) still retries a genuine ghost.
+		if m.isDispatch() {
+			d.notePaste(m)
+			log.Printf("unknown %s → %s id=%s (paste accepted but payload not visible; will not retry)", m.From, m.To, m.ID)
+			_ = d.Q.MarkDone(m)
+			return
+		}
 		log.Printf("unconfirmed %s → %s id=%s (pane still free; left queued)", m.From, m.To, m.ID)
 	}
 }
@@ -255,13 +265,14 @@ func visibleContent(capture string) bool {
 type confirmResult int
 
 const (
-	confirmMissed confirmResult = iota // still free — safe to retry
+	confirmMissed confirmResult = iota // still free — send may retry; dispatch must not
 	confirmPasted                      // pane reacted; must not retry
 )
 
 // confirm takes one post-paste snapshot. A pane that reacted (cursor row
 // no longer empty/prompt, or control-mode drawing) is pasted and must not
-// be retried. A pane that stayed provably free may be retried. No payload
+// be retried. A pane that stayed free is confirmMissed: deliverOne files
+// a first brief done/ (no retry) and leaves later mail queued. No payload
 // string-matching against the capture.
 func (d *Deliverer) confirm(pane string) confirmResult {
 	snap, err := d.T.Snapshot(pane)
