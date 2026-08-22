@@ -1063,6 +1063,49 @@ set -e
   || bad "dispatch empty brief exits non-zero" "exit=$empty_rc out=$empty_disp"
 assert_contains "$empty_disp" "empty brief" "dispatch empty brief names the error"
 
+tok_sendfile="SENDFILE_$$"
+send_file_body="$tmpdir/send.body"
+printf 'file-send-%s\n' "$tok_sendfile" >"$send_file_body"
+send_file_loop='while true; do printf "ready> "; read -r _ || break; done'
+send_file_spawn="$(muxa_as "$bob_pane" spawn --window --name sendfile -- bash -c "$send_file_loop")"
+send_file_pane="$(printf '%s\n' "$send_file_spawn" | spawn_pane_id)"
+sleep 0.4
+send_file_out="$(muxa_as "$bob_pane" send --file "$send_file_body" sendfile)"
+assert_contains "$send_file_out" "queued bob → sendfile" "send --file enqueues on broker"
+send_file_cap=""
+i=0
+while [ "$i" -lt 40 ]; do
+  send_file_cap="$(tmux -L "$SOCK" capture-pane -p -t "$send_file_pane" 2>/dev/null || true)"
+  case "$send_file_cap" in
+    *"file-send-$tok_sendfile"*) break ;;
+  esac
+  sleep 0.15
+  i=$((i + 1))
+done
+case "$send_file_cap" in
+  *"file-send-$tok_sendfile"*) ok "send --file delivers" ;;
+  *) bad "send --file delivers" "cap: $send_file_cap" ;;
+esac
+set +e
+send_both="$(muxa_as "$bob_pane" send --file "$send_file_body" carol also-here 2>&1)"
+send_both_rc=$?
+send_miss="$(muxa_as "$bob_pane" send --file "$tmpdir/no-such-send-file" carol 2>&1)"
+send_miss_rc=$?
+empty_send_file="$tmpdir/empty.send.body"
+: >"$empty_send_file"
+send_empty="$(muxa_as "$bob_pane" send --file "$empty_send_file" carol 2>&1)"
+send_empty_rc=$?
+set -e
+[ "$send_both_rc" -ne 0 ] && ok "send --file + positional body exits non-zero" \
+  || bad "send --file + positional body exits non-zero" "exit=$send_both_rc out=$send_both"
+assert_contains "$send_both" "mutually exclusive" "send --file + positional body names the error"
+[ "$send_miss_rc" -ne 0 ] && ok "send --file missing file exits non-zero" \
+  || bad "send --file missing file exits non-zero" "exit=$send_miss_rc out=$send_miss"
+assert_contains "$send_miss" "not a file" "send --file missing file names the error"
+[ "$send_empty_rc" -ne 0 ] && ok "send --file empty file exits non-zero" \
+  || bad "send --file empty file exits non-zero" "exit=$send_empty_rc out=$send_empty"
+assert_contains "$send_empty" "empty body" "send --file empty file names the error"
+
 tmux -L "$SOCK" new-window -t muxa -n taildata "printf '%s\n' alpha-tail bravo-tail charlie-tail; exec sleep 3600"
 sleep 0.3
 tail_pane="$(tmux -L "$SOCK" list-panes -t muxa:taildata -F '#{pane_id}' | head -1)"

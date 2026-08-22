@@ -87,6 +87,7 @@ muxa who
 | `muxa tail NAME [-n N]` | One-shot pane read |
 | `muxa kill NAME\|ID` | Remove the pane |
 | `muxa send NAME TEXT` | Enqueue mail |
+| `muxa send --file F NAME` | Same; body read from file |
 | `muxa send --json NAME TEXT` | Same; stdout `{"id","pane","from","to"}` |
 | `muxa broker [start\|status\|stop]` | Paste broker |
 | `muxa hook session-start [--kind KIND]` | Optional root self-registration |
