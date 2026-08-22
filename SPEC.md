@@ -2,8 +2,8 @@
 
 muxa is a messaging protocol for AI agent CLIs that already share a tmux
 server. It has no MCP server and no extra tools in the model context.
-A small user-level Go broker owns pane paste. Agents send with the Bash
-they already have. Incoming mail arrives as a normal user turn.
+A small user-level Go binary owns the CLI and pane paste. Agents send with
+the Bash they already have. Incoming mail arrives as a normal user turn.
 
 ## Why this shape
 
@@ -19,9 +19,12 @@ muxa pays for the body once, as a user message, and nothing else.
 ## Actors
 
 - **tmux** is the process manager and roster
-- **muxa-broker** is the delivery daemon: unix socket, file-backed queue,
-  paste-buffer + Enter when the pane looks free. It is required for `muxa send`.
-  Control-mode `%output` silence is presence: a pane that is drawing is busy.
+- **muxa** is one Go binary: the CLI (`register`, `spawn`, `dispatch`, `who`,
+  `tail`, `kill`, `whoami`, `parent`, `send`, `hook`, `broker`) and the
+  delivery daemon (`muxa broker`). The daemon owns a unix socket, a
+  file-backed queue, and paste-buffer + Enter when the pane looks free. It
+  is required for `muxa send`. Control-mode `%output` silence is presence: a
+  pane that is drawing is busy.
 - **`muxa hook session-start`** is optional root self-registration. Spawned
   panes are already registered by `spawn`. Presence is not hook-reported.
 
@@ -37,45 +40,38 @@ Each participating pane sets tmux user options:
 | `@muxa_kind`    | `claude` \| `cursor` \| `pi` \| `generic`    |
 
 Roster is `tmux list-panes -a`. There is no registry file. `muxa who`
-prints that roster plus each pane's current working directory, a **STATE**
-column derived from the broker's drawing list, and a **STATUS** column so
-agents on the same tmux server, in different projects, can tell which is
-which. `muxa who --json` is the same roster as objects (`name`, `id`,
-`parent`, `kind`, `state`, `pane`, `session`, `cwd`, `status`). Empty
+prints that roster plus each pane's current working directory and a
+**STATE** column so agents on the same tmux server, in different projects,
+can tell which is which. `muxa who --json` is the same roster as objects
+(`name`, `id`, `parent`, `kind`, `state`, `pane`, `session`, `cwd`). Empty
 `parent` is JSON `null`. `session` is always JSON `null` (CLI conversation
 ids are not tracked). Default `muxa who` has no DELIVER column.
 
-`who --json` reads tmux pane options only; it does not talk to the broker
-daemon. It still requires the `muxa-broker` binary: `bin/muxa` pipes roster
-rows to the broker CLI subcommand `who-json` for encoding (same helper used
-by `send --json`). Install always ships that binary; command-post occupancy
-checks therefore depend on it being present even though no socket RPC occurs.
+`who --json` reads tmux pane options and encodes JSON in-process. It does
+not talk to the broker daemon and does not need a second binary. Occupancy
+checks consume `cwd` and `state` from that JSON. `busy` still consults the
+daemon's drawing list when the socket is up, and treats a down broker as
+not-drawing (idle, unless ghost).
 
 `muxa tail NAME [-n N]` is a one-shot pane read so a parent never has to
 call `tmux capture-pane`. With no `-n` it prints the visible grid; `-n N`
 prints the last N lines of history plus the visible grid, ignoring trailing
 blank rows. One read, never a poll. Unknown names exit 2.
 
-**STATE** is computed from the broker, not stored on the pane. No hook is
-required. `blocked` is not a value:
+**STATE** is computed, not stored on the pane. No hook is required.
+`blocked`, `live`, and `drawing` are not values. Ghosts are not filtered
+from the roster and remain reachable via `muxa send`:
 
 | STATE | Meaning |
 | ----- | ------- |
-| `idle` | Pane is not in the broker's live drawing list |
-| `busy` | Pane has been emitting `%output` across a quiet window |
-
-**STATUS** is informational only; ghosts are not filtered from the roster
-and remain reachable via `muxa send`:
-
-| STATUS | Meaning |
-| ------ | ------- |
-| `live` | Pane cwd exists and (for `claude`/`cursor`/`pi`) the foreground process is not a shell |
+| `idle` | Registered, reachable, not in the broker's drawing list |
+| `busy` | Registered, in the broker's drawing list (emitting `%output` across a quiet window) |
 | `ghost` | Pane cwd is missing, or a `claude`/`cursor`/`pi` pane is sitting at a shell prompt (`zsh`, `bash`, `fish`, `sh`, `dash`, `ksh`) |
-| `drawing` | `live`, and the pane is in the broker's drawing list |
 
-`generic` panes at a shell are still `live`. A CLI version string in
-`pane_current_command` (e.g. `2.1.233` for Claude) is not treated as a
-shell.
+`generic` panes at a shell are still `idle` (or `busy` if drawing). A CLI
+version string in `pane_current_command` (e.g. `2.1.233` for Claude) is
+not treated as a shell. Ghost wins over drawing: a missing cwd is `ghost`,
+not `busy`.
 
 `muxa kill NAME|ID` is the `kill-pane` counterpart of spawn. Lookup prefers
 an exact name match, then a 12-hex id match. Unknown targets exit 2. It
@@ -104,14 +100,11 @@ registration id. Spawned panes do not need a hook to appear on the roster.
 
 A root pane started by hand may call `muxa hook session-start [--kind KIND]`
 (or `muxa register`). That hook needs no stdin payload and no pane-resolution
-ladder: `TMUX_PANE` is enough. `--kind` is a hint. Process argv — including
-descendants of `#{pane_pid}` — wins when it identifies a CLI family, so a
-Cursor pane whose tmux command is `node` (agent / cursor-agent, often with
-a shell still as `pane_pid`) registers as `cursor` and stays `cursor` after
-a later Claude `SessionStart`. If the pane is already registered, the hook
-does not rename or re-parent it; it may correct `@muxa_kind` only when
-process evidence says so, and must not flip a live `claude`/`cursor`/`pi`
-registration to a different family without that evidence. Presence events (`busy`, `idle`, `blocked`, `stop`) are not part of muxa.
+ladder: `TMUX_PANE` is enough. `--kind` is a hint: process argv of `#{pane_pid}`
+and its direct children wins, otherwise `--kind`, otherwise keep existing
+`@muxa_kind`, otherwise `generic`. If the pane is already registered, the hook
+does not rename or re-parent it. Presence events (`busy`, `idle`, `blocked`,
+`stop`) are not part of muxa.
 
 `muxa hook` fails open. It runs from registrations inside agent harnesses,
 where a non-zero exit — 2 especially — denies the tool call or turn that
@@ -149,7 +142,7 @@ send(name, body):
 The broker keeps each enqueue as a JSON file under
 `$MUXA_BROKER_DIR/pending/` so a restart does not drop messages. Default
 socket is `<runtime>/broker/broker.sock`. `muxa send` auto-starts
-`bin/muxa-broker` when the socket does not answer `{"op":"ping"}`.
+the same binary as the daemon when the socket does not answer `{"op":"ping"}`.
 
 The broker MUST daemonize itself. It re-execs with `setsid(2)`, so the
 running daemon leads its own session and process group, and writes its own
@@ -161,9 +154,9 @@ first delivery, with the first brief still in `pending/` and nothing but
 repeated `listening` lines in the log. macOS ships no `setsid(1)`, so the
 shell cannot do this. `MUXA_BROKER_FOREGROUND=1` opts out for tests and
 supervisors. The forking parent waits for its daemon to answer a ping before
-exiting, so a zero exit means the queue has an owner; the shell still starts
-it in the background and polls, because `bin/muxa-broker` is versioned
-separately from `bin/muxa` and an older broker would never return.
+exiting, so a zero exit means the queue has an owner. The CLI copies itself
+into `$MUXA_BROKER_DIR/muxa-broker` and launches that file so a live daemon
+is never overwritten by `go build -o`.
 
 **One queue, one owner.** A second daemon against the same
 `$MUXA_BROKER_DIR` unlinks the live socket, rebinds it, and then races the
@@ -185,9 +178,9 @@ never silently stranded: the count is in the log and the files stay on disk
 for the next start. SIGHUP is ignored. Socket paths of 104 bytes or more are
 rejected with an explicit error rather than the kernel's `invalid argument`.
 
-`bin/muxa-broker` is a prebuilt release asset (`muxa-broker-<os>-<arch>`),
-downloaded and checksum-verified by `install.sh`. Install never compiles Go;
-a Go toolchain is a test-only dependency.
+`muxa` is a prebuilt release asset (`muxa-<os>-<arch>`), downloaded and
+checksum-verified by `install.sh`. Install never compiles Go and never
+places a second binary; a Go toolchain is a test-only dependency.
 
 For each queued message the broker captures the target pane (`tmux
 capture-pane -p -e`, attributes retained) and pastes only when the pane is
@@ -201,7 +194,7 @@ user-configurable, so no fixed prompt/status model can be correct:
    silent-loss).
 2. Drawing — `%output` inside the quiet window (muxa#46) → not free. A busy
    agent draws continuously; an idle one draws nothing. Delivery wakes on
-   silence rather than a 250 ms poll. `muxa who` STATUS `drawing` is this
+   silence rather than a 250 ms poll. `muxa who` STATE `busy` is this
    same window, with no hook involvement.
 3. Two-signal (muxa#44), sharing the same decision as the poll fallback so
    the paths cannot drift: (a) this capture equals the previous poll
@@ -219,7 +212,7 @@ same quiescence and empty-at-cursor as an idle composer. Pasting over
 someone mid-prompt is recoverable in seconds when the human is at that
 pane; the ~700-line typed-in-box parser that closed that hole was dropped
 as poor ROI for a lightweight tool. **Etiquette:** do not leave half-typed
-input in worker panes. `muxa-broker -check-pane %id` prints the two-signal
+input in worker panes. `muxa -check-pane %id` prints the two-signal
 verdict.
 
 Retry until the pane is actually free. `MUXA_BROKER_DEADLINE` (default 600)
@@ -227,15 +220,14 @@ is how long a *dead* pane is retried before the message is failed; a live
 busy pane keeps its mail in `pending/` past that deadline. The broker MUST
 NOT timeout-fallback paste: two fallbacks into one busy composer overwrite
 each other, both get filed as `done/`, and the agent never sees the first.
-After a paste, confirmation has three outcomes: **delivered** (payload or
-Cursor's `[Pasted text +N lines]` collapse is visible), **pending-safe-retry**
-(pane still free — cursor row still empty/prompt),
-and **unknown-no-retry** (the pane went busy or started drawing but the
-payload is not in the visible grid — Cursor collapses long pastes and
-scrolls them off). Unknown MUST NOT retry: a duplicate first brief re-runs
-work. `delivered` is never recorded for an overwritten timeout paste. When
-the broker is down or the binary is missing, `muxa send` exits non-zero and
-pastes nothing.
+After a paste, confirmation has two outcomes, from one snapshot. **delivered**
+(filed `done/`, never retried): the pane reacted — cursor row no longer
+empty/prompt, or control-mode drawing. **pending-safe-retry**: the pane
+stayed free (cursor row still empty/prompt, not drawing). A pane that
+reacted MUST NOT be retried: a duplicate first brief re-runs work. The
+broker does not match the payload against pane captures. `delivered` is
+never recorded for an overwritten timeout paste. When the broker is down
+or the binary is missing, `muxa send` exits non-zero and pastes nothing.
 
 An implementation MUST NOT paste into a pane that is dead or that is in
 copy-mode (`#{pane_in_mode}`). Copy-mode is a silent-loss mode:
@@ -248,8 +240,7 @@ process inside a tmux pane. There is no hook-resolution ladder.
 
 `muxa hook session-start [--kind KIND]` registers the pane named by
 `TMUX_PANE` if it is not already registered. Spawned panes skip identity
-creation; a leftover hook still must not overwrite their kind to a
-different CLI family without process/argv evidence. Stdin is ignored.
+creation. Stdin is ignored.
 
 Native continue payloads are not used. Incoming mail is a user turn
 pasted by the broker:

@@ -1,6 +1,6 @@
 // muxa-test-json is built only by the test suite. It implements the
 // json-type/json-keys/json-get/json-values mini-jq helpers that shell
-// tests need; they must not ship in the production muxa-broker binary.
+// tests need; they must not ship in the production muxa binary.
 package main
 
 import (

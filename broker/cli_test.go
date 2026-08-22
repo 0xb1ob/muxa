@@ -5,19 +5,16 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
 
-func TestJSONObjectEscapesQuoteBackslashNewline(t *testing.T) {
+func TestJSONEscapesQuoteBackslashNewline(t *testing.T) {
 	cwd := "proj/\"quote\"\\slash"
 	payload := "line1\"quote\"\\\nline2"
-	out := runCLIWithArgs(t, nil, "json-object",
-		"cwd", cwd,
-		"text", payload,
-		"name", "alice",
-	)
+	out := captureJSON(t, map[string]any{
+		"cwd": cwd, "text": payload, "name": "alice",
+	})
 	var obj map[string]any
 	if err := json.Unmarshal(out, &obj); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, out)
@@ -39,36 +36,22 @@ func TestJSONObjectEscapesQuoteBackslashNewline(t *testing.T) {
 	}
 }
 
-func TestJSONObjectNullKeys(t *testing.T) {
-	out := runCLIWithArgs(t, nil, "json-object",
-		"--null", "parent", "--null", "session",
-		"name", "bob", "parent", "ignored", "state", "idle",
-	)
-	var obj map[string]any
-	if err := json.Unmarshal(out, &obj); err != nil {
-		t.Fatal(err)
-	}
-	if obj["name"] != "bob" || obj["state"] != "idle" {
-		t.Fatalf("%s", out)
-	}
-	if obj["parent"] != nil || obj["session"] != nil {
-		t.Fatalf("parent/session want null: %s", out)
-	}
-}
-
 func TestWhoJSONShapeAndNulls(t *testing.T) {
-	in := "%1||alice||abc123||bob||generic||muxa:1.0||/tmp/proj||sleep||live||idle\n" +
-		"%2||bob||def456||||generic||muxa:0.0||/tmp||sleep||live||idle\n"
-	out := runCLIWithArgs(t, []byte(in), "who-json")
-	var rows []map[string]any
-	if err := json.Unmarshal(out, &rows); err != nil {
+	rows := []whoJSONRow{
+		{Name: "alice", ID: "abc123", Parent: strPtr("bob"), Kind: "generic", State: "idle", Pane: "%1", Cwd: "/tmp/proj"},
+		{Name: "bob", ID: "def456", Parent: nil, Kind: "generic", State: "busy", Pane: "%2", Cwd: "/tmp"},
+		{Name: "zed", ID: "aaa111", Parent: strPtr("bob"), Kind: "cursor", State: "ghost", Pane: "%3", Cwd: "/gone"},
+	}
+	out := captureJSON(t, rows)
+	var got []map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, out)
 	}
-	if len(rows) != 2 {
-		t.Fatalf("rows=%d", len(rows))
+	if len(got) != 3 {
+		t.Fatalf("rows=%d", len(got))
 	}
-	need := []string{"name", "id", "parent", "kind", "state", "pane", "session", "cwd", "status"}
-	for _, row := range rows {
+	need := []string{"name", "id", "parent", "kind", "state", "pane", "session", "cwd"}
+	for _, row := range got {
 		if len(row) != len(need) {
 			t.Fatalf("keys=%v", keysOf(row))
 		}
@@ -77,21 +60,23 @@ func TestWhoJSONShapeAndNulls(t *testing.T) {
 				t.Fatalf("missing %s", k)
 			}
 		}
-	}
-	if rows[0]["parent"] != "bob" || rows[0]["session"] != nil {
-		t.Fatalf("alice: %+v", rows[0])
-	}
-	if rows[1]["parent"] != nil || rows[1]["session"] != nil {
-		t.Fatalf("bob: %+v", rows[1])
-	}
-	for _, row := range rows {
-		st, _ := row["state"].(string)
-		if st != "idle" && st != "busy" {
-			t.Fatalf("state must be idle|busy, not %q (blocked is gone)", st)
+		if _, ok := row["status"]; ok {
+			t.Fatalf("status must not be present: %+v", row)
 		}
-		status, _ := row["status"].(string)
-		if status != "live" && status != "drawing" && status != "ghost" {
-			t.Fatalf("status must be live|drawing|ghost, not %q", status)
+	}
+	if got[0]["parent"] != "bob" || got[0]["session"] != nil {
+		t.Fatalf("alice: %+v", got[0])
+	}
+	if got[1]["parent"] != nil || got[1]["session"] != nil {
+		t.Fatalf("bob: %+v", got[1])
+	}
+	if got[2]["state"] != "ghost" {
+		t.Fatalf("zed state: %+v", got[2])
+	}
+	for _, row := range got {
+		st, _ := row["state"].(string)
+		if st != "idle" && st != "busy" && st != "ghost" {
+			t.Fatalf("state must be idle|busy|ghost, not %q", st)
 		}
 		if row["session"] != nil {
 			t.Fatalf("session must be null: %+v", row)
@@ -101,21 +86,15 @@ func TestWhoJSONShapeAndNulls(t *testing.T) {
 
 func TestWhoJSONEscapesCwd(t *testing.T) {
 	cwd := `/tmp/acme-"quote"\slash`
-	in := "%9||projagent||ididid||||generic||s:1.0||" + cwd + "||sleep||live||idle\n"
-	out := runCLIWithArgs(t, []byte(in), "who-json")
+	out := captureJSON(t, []whoJSONRow{
+		{Name: "projagent", ID: "ididid", Kind: "generic", State: "idle", Pane: "%9", Cwd: cwd},
+	})
 	var rows []map[string]any
 	if err := json.Unmarshal(out, &rows); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, out)
 	}
 	if rows[0]["cwd"] != cwd {
 		t.Fatalf("cwd got %q", rows[0]["cwd"])
-	}
-}
-
-func TestJSONArrayEmpty(t *testing.T) {
-	out := runCLIWithArgs(t, nil, "json-array")
-	if strings.TrimSpace(string(out)) != "[]" {
-		t.Fatalf("got %q", out)
 	}
 }
 
@@ -158,40 +137,26 @@ func TestClientPingEnqueue(t *testing.T) {
 	}
 }
 
-func runCLIWithArgs(t *testing.T, stdin []byte, args ...string) []byte {
+func captureJSON(t *testing.T, v any) []byte {
 	t.Helper()
-	oldIn, oldOut := os.Stdin, os.Stdout
-	rIn, wIn, err := os.Pipe()
+	old := os.Stdout
+	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	rOut, wOut, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdin, os.Stdout = rIn, wOut
-	if stdin != nil {
-		go func() {
-			_, _ = wIn.Write(stdin)
-			_ = wIn.Close()
-		}()
-	} else {
-		_ = wIn.Close()
-	}
+	os.Stdout = w
 	var buf bytes.Buffer
 	done := make(chan struct{})
 	go func() {
-		_, _ = buf.ReadFrom(rOut)
+		_, _ = buf.ReadFrom(r)
 		close(done)
 	}()
-	rc := runCLI(args)
-	_ = wOut.Close()
-	<-done
-	os.Stdin, os.Stdout = oldIn, oldOut
-	_ = rIn.Close()
-	if rc != 0 {
-		t.Fatalf("runCLI %v rc=%d out=%s", args, rc, buf.Bytes())
+	if rc := writeJSON(v); rc != 0 {
+		t.Fatalf("writeJSON rc=%d", rc)
 	}
+	_ = w.Close()
+	<-done
+	os.Stdout = old
 	return buf.Bytes()
 }
 

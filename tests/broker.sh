@@ -15,11 +15,11 @@ esac
 # darwin 25+ aborts a test binary without LC_UUID; only the external linker emits it.
 "$GO" test "${ldflags[@]}" "$ROOT/broker"
 "$GO" test "${ldflags[@]}" "$ROOT/tests/jsonhelper"
-"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-broker" "$ROOT/broker"
+"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa" "$ROOT/broker"
 "$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-test-json" "$ROOT/tests/jsonhelper"
 if [ "$(uname -s)" = Darwin ]; then
-  xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true
-  codesign -s - --force --timestamp=none "$ROOT/bin/muxa-broker" 2>/dev/null || true
+  xattr -c "$ROOT/bin/muxa" 2>/dev/null || true
+  codesign -s - --force --timestamp=none "$ROOT/bin/muxa" 2>/dev/null || true
   xattr -c "$ROOT/bin/muxa-test-json" 2>/dev/null || true
   codesign -s - --force --timestamp=none "$ROOT/bin/muxa-test-json" 2>/dev/null || true
 fi
@@ -32,7 +32,7 @@ export MUXA_BROKER=1
 export MUXA_BROKER_DIR="$HOME_ISO/broker"
 export MUXA_BROKER_SOCK="$HOME_ISO/broker/broker.sock"
 export MUXA_BROKER_PID="$HOME_ISO/broker/broker.pid"
-export MUXA_BROKER_BIN="$ROOT/bin/muxa-broker"
+export MUXA_BROKER_BIN="$ROOT/bin/muxa"
 export MUXA_BROKER_DEADLINE="${MUXA_BROKER_DEADLINE:-8}"
 export MUXA_BROKER_POLL_MS=100
 export XDG_RUNTIME_DIR="$HOME_ISO/run"
@@ -474,7 +474,7 @@ race_shim="$HOME_ISO/slow-broker"
 cat >"$race_shim" <<SHIM
 #!/bin/sh
 sleep 2
-exec "$ROOT/bin/muxa-broker" "\$@"
+exec "$ROOT/bin/muxa" "\$@"
 SHIM
 chmod +x "$race_shim"
 : >"$MUXA_BROKER_DIR/broker.log"
@@ -511,7 +511,7 @@ case "$cap_i" in
   *) bad "I the single owner still delivers" "cap: $cap_i" ;;
 esac
 
-# --- who STATUS drawing from control-mode %output, no hooks ---
+# --- who STATE busy from control-mode %output, no hooks ---
 tmux -L "$SOCK" new-window -t muxa -n ticker "while true; do echo DRAWING_TICK; sleep 0.15; done"
 sleep 0.4
 ticker_pane="$(tmux -L "$SOCK" list-panes -t muxa:ticker -F '#{pane_id}' | head -1)"
@@ -519,21 +519,15 @@ muxa_as "$ticker_pane" register --name ticker --kind generic --parent parent >/d
 # Drawing report window is 1s; wait for %output to land in the hub.
 sleep 1.2
 who_tick="$(muxa_as "$parent_pane" who)"
-st_tick="$(printf '%s\n' "$who_tick" | awk '$1=="ticker" { print substr($0, 105, 8); exit }')"
-st_tick="${st_tick#"${st_tick%%[![:space:]]*}"}"
-st_tick="${st_tick%"${st_tick##*[![:space:]]}"}"
-[ "$st_tick" = "drawing" ] && ok "who STATUS is drawing for a pane emitting %output" \
-  || bad "who STATUS is drawing for a pane emitting %output" "status=$st_tick who=$who_tick"
 st_state="$(printf '%s\n' "$who_tick" | awk '$1=="ticker" { print substr($0, 96, 8); exit }')"
 st_state="${st_state#"${st_state%%[![:space:]]*}"}"
 st_state="${st_state%"${st_state##*[![:space:]]}"}"
 [ "$st_state" = "busy" ] && ok "who STATE is busy for a pane emitting %output" \
   || bad "who STATE is busy for a pane emitting %output" "state=$st_state who=$who_tick"
 who_tickj="$(muxa_as "$parent_pane" who --json)"
-[ "$(printf '%s' "$who_tickj" | muxa-test-json json-get ticker status)" = "drawing" ] \
-  && [ "$(printf '%s' "$who_tickj" | muxa-test-json json-get ticker state)" = "busy" ] \
-  && ok "who --json status is drawing and state is busy for a pane emitting %output" \
-  || bad "who --json status is drawing and state is busy for a pane emitting %output" "json=$who_tickj"
+[ "$(printf '%s' "$who_tickj" | muxa-test-json json-get ticker state)" = "busy" ] \
+  && ok "who --json state is busy for a pane emitting %output" \
+  || bad "who --json state is busy for a pane emitting %output" "json=$who_tickj"
 
 # --- C: broker down + binary hidden → fail closed, nothing pasted ---
 muxa_as "$parent_pane" broker stop >/dev/null || true

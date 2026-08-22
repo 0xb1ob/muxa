@@ -1,6 +1,6 @@
 name: Release binaries
 
-# install.sh never compiles Go. It downloads muxa-broker from a release, so
+# install.sh never compiles Go. It downloads muxa from a release, so
 # every tag needs the assets attached before that tag is installable.
 #
 # Backfill an existing tag: gh workflow run release.yml -f tag=1.0.1
@@ -35,7 +35,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.21"
-      - name: Build muxa-broker
+      - name: Build muxa
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -43,7 +43,7 @@ jobs:
           CC: ${{ matrix.cc }}
         run: |
           set -eux
-          out="muxa-broker-${GOOS}-${GOARCH}"
+          out="muxa-${GOOS}-${GOARCH}"
           # darwin 25+ SIGKILLs Mach-O without LC_UUID; only the external
           # linker emits it, so cgo + clang is required for darwin.
           if [ "$GOOS" = darwin ]; then
@@ -59,8 +59,8 @@ jobs:
           fi
       - uses: actions/upload-artifact@v4
         with:
-          name: muxa-broker-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: muxa-broker-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: muxa-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: muxa-${{ matrix.goos }}-${{ matrix.goarch }}
           if-no-files-found: error
 
   publish:
@@ -75,8 +75,8 @@ jobs:
         run: |
           set -eux
           cd dist
-          chmod +x muxa-broker-*
-          sha256sum muxa-broker-* > SHA256SUMS
+          chmod +x muxa-*
+          sha256sum muxa-* > SHA256SUMS
           cat SHA256SUMS
       - name: Upload to release
         env:

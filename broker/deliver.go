@@ -132,32 +132,13 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		log.Printf("inject %s: %v", m.ID, err)
 		return
 	}
-	for enterTry := 0; ; enterTry++ {
-		switch d.confirm(m) {
-		case confirmLanded:
-			d.notePaste(m)
-			log.Printf("delivered %s → %s id=%s", m.From, m.To, m.ID)
-			_ = d.Q.MarkDone(m)
-			return
-		case confirmUnknown:
-			d.notePaste(m)
-			log.Printf("unknown %s → %s id=%s (paste accepted but payload not visible; will not retry)", m.From, m.To, m.ID)
-			_ = d.Q.MarkUnknown(m)
-			return
-		case confirmNeedsEnter:
-			if enterTry >= maxEnterRetries {
-				log.Printf("unconfirmed %s → %s id=%s (collapsed paste still idle after enter retries; left queued)", m.From, m.To, m.ID)
-				return
-			}
-			if err := d.T.SubmitEnter(m.Pane); err != nil {
-				log.Printf("enter %s: %v", m.ID, err)
-				return
-			}
-			continue
-		default:
-			log.Printf("unconfirmed %s → %s id=%s (pane still free; left queued)", m.From, m.To, m.ID)
-			return
-		}
+	switch d.confirm(m.Pane) {
+	case confirmPasted:
+		d.notePaste(m)
+		log.Printf("delivered %s → %s id=%s", m.From, m.To, m.ID)
+		_ = d.Q.MarkDone(m)
+	default:
+		log.Printf("unconfirmed %s → %s id=%s (pane still free; left queued)", m.From, m.To, m.ID)
 	}
 }
 
@@ -274,106 +255,23 @@ func visibleContent(capture string) bool {
 type confirmResult int
 
 const (
-	confirmMissed     confirmResult = iota // still free, payload absent — safe to retry
-	confirmLanded                          // payload or paste-collapse visible
-	confirmUnknown                         // pane reacted; must not retry
-	confirmNeedsEnter                      // collapsed paste visible but composer still idle
+	confirmMissed confirmResult = iota // still free — safe to retry
+	confirmPasted                      // pane reacted; must not retry
 )
 
-const maxEnterRetries = 3
-
-func (d *Deliverer) confirm(m *Msg) confirmResult {
-	needle := confirmNeedle(m.Text)
-	var last string
-	var lastY, lastX int
-	sawCollapsed := false
-	for i := 0; i < 5; i++ {
-		snap, err := d.T.Snapshot(m.Pane)
-		if err == nil {
-			last = snap.Capture
-			lastY, lastX = snap.CursorY, snap.CursorX
-			if needle != "" && landed(last, needle) {
-				return confirmLanded
-			}
-			if pasteCollapsed(last) {
-				sawCollapsed = true
-			}
-		}
-		if i < 4 {
-			time.Sleep(50 * time.Millisecond)
-		}
+// confirm takes one post-paste snapshot. A pane that reacted (cursor row
+// no longer empty/prompt, or control-mode drawing) is pasted and must not
+// be retried. A pane that stayed provably free may be retried. No payload
+// string-matching against the capture.
+func (d *Deliverer) confirm(pane string) confirmResult {
+	snap, err := d.T.Snapshot(pane)
+	if err == nil && snap.Capture != "" && !emptyAtCursor(snap.Capture, snap.CursorY, snap.CursorX) {
+		return confirmPasted
 	}
-	if sawCollapsed {
-		return d.collapsedPasteConfirm(m.Pane, last, lastY, lastX)
-	}
-	if hist, err := d.T.CaptureHistory(m.Pane); err == nil {
-		if needle != "" && landed(hist, needle) {
-			return confirmLanded
-		}
-		if pasteCollapsed(hist) {
-			return d.collapsedPasteConfirm(m.Pane, hist, lastY, lastX)
-		}
-	}
-	// unknown-no-retry: the pane reacted (cursor row no longer empty/prompt)
-	// or started drawing, but the payload is not visible.
-	// pending-safe-retry is the remaining case.
-	if last != "" && !emptyAtCursor(last, lastY, lastX) {
-		return confirmUnknown
-	}
-	if d.drawing(m.Pane) {
-		return confirmUnknown
+	if d.drawing(pane) {
+		return confirmPasted
 	}
 	return confirmMissed
-}
-
-func confirmNeedle(text string) string {
-	for _, line := range strings.Split(text, "\n") {
-		s := strings.TrimSpace(line)
-		if s == "" || strings.HasPrefix(s, "[muxa]") || strings.HasPrefix(s, "Reply:") || s == "Do not reply." {
-			continue
-		}
-		return s
-	}
-	return strings.TrimSpace(text)
-}
-
-func landed(capture, needle string) bool {
-	if needle == "" {
-		return false
-	}
-	if strings.Contains(capture, needle) {
-		return true
-	}
-	if len(needle) > 24 && strings.Contains(capture, needle[:24]) {
-		return true
-	}
-	return false
-}
-
-func pasteCollapsed(capture string) bool {
-	s := stripANSI(capture)
-	return strings.Contains(s, "[Pasted text") || strings.Contains(s, "Pasted text +")
-}
-
-// collapsedPasteConfirm treats Cursor's paste placeholder as delivered only when
-// the pane has reacted. A stable collapsed placeholder on an empty cursor row
-// means the paste landed but Enter did not submit (muxa#79).
-func (d *Deliverer) collapsedPasteConfirm(pane, capture string, cursorY, cursorX int) confirmResult {
-	if d.drawing(pane) {
-		return confirmLanded
-	}
-	if !pasteCollapsed(capture) || !emptyAtCursor(capture, cursorY, cursorX) {
-		return confirmLanded
-	}
-	snap2, err := d.T.Snapshot(pane)
-	if err != nil {
-		return confirmLanded
-	}
-	if snap2.Capture == capture &&
-		emptyAtCursor(snap2.Capture, snap2.CursorY, snap2.CursorX) {
-		return confirmNeedsEnter
-	}
-	return confirmLanded
 }
 
 func (d *Deliverer) pasteIDs() []string {

@@ -134,8 +134,81 @@ func (t *TMUX) Inject(pane, text string) error {
 	return t.SubmitEnter(pane)
 }
 
-// CaptureHistory is the visible grid plus scrollback. Confirmation may find a
-// payload here after a TUI has scrolled it off the live view.
+func (t *TMUX) FirstSessionPID() string {
+	out, err := t.Run([]string{"list-sessions", "-F", "#{pid}"}, nil)
+	if err != nil {
+		return "0"
+	}
+	line := strings.TrimSpace(strings.SplitN(out, "\n", 2)[0])
+	if line == "" {
+		return "0"
+	}
+	return line
+}
+
+func (t *TMUX) SetPaneOpt(pane, key, val string) error {
+	_, err := t.Run([]string{"set-option", "-p", "-t", pane, key, val}, nil)
+	return err
+}
+
+func (t *TMUX) UnsetPaneOpt(pane, key string) {
+	_, _ = t.Run([]string{"set-option", "-p", "-t", pane, "-u", key}, nil)
+}
+
+func (t *TMUX) SetTitle(pane, title string) {
+	_, _ = t.Run([]string{"select-pane", "-t", pane, "-T", title}, nil)
+}
+
+func (t *TMUX) KillPane(pane string) error {
+	_, err := t.Run([]string{"kill-pane", "-t", pane}, nil)
+	return err
+}
+
+func (t *TMUX) CapturePlain(pane string) (string, error) {
+	return t.Run([]string{"capture-pane", "-p", "-t", pane}, nil)
+}
+
 func (t *TMUX) CaptureHistory(pane string) (string, error) {
 	return t.Run([]string{"capture-pane", "-p", "-S", "-", "-t", pane}, nil)
+}
+
+func (t *TMUX) NewWindow(sess, name, cwd, cmd string) (string, error) {
+	out, err := t.Run([]string{"new-window", "-t", sess, "-n", name, "-c", cwd, "-P", "-F", "#{pane_id}", cmd}, nil)
+	return strings.TrimSpace(out), err
+}
+
+func (t *TMUX) SplitWindow(flag, target, cwd, cmd string) (string, error) {
+	out, err := t.Run([]string{"split-window", flag, "-t", target, "-c", cwd, "-P", "-F", "#{pane_id}", cmd}, nil)
+	return strings.TrimSpace(out), err
+}
+
+func (t *TMUX) LargestPane(target string) string {
+	out, err := t.Run([]string{"list-panes", "-t", target, "-F", "#{pane_id} #{pane_width} #{pane_height}"}, nil)
+	if err != nil {
+		return ""
+	}
+	best, ma := "", 0
+	for _, line := range strings.Split(out, "\n") {
+		fs := strings.Fields(line)
+		if len(fs) < 3 {
+			continue
+		}
+		var w, h int
+		fmt.Sscanf(fs[1], "%d", &w)
+		fmt.Sscanf(fs[2], "%d", &h)
+		a := w * h
+		if a > ma || (a == ma && fs[0] > best) {
+			ma = a
+			best = fs[0]
+		}
+	}
+	return best
+}
+
+func (t *TMUX) SelectLayout(winid, layout string) {
+	_, _ = t.Run([]string{"select-layout", "-t", winid, layout}, nil)
+}
+
+func (t *TMUX) SetWindowOption(target, key, val string) {
+	_, _ = t.Run([]string{"set-window-option", "-t", target, key, val}, nil)
 }

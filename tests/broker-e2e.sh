@@ -14,10 +14,10 @@ ldflags=()
 case "$(uname -s)" in
   Darwin) ldflags=(-ldflags=-linkmode=external) ;;
 esac
-"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa-broker" "$ROOT/broker"
+"$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa" "$ROOT/broker"
 if [ "$(uname -s)" = Darwin ]; then
-  xattr -c "$ROOT/bin/muxa-broker" 2>/dev/null || true
-  codesign -s - --force --timestamp=none "$ROOT/bin/muxa-broker" 2>/dev/null || true
+  xattr -c "$ROOT/bin/muxa" 2>/dev/null || true
+  codesign -s - --force --timestamp=none "$ROOT/bin/muxa" 2>/dev/null || true
 fi
 
 ISO="/tmp/muxa-broker-e2e-$$"
@@ -38,7 +38,7 @@ export MUXA_BROKER=1
 export MUXA_BROKER_DIR="$ISO/broker"
 export MUXA_BROKER_SOCK="$ISO/broker/broker.sock"
 export MUXA_BROKER_PID="$ISO/broker/broker.pid"
-export MUXA_BROKER_BIN="$ROOT/bin/muxa-broker"
+export MUXA_BROKER_BIN="$ROOT/bin/muxa"
 export MUXA_BROKER_DEADLINE=12
 export MUXA_BROKER_POLL_MS=150
 export XDG_RUNTIME_DIR="$ISO/run"
@@ -61,7 +61,7 @@ prompt_loop='while true; do printf "ready> "; read -r _ || break; done'
 
 log "=== muxa broker live E2E $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 log "cwd=$ROOT"
-log "binary=$ROOT/bin/muxa-broker"
+log "binary=$ROOT/bin/muxa"
 log "muxa=$ROOT/bin/muxa"
 log "iso=$ISO sock=-L $SOCK"
 log "operator mailbox must not see these tokens (throwaway XDG_RUNTIME_DIR)"
@@ -194,7 +194,7 @@ sent_c="$(muxa_as "$parent_pane" send e2e-child "$tok_c" 2>&1)"
 rc_c=$?
 set -e
 log "send rc=$rc_c: $sent_c"
-export MUXA_BROKER_BIN="$ROOT/bin/muxa-broker"
+export MUXA_BROKER_BIN="$ROOT/bin/muxa"
 cap_c="$(tmux -L "$SOCK" capture-pane -p -t "$child_pane" 2>/dev/null || true)"
 log "capture C:"
 printf '%s\n' "$cap_c" >>"$LOG"
@@ -220,5 +220,5 @@ fi
 log "=== summary pass=$pass fail=$fail log=$LOG ==="
 log "how to run daemon: muxa broker start"
 log "  env: MUXA_BROKER_DIR MUXA_BROKER_SOCK MUXA_BROKER_PID MUXA_BROKER_DEADLINE (seconds, default 600)"
-log "  binary: $ROOT/bin/muxa-broker (auto-started from muxa send)"
+log "  binary: $ROOT/bin/muxa (auto-started from muxa send)"
 [ "$fail" -eq 0 ]

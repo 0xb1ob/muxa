@@ -36,7 +36,6 @@ type Queue struct {
 	pending string
 	done    string
 	failed  string
-	unknown string
 }
 
 func OpenQueue(dir string) (*Queue, error) {
@@ -45,14 +44,46 @@ func OpenQueue(dir string) (*Queue, error) {
 		pending: filepath.Join(dir, "pending"),
 		done:    filepath.Join(dir, "done"),
 		failed:  filepath.Join(dir, "failed"),
-		unknown: filepath.Join(dir, "unknown"),
 	}
-	for _, d := range []string{q.pending, q.done, q.failed, q.unknown} {
+	for _, d := range []string{q.pending, q.done, q.failed} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
 	}
+	if err := mergeLegacyUnknown(dir, q.done); err != nil {
+		return nil, err
+	}
 	return q, nil
+}
+
+// mergeLegacyUnknown moves leftover unknown/ JSON into done/ so a pre-#96
+// queue cannot retry a paste the old broker had already accepted.
+func mergeLegacyUnknown(dir, done string) error {
+	legacy := filepath.Join(dir, "unknown")
+	ents, err := os.ReadDir(legacy)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range ents {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		src := filepath.Join(legacy, e.Name())
+		dst := filepath.Join(done, e.Name())
+		if _, err := os.Stat(dst); err == nil {
+			if err := os.Remove(src); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.Rename(src, dst); err != nil {
+			return err
+		}
+	}
+	return os.RemoveAll(legacy)
 }
 
 func (q *Queue) Put(m *Msg) error {
@@ -116,13 +147,7 @@ func (q *Queue) MarkFailed(m *Msg) error {
 	return q.move(m, q.failed)
 }
 
-func (q *Queue) MarkUnknown(m *Msg) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return q.move(m, q.unknown)
-}
-
-func (q *Queue) Counts() (pending, done, failed, unknown int, err error) {
+func (q *Queue) Counts() (pending, done, failed int, err error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	pending, err = countJSON(q.pending)
@@ -134,10 +159,6 @@ func (q *Queue) Counts() (pending, done, failed, unknown int, err error) {
 		return
 	}
 	failed, err = countJSON(q.failed)
-	if err != nil {
-		return
-	}
-	unknown, err = countJSON(q.unknown)
 	return
 }
 
@@ -172,11 +193,11 @@ const (
 	pruneFailedMaxAge = 7 * 24 * time.Hour
 )
 
-// Prune deletes stale entries from done/, failed/, and unknown/. Done
-// entries older than 24h and failed/unknown older than 7d are removed.
-// Call on startup (and periodically) while holding no other queue work;
-// the mutex makes concurrent delivery safe.
-func (q *Queue) Prune(now time.Time) (done, failed, unknown int, err error) {
+// Prune deletes stale entries from done/ and failed/. Done entries older
+// than 24h and failed older than 7d are removed. Call on startup (and
+// periodically) while holding no other queue work; the mutex makes
+// concurrent delivery safe.
+func (q *Queue) Prune(now time.Time) (done, failed int, err error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	done, err = q.pruneDir(q.done, now, pruneDoneMaxAge)
@@ -184,10 +205,6 @@ func (q *Queue) Prune(now time.Time) (done, failed, unknown int, err error) {
 		return
 	}
 	failed, err = q.pruneDir(q.failed, now, pruneFailedMaxAge)
-	if err != nil {
-		return
-	}
-	unknown, err = q.pruneDir(q.unknown, now, pruneFailedMaxAge)
 	return
 }
 

@@ -13,7 +13,7 @@ import (
 
 func runCLI(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "muxa-broker: ping|status|drawing|enqueue|json-object|json-array|who-json")
+		fmt.Fprintln(os.Stderr, "muxa: ping|status|drawing|enqueue")
 		return 2
 	}
 	switch args[0] {
@@ -25,14 +25,8 @@ func runCLI(args []string) int {
 		return cliDrawing()
 	case "enqueue":
 		return cliEnqueue(args[1:])
-	case "json-object":
-		return cliJSONObject(args[1:])
-	case "json-array":
-		return cliJSONArray()
-	case "who-json":
-		return cliWhoJSON()
 	default:
-		fmt.Fprintf(os.Stderr, "muxa-broker: unknown command %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "muxa: unknown command %q\n", args[0])
 		return 2
 	}
 }
@@ -90,7 +84,7 @@ func cliPing() int {
 func cliStatus() int {
 	resp, err := rpcClient(Request{Op: "status"}, 2*time.Second)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "muxa-broker: %v\n", err)
+		fmt.Fprintf(os.Stderr, "muxa: %v\n", err)
 		return 1
 	}
 	return writeJSON(resp)
@@ -114,48 +108,48 @@ func cliEnqueue(args []string) int {
 		switch args[0] {
 		case "--id":
 			if len(args) < 2 {
-				fmt.Fprintln(os.Stderr, "muxa-broker enqueue: --id requires a value")
+				fmt.Fprintln(os.Stderr, "muxa enqueue: --id requires a value")
 				return 2
 			}
 			id, args = args[1], args[2:]
 		case "--pane":
 			if len(args) < 2 {
-				fmt.Fprintln(os.Stderr, "muxa-broker enqueue: --pane requires a value")
+				fmt.Fprintln(os.Stderr, "muxa enqueue: --pane requires a value")
 				return 2
 			}
 			pane, args = args[1], args[2:]
 		case "--from":
 			if len(args) < 2 {
-				fmt.Fprintln(os.Stderr, "muxa-broker enqueue: --from requires a value")
+				fmt.Fprintln(os.Stderr, "muxa enqueue: --from requires a value")
 				return 2
 			}
 			from, args = args[1], args[2:]
 		case "--to":
 			if len(args) < 2 {
-				fmt.Fprintln(os.Stderr, "muxa-broker enqueue: --to requires a value")
+				fmt.Fprintln(os.Stderr, "muxa enqueue: --to requires a value")
 				return 2
 			}
 			to, args = args[1], args[2:]
 		case "--kind":
 			if len(args) < 2 {
-				fmt.Fprintln(os.Stderr, "muxa-broker enqueue: --kind requires a value")
+				fmt.Fprintln(os.Stderr, "muxa enqueue: --kind requires a value")
 				return 2
 			}
 			kind, args = args[1], args[2:]
 		case "--parent-pane":
 			if len(args) < 2 {
-				fmt.Fprintln(os.Stderr, "muxa-broker enqueue: --parent-pane requires a value")
+				fmt.Fprintln(os.Stderr, "muxa enqueue: --parent-pane requires a value")
 				return 2
 			}
 			parent, args = args[1], args[2:]
 		default:
-			fmt.Fprintf(os.Stderr, "muxa-broker enqueue: unknown arg %s\n", args[0])
+			fmt.Fprintf(os.Stderr, "muxa enqueue: unknown arg %s\n", args[0])
 			return 2
 		}
 	}
 	text, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "muxa-broker: read stdin: %v\n", err)
+		fmt.Fprintf(os.Stderr, "muxa: read stdin: %v\n", err)
 		return 1
 	}
 	req := Request{
@@ -170,7 +164,7 @@ func cliEnqueue(args []string) int {
 	}
 	resp, err := rpcClient(req, 3*time.Second)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "muxa-broker: %v\n", err)
+		fmt.Fprintf(os.Stderr, "muxa: %v\n", err)
 		return 1
 	}
 	if !resp.OK {
@@ -184,113 +178,12 @@ func cliEnqueue(args []string) int {
 	return 0
 }
 
-func cliJSONObject(args []string) int {
-	nulls := map[string]bool{}
-	for len(args) > 0 {
-		if args[0] == "--" {
-			args = args[1:]
-			break
-		}
-		if args[0] == "--null" {
-			if len(args) < 2 {
-				fmt.Fprintln(os.Stderr, "muxa-broker json-object: --null requires a key")
-				return 2
-			}
-			nulls[args[1]] = true
-			args = args[2:]
-			continue
-		}
-		break
-	}
-	if len(args)%2 != 0 {
-		fmt.Fprintln(os.Stderr, "muxa-broker json-object: keys and values must come in pairs")
-		return 2
-	}
-	obj := map[string]any{}
-	for i := 0; i < len(args); i += 2 {
-		k, v := args[i], args[i+1]
-		if nulls[k] {
-			obj[k] = nil
-			continue
-		}
-		obj[k] = v
-	}
-	for k := range nulls {
-		if _, ok := obj[k]; !ok {
-			obj[k] = nil
-		}
-	}
-	return writeJSON(obj)
-}
-
-func cliJSONArray() int {
-	data, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "muxa-broker: read stdin: %v\n", err)
-		return 1
-	}
-	var rows []any
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var v any
-		if err := json.Unmarshal([]byte(line), &v); err != nil {
-			fmt.Fprintf(os.Stderr, "muxa-broker json-array: %v\n", err)
-			return 1
-		}
-		rows = append(rows, v)
-	}
-	if rows == nil {
-		rows = []any{}
-	}
-	return writeJSON(rows)
-}
-
-func cliWhoJSON() int {
-	data, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "muxa-broker: read stdin: %v\n", err)
-		return 1
-	}
-	var rows []map[string]any
-	for _, raw := range strings.Split(string(data), "\n") {
-		if raw == "" {
-			continue
-		}
-		p := strings.Split(raw, "||")
-		for len(p) < 10 {
-			p = append(p, "")
-		}
-		parent := any(p[3])
-		if p[3] == "" {
-			parent = nil
-		}
-		rows = append(rows, map[string]any{
-			"name":    p[1],
-			"id":      p[2],
-			"parent":  parent,
-			"kind":    p[4],
-			"state":   p[9],
-			"pane":    p[0],
-			"session": nil,
-			"cwd":     p[6],
-			"status":  p[8],
-		})
-	}
-	if rows == nil {
-		rows = []map[string]any{}
-	}
-	return writeJSON(rows)
-}
-
 func writeJSON(v any) int {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(v); err != nil {
-		fmt.Fprintf(os.Stderr, "muxa-broker: json: %v\n", err)
+		fmt.Fprintf(os.Stderr, "muxa: json: %v\n", err)
 		return 1
 	}
 	os.Stdout.Write(buf.Bytes())
