@@ -1,5 +1,8 @@
 # muxa — tmux-native agent messaging
 
+This file is the only normative specification. README and skills are not a
+second source of MUST / MUST NOT.
+
 muxa is a messaging protocol for AI agent CLIs that already share a tmux
 server. It has no MCP server and no extra tools in the model context.
 A small user-level Go binary owns the CLI and pane paste. Agents send with
@@ -314,17 +317,36 @@ unsubmitted Cursor Agent composer text (muxa#79).
 
 ## muxa / command-post boundary
 
-Paired record: [0xb1ob/command-post](https://github.com/0xb1ob/command-post)
-`AGENTS.md`. The two notes must agree.
-
 **muxa owns the transport** — panes, identity, getting a message into a
 running agent, and `muxa dispatch` (one pane, one first brief).
 
 **command-post owns the work** — what to do, where, by whom, and whether it
 is done.
 
+[command-post](https://github.com/0xb1ob/command-post) cites this SPEC for
+transport semantics and MUST NOT restate them. Muxa does not keep a paired
+note in lockstep with command-post.
+
 **Hard constraint:** muxa may never require `br`, `git`, or a job id. If an
 argument is a br key, the command is in the wrong repo.
+
+## Environment
+
+| Variable | Default | What |
+| --- | --- | --- |
+| `MUXA_BROKER_DIR` | `<runtime>/broker` | File-backed queue + pidfile + log |
+| `MUXA_BROKER_SOCK` | `$MUXA_BROKER_DIR/broker.sock` | Unix socket |
+| `MUXA_BROKER_PID` | `$MUXA_BROKER_DIR/broker.pid` | Pidfile |
+| `MUXA_BROKER_BIN` | this `muxa` binary | Optional override of the daemon executable |
+| `MUXA_BROKER_DEADLINE` | `600` | Seconds after which a *dead* pane's mail is failed; a live busy pane stays queued |
+| `MUXA_BROKER_POLL_MS` | `250` | Broker retry interval (fallback if control-mode attach fails) |
+| `MUXA_BROKER_QUIET_MS` | `250` | Control-mode silence window before a pane is considered not drawing |
+| `MUXA_BROKER_VERSION` | latest release | Install-time: release tag to fetch the muxa asset from |
+| `MUXA_BROKER_URL` | unset | Install-time: exact asset URL (skips the checksum lookup) |
+| `MUXA_BROKER_BASE_URL` | `https://github.com/0xb1ob/muxa/releases` | Install-time: release base URL |
+| `MUXA_BROKER_SKIP_VERIFY` | `0` | Install-time: `1` skips `SHA256SUMS` verification |
+| `MUXA_TMUX_SOCKET` | unset | Private tmux socket name (`tmux -L`) |
+| `MUXA_TMUX_BIN` | `tmux` | tmux binary |
 
 ## Trust
 

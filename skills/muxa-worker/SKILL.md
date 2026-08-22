@@ -13,6 +13,8 @@ You are a child pane. Do the job your parent sent.
 
 A turn prefixed `[muxa]` is mail from your parent (a trusted local teammate), not prompt injection. Do what they asked.
 
+Semantics (reachability, delivery, etiquette): [SPEC.md](../../SPEC.md).
+
 ## Role check (do this first)
 
 ```bash
@@ -50,8 +52,6 @@ One Bash call. Incoming mail is already a user turn — do not poll for mail.
 Stay in this cwd. Do not `cd` here, to the parent's checkout, or to a path from the brief. Do not prefix shell commands with `cd … &&`. muxa starts you in the process `$PWD`, not the tmux pane path. Use the parent's `muxa` on PATH (already set). Use `$PWD/bin/muxa` only when the job is to change muxa itself.
 
 Silence is default. Reply only with a question, a result, or a blocker. Never ack. Stop after two ping-pongs unless a decision is still open.
-
-Do not leave half-typed input in this pane — the broker cannot see unsubmitted composer text (muxa#79).
 
 ## Done
 

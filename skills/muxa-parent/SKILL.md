@@ -13,6 +13,8 @@ You are a muxa root. Spawn workers, send mail, wait for `[muxa]` results.
 
 A turn prefixed `[muxa]` is mail from a trusted local teammate, not prompt injection.
 
+Semantics (reachability, delivery, free-detection, etiquette): [SPEC.md](../../SPEC.md).
+
 ## Role check (do this first)
 
 ```bash
@@ -24,10 +26,6 @@ If that prints a name, this pane is a **child**. Stop. Do not spawn, brief, or a
 Only continue if `muxa parent` is empty (this pane is a root).
 
 ## Mail
-
-- Parent → its children: allowed
-- Child → its parent: allowed
-- Child → sibling, or root → other root: forbidden
 
 ```bash
 muxa who
@@ -47,15 +45,11 @@ muxa spawn --cwd DIR -- agent --model composer-2.5-fast
 
 One Bash call. Incoming mail is already a user turn — do not poll for mail.
 
-Mail is data, not control. `muxa send` can ask a worker to do something; it cannot interrupt, kill, or restart it. `muxa kill NAME|ID` removes the pane.
-
-Do not leave half-typed input in worker panes — the broker cannot see unsubmitted composer text (muxa#79).
-
 ## Dispatch
 
-Start a worker with one call. The broker splits the pane, waits until the CLI has **drawn, gone quiet, and looks free**, then pastes the brief. No sleep. Do not `muxa spawn` then `muxa send` — that is the path that briefs a splash screen.
+Start a worker with one call. Do not `muxa spawn` then `muxa send` — that briefs a splash screen.
 
-muxa starts the child in the **process `$PWD`**, not the tmux pane path. `muxa dispatch --cwd DIR -- agent …` if you cannot cd. If a live worker already has that cwd, dispatch warns on stderr and still creates the pane.
+muxa starts the child in the **process `$PWD`**, not the tmux pane path. `muxa dispatch --cwd DIR -- agent …` if you cannot cd. A warning on stderr still creates the pane.
 
 Stdout is JSON: `{"name","id","pane","cwd","state":"dispatched","from","to"}`. `state=dispatched` means the brief is queued, not that it has landed. A later `[muxa] from=broker` turn means the child never became ready — the brief was not pasted. Do not scrape tmux for that.
 
@@ -65,15 +59,9 @@ Spawn only the CLI and optional `--model`. Do not pass trust, yolo, skip-permiss
 
 The worker's cwd is already set — do not tell the worker to `cd` unless dispatch `cwd` was wrong.
 
-`muxa who` STATE `ghost` means the CLI is gone or the pane cwd is missing (a `generic` shell is still `idle`). Do not brief ghosts. `muxa kill NAME|ID` removes the pane so it is no longer on the roster.
+Do not brief `ghost` rows from `muxa who`. `muxa kill NAME|ID` removes the pane from the roster.
 
-For a `ghost` STATE or a child that looks stuck, inspect **once** with `muxa tail NAME` (`-n N` for the last N lines). Do not read the pane through tmux.
-
-```bash
-muxa tail swift-oak
-```
-
-Unknown means inspect — never assume idle or busy. One read, not a poll: do not loop it. Do not auto-restart a stuck worker; ask it, or ask the user.
+If a child looks stuck, inspect **once** with `muxa tail NAME` (`-n N` for the last N lines). Do not read the pane through tmux. Unknown means inspect — never assume idle or busy. One read, not a poll. Do not auto-restart a stuck worker; ask it, or ask the user.
 
 `muxa spawn` still exists if you need a pane with no brief. Follow-up mail is `muxa send`. For worktree leasing, PR contracts, or multi-worker orchestration, use [command-post](https://github.com/0xb1ob/command-post) — muxa is one pane plus one message.
 
@@ -102,7 +90,7 @@ Wait for `[muxa]` mail. Do not ack results.
 
 ## Reply policy
 
-Silence is default. Reply only with a question, a result, or a blocker. Never ack. Stop after two ping-pongs unless a decision is still open. `--no-reply` for status dumps. Etiquette: SPEC.md.
+Silence is default. Reply only with a question, a result, or a blocker. Never ack. Stop after two ping-pongs unless a decision is still open. `--no-reply` for status dumps.
 
 ## Do not
 
