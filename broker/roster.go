@@ -12,7 +12,10 @@ import (
 	"strings"
 )
 
-const rosterUS = "\x1f"
+// tmux <=3.4 rewrites literal tab and other control bytes in -F output to
+// "_", which breaks delimited parsing on Ubuntu CI. "||" survives unmodified
+// and will not appear in these fields in practice (same as the bash port).
+const rosterSep = "||"
 
 type rosterEntry struct {
 	Pane, Name, ID, Parent, Kind, Where, Cwd, Cmd string
@@ -86,17 +89,21 @@ func loadRoster(t *TMUX) ([]rosterEntry, error) {
 		"#{pane_id}", "#{@muxa_name}", "#{@muxa_id}", "#{@muxa_parent}",
 		"#{@muxa_kind}", "#{session_name}:#{window_index}.#{pane_index}",
 		"#{pane_current_path}", "#{pane_current_command}",
-	}, rosterUS)
+	}, rosterSep)
 	out, err := t.Run([]string{"list-panes", "-a", "-F", format}, nil)
 	if err != nil {
 		return nil, err
 	}
+	return parseRosterLines(out), nil
+}
+
+func parseRosterLines(out string) []rosterEntry {
 	var rows []rosterEntry
 	for _, line := range strings.Split(out, "\n") {
 		if line == "" {
 			continue
 		}
-		p := strings.Split(line, rosterUS)
+		p := strings.Split(line, rosterSep)
 		for len(p) < 8 {
 			p = append(p, "")
 		}
@@ -108,7 +115,7 @@ func loadRoster(t *TMUX) ([]rosterEntry, error) {
 			Where: p[5], Cwd: p[6], Cmd: p[7],
 		})
 	}
-	return rows, nil
+	return rows
 }
 
 func findPaneByName(rows []rosterEntry, name string) (string, bool) {
