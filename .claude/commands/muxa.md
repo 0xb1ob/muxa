@@ -10,6 +10,7 @@ Run **one** Bash command:
 - Pane read: `muxa tail <name>` (one-shot; never a poll)
 - Kill pane: `muxa kill <name>` (removes the pane)
 - Send: `muxa send <name> <text from the rest of this invocation>`
+- Send from file: `muxa send --file <path> <name>`
 - Send JSON: `muxa send --json <name> <text>` (queued id + pane)
 - Dispatch: `muxa dispatch [--name NAME] [--cwd DIR] [--brief-file F] -- CMD…` (brief on stdin or `--brief-file`; stdout JSON)
 - No reply wanted: `muxa send --no-reply <name> <text>`

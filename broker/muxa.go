@@ -100,7 +100,9 @@ func printUsage(w io.Writer) {
   muxa kill NAME|ID                 remove the pane (gone from muxa who)
   muxa parent                       this pane's parent alias (empty if root)
   muxa tail NAME [-n N]             one-shot pane capture (visible; -n last N lines of history)
-  muxa send [--json] [--no-reply] NAME TEXT  enqueue on the pane-mail broker (parent↔child only)
+  muxa send [--json] [--no-reply] [--file F] NAME [TEXT]
+                                enqueue on the pane-mail broker (parent↔child only)
+                                body from argv, --file, or stdin (not both --file and argv)
   muxa broker [start|status|stop]   user-level paste broker (unix socket + file queue)
   muxa hook session-start [--kind KIND]
                                 optional root self-registration; spawned panes are already registered

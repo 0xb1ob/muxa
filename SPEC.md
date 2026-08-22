@@ -264,6 +264,7 @@ turn.
 
 ```
 muxa send <name> <text…>
+muxa send --file <file> <name>
 muxa send --no-reply <name> <text…>
 muxa send --json <name> <text…>
 muxa who

@@ -196,6 +196,7 @@ func cmdSend(args []string) error {
 		return err
 	}
 	noReply, jsonOut := false, false
+	bodyFile := ""
 	for len(args) > 0 {
 		switch args[0] {
 		case "--no-reply":
@@ -204,6 +205,11 @@ func cmdSend(args []string) error {
 		case "--json":
 			jsonOut = true
 			args = args[1:]
+		case "--file":
+			if len(args) < 2 {
+				return die("send: --file requires a path")
+			}
+			bodyFile, args = args[1], args[2:]
 		case "--":
 			args = args[1:]
 			goto body
@@ -221,9 +227,22 @@ body:
 	to := args[0]
 	args = args[1:]
 	var body string
-	if len(args) > 0 {
+	switch {
+	case bodyFile != "" && len(args) > 0:
+		return die("send: --file and positional body are mutually exclusive")
+	case bodyFile != "":
+		st, err := os.Stat(bodyFile)
+		if err != nil || st.IsDir() {
+			return dief("send: --file is not a file: %s", bodyFile)
+		}
+		b, err := os.ReadFile(bodyFile)
+		if err != nil {
+			return die(err.Error())
+		}
+		body = string(b)
+	case len(args) > 0:
 		body = strings.Join(args, " ")
-	} else {
+	default:
 		b, err := io.ReadAll(os.Stdin)
 		if err != nil {
 			return die(err.Error())
