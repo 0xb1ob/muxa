@@ -17,10 +17,12 @@ type fakeTMUX struct {
 	capI     int
 	injects  []string
 	failInj  bool
-	echo     string
-	hideEcho bool
-	lastCap  string
-	cursor   string // optional "#{cursor_y} #{cursor_x}" override
+	echo            string
+	hideEcho        bool
+	lastCap         string
+	cursor          string // optional "#{cursor_y} #{cursor_x}" override
+	parkCursor      string // if set, capture-pane leaves the hardware cursor here
+	parkAfterInject string // after Inject, park on a blank footer row (#105)
 }
 
 func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
@@ -68,11 +70,15 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 		f.lastCap = s
 		// Cursor follows the pasted text when the inject is still visible so
 		// emptyAtCursor sees a reacted pane without matching the payload.
-		cursorSrc := s
-		if f.echo != "" && !f.hideEcho {
-			cursorSrc = f.echo
+		if f.parkCursor != "" {
+			f.cursor = f.parkCursor
+		} else {
+			cursorSrc := s
+			if f.echo != "" && !f.hideEcho {
+				cursorSrc = f.echo
+			}
+			f.cursor = fakeCursorPos(cursorSrc)
 		}
-		f.cursor = fakeCursorPos(cursorSrc)
 		return s, nil
 	case "load-buffer":
 		if f.failInj {
@@ -80,6 +86,9 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 		}
 		f.injects = append(f.injects, string(stdin))
 		f.echo = string(stdin)
+		if f.parkAfterInject != "" {
+			f.parkCursor = f.parkAfterInject
+		}
 		return "", nil
 	case "paste-buffer":
 		if f.failInj {
@@ -218,6 +227,13 @@ func TestUnconfirmedPasteNotDone(t *testing.T) {
 	}
 	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 {
 		t.Fatalf("unconfirmed pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+	d.Tick()
+	if f.injectCount() != 2 {
+		t.Fatalf("ghost send must retry, got %d", f.injectCount())
+	}
+	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 {
+		t.Fatalf("ghost retry still pending=%d done=%d failed=%d", p, doneN, failed)
 	}
 }
 
@@ -434,5 +450,101 @@ func TestBusyAfterPasteIsDoneNoRetry(t *testing.T) {
 	d.Tick()
 	if f.injectCount() != 1 {
 		t.Fatalf("retried a paste after the pane went idle: %d", f.injectCount())
+	}
+}
+
+func TestParkedCursorCollapseFirstBriefNoRetry(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	// Production Cursor parks the hardware cursor on the blank row below
+	// the splash footer. emptyAtCursor is true; drawing is false.
+	f := &fakeTMUX{
+		captures:        []string{"ready>", "splash footer\nplaceholder\n"},
+		hideEcho:        true,
+		parkAfterInject: "2 0",
+	}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	_ = q.Put(&Msg{
+		ID: "c105", Pane: "%372", From: "parent", To: "muxa-darwin",
+		Text:         "[muxa] from=parent\nFirst brief that Cursor will collapse.\n",
+		DeadlineUnix: 2000, Kind: kindDispatch, ParentPane: "%2",
+	})
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("want 1 inject, got %d", f.injectCount())
+	}
+	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 {
+		t.Fatalf("parked-cursor first brief pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+	f.mu.Lock()
+	f.captures = []string{"ready>"}
+	f.capI = 0
+	f.parkCursor = ""
+	f.parkAfterInject = ""
+	f.echo = ""
+	f.hideEcho = false
+	f.cursor = ""
+	f.mu.Unlock()
+	d.Tick()
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("retried a parked-cursor first brief: %d", f.injectCount())
+	}
+}
+
+func TestDispatchParkedCursorMidJobNoRetry(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{
+		captures:        []string{"ready>", "splash\nworking\n"},
+		hideEcho:        true,
+		parkAfterInject: "2 0",
+	}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	_ = q.Put(&Msg{
+		ID: "pg1", Pane: "%1", From: "parent", To: "pipe-gate",
+		Text: "FIRST-BRIEF", DeadlineUnix: 2000, Kind: kindDispatch, ParentPane: "%2",
+	})
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("want 1 inject, got %d", f.injectCount())
+	}
+	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 {
+		t.Fatalf("after parked-cursor confirm pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+	f.mu.Lock()
+	f.captures = []string{"ready>", "ready>"}
+	f.capI = 0
+	f.parkCursor = ""
+	f.parkAfterInject = ""
+	f.echo = ""
+	f.hideEcho = false
+	f.cursor = ""
+	f.mu.Unlock()
+	d.Tick()
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("re-pasted first brief while mid-job looked free: %d", f.injectCount())
+	}
+}
+
+func TestInjectErrorStaysPending(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{captures: []string{"ready>"}, failInj: true}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	_ = q.Put(&Msg{
+		ID: "e1", Pane: "%1", From: "c", To: "p", Text: "NOPE",
+		DeadlineUnix: 2000, Kind: kindDispatch, ParentPane: "%2",
+	})
+	d.Tick()
+	if f.injectCount() != 0 {
+		t.Fatalf("failed inject counted: %d", f.injectCount())
+	}
+	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 {
+		t.Fatalf("inject error pending=%d done=%d failed=%d", p, doneN, failed)
 	}
 }
