@@ -66,6 +66,28 @@ func TestPaneWhoState(t *testing.T) {
 	}
 }
 
+func TestParseRosterLines(t *testing.T) {
+	out := strings.Join([]string{
+		"%1||bob||abc||||generic||muxa:0.0||/tmp||sleep",
+		"%2||alice||def||bob||generic||muxa:0.1||/tmp/acme-\"quote\"\\slash||cat",
+		"%3||||||||",
+		"",
+	}, "\n")
+	rows := parseRosterLines(out)
+	if len(rows) != 2 {
+		t.Fatalf("len=%d want 2", len(rows))
+	}
+	if rows[0].Name != "bob" || rows[0].Parent != "" || rows[0].Kind != "generic" {
+		t.Fatalf("bob: %+v", rows[0])
+	}
+	if rows[1].Name != "alice" || rows[1].Parent != "bob" || rows[1].Cwd != `/tmp/acme-"quote"\slash` {
+		t.Fatalf("alice: %+v", rows[1])
+	}
+	if _, ok := findPaneByName(rows, "bob"); !ok {
+		t.Fatal("bob missing from roster")
+	}
+}
+
 func TestCanSend(t *testing.T) {
 	rows := []rosterEntry{
 		{Pane: "%1", Name: "bob", Parent: ""},
