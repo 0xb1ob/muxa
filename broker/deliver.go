@@ -146,6 +146,7 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 			d.notePaste(m)
 			log.Printf("unknown %s → %s id=%s (paste accepted but payload not visible; will not retry)", m.From, m.To, m.ID)
 			_ = d.Q.MarkDone(m)
+			d.notifyUnconfirmed(m)
 			return
 		}
 		log.Printf("unconfirmed %s → %s id=%s (pane still free; left queued)", m.From, m.To, m.ID)
@@ -191,6 +192,34 @@ func (d *Deliverer) failDispatch(m *Msg) {
 func dispatchFailText(m *Msg) string {
 	return "[muxa] from=broker\n" +
 		"dispatch failed: " + m.To + " pane=" + m.Pane + " never became ready before deadline\n" +
+		"id=" + m.ID + "\n" +
+		"Do not reply.\n"
+}
+
+// notifyUnconfirmed mails the parent when a dispatch first brief was filed
+// done/ without a confirmed reaction (paste accepted but pane still looked
+// free). Filing stays done/ either way — at-most-once, muxa#105 — this only
+// closes the silence: today the parent gets no signal at all when Inject
+// ran and landed nowhere.
+func (d *Deliverer) notifyUnconfirmed(m *Msg) {
+	if m.ParentPane == "" {
+		return
+	}
+	note := &Msg{
+		Pane:         m.ParentPane,
+		From:         "broker",
+		To:           m.From,
+		Text:         dispatchUnconfirmedText(m),
+		DeadlineUnix: d.now().Add(24 * time.Hour).Unix(),
+	}
+	if err := d.Q.Put(note); err != nil {
+		log.Printf("dispatch unconfirmed notify %s: %v", m.ID, err)
+	}
+}
+
+func dispatchUnconfirmedText(m *Msg) string {
+	return "[muxa] from=broker\n" +
+		"dispatch unconfirmed: " + m.To + " pane=" + m.Pane + " paste accepted but pane still looked free\n" +
 		"id=" + m.ID + "\n" +
 		"Do not reply.\n"
 }

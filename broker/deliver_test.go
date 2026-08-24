@@ -145,6 +145,18 @@ func (f *fakeTMUX) lastInject() string {
 	return f.injects[len(f.injects)-1]
 }
 
+func (f *fakeTMUX) injectCountOf(text string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, s := range f.injects {
+		if s == text {
+			n++
+		}
+	}
+	return n
+}
+
 func testTMUX(f *fakeTMUX) *TMUX {
 	t := &TMUX{Delay: 0, Run: f.runner}
 	return t
@@ -399,6 +411,53 @@ func TestDispatchDeadlineNotifiesParentNotChild(t *testing.T) {
 	}
 }
 
+func TestDispatchUnconfirmedNotifiesParent(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{captures: []string{"ready>"}, hideEcho: true}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	_ = q.Put(&Msg{
+		ID: "un1", Pane: "%1", From: "parent", To: "swallowed",
+		Text:         "SWALLOWED-BRIEF",
+		DeadlineUnix: 2000, Kind: kindDispatch, ParentPane: "%2",
+	})
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("want 1 inject, got %d", f.injectCount())
+	}
+	// Paste accepted but the pane still looked free (confirmMissed): files
+	// done/ (at-most-once, muxa#105) and mails the parent — no second Inject.
+	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 1 || failed != 0 {
+		t.Fatalf("unconfirmed dispatch pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+	pending, _ := q.Pending()
+	if len(pending) != 1 || pending[0].From != "broker" || pending[0].Pane != "%2" {
+		t.Fatalf("parent notify: %+v", pending)
+	}
+	if strings.Contains(pending[0].Text, "SWALLOWED-BRIEF") {
+		t.Fatal("unconfirmed notify must not include the child brief body")
+	}
+	if !strings.Contains(pending[0].Text, "swallowed") || !strings.Contains(pending[0].Text, "un1") {
+		t.Fatalf("notify missing name/id: %s", pending[0].Text)
+	}
+
+	f.mu.Lock()
+	f.captures = []string{"ready>"}
+	f.capI = 0
+	f.mu.Unlock()
+	d.Tick()
+	if f.injectCount() != 2 {
+		t.Fatalf("want parent notify paste, got %d", f.injectCount())
+	}
+	if strings.Contains(f.lastInject(), "SWALLOWED-BRIEF") {
+		t.Fatal("child brief must not be re-pasted for the parent notify")
+	}
+	if !strings.Contains(f.lastInject(), "dispatch unconfirmed") {
+		t.Fatalf("parent paste=%q", f.lastInject())
+	}
+}
+
 func TestCursorCollapsedPasteIsDelivered(t *testing.T) {
 	dir := t.TempDir()
 	q, _ := OpenQueue(dir)
@@ -465,16 +524,19 @@ func TestParkedCursorCollapseFirstBriefNoRetry(t *testing.T) {
 	}
 	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
 	d.now = func() time.Time { return time.Unix(1000, 0) }
+	brief := "[muxa] from=parent\nFirst brief that Cursor will collapse.\n"
 	_ = q.Put(&Msg{
 		ID: "c105", Pane: "%372", From: "parent", To: "muxa-darwin",
-		Text:         "[muxa] from=parent\nFirst brief that Cursor will collapse.\n",
+		Text:         brief,
 		DeadlineUnix: 2000, Kind: kindDispatch, ParentPane: "%2",
 	})
 	d.Tick()
 	if f.injectCount() != 1 {
 		t.Fatalf("want 1 inject, got %d", f.injectCount())
 	}
-	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 {
+	// done/ for the first brief, plus a pending parent-notify of the
+	// inconclusive confirm (dispatch unconfirmed — never retry).
+	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 1 || failed != 0 {
 		t.Fatalf("parked-cursor first brief pending=%d done=%d failed=%d", p, doneN, failed)
 	}
 	f.mu.Lock()
@@ -488,8 +550,8 @@ func TestParkedCursorCollapseFirstBriefNoRetry(t *testing.T) {
 	f.mu.Unlock()
 	d.Tick()
 	d.Tick()
-	if f.injectCount() != 1 {
-		t.Fatalf("retried a parked-cursor first brief: %d", f.injectCount())
+	if n := f.injectCountOf(brief); n != 1 {
+		t.Fatalf("retried a parked-cursor first brief: %d", n)
 	}
 }
 
@@ -511,7 +573,9 @@ func TestDispatchParkedCursorMidJobNoRetry(t *testing.T) {
 	if f.injectCount() != 1 {
 		t.Fatalf("want 1 inject, got %d", f.injectCount())
 	}
-	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 {
+	// done/ for the first brief, plus a pending parent-notify of the
+	// inconclusive confirm (dispatch unconfirmed — never retry).
+	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 1 || failed != 0 {
 		t.Fatalf("after parked-cursor confirm pending=%d done=%d failed=%d", p, doneN, failed)
 	}
 	f.mu.Lock()
@@ -525,8 +589,8 @@ func TestDispatchParkedCursorMidJobNoRetry(t *testing.T) {
 	f.mu.Unlock()
 	d.Tick()
 	d.Tick()
-	if f.injectCount() != 1 {
-		t.Fatalf("re-pasted first brief while mid-job looked free: %d", f.injectCount())
+	if n := f.injectCountOf("FIRST-BRIEF"); n != 1 {
+		t.Fatalf("re-pasted first brief while mid-job looked free: %d", n)
 	}
 }
 
