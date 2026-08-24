@@ -316,6 +316,44 @@ case "$(cat "$MUXA_BROKER_DIR/broker.log" 2>/dev/null || true)" in
   *) bad "log records dispatch failure instead of a fallback paste" "log: $(tail -15 "$MUXA_BROKER_DIR/broker.log" 2>/dev/null)" ;;
 esac
 
+# --- dispatch: paste accepted but pane still looks free mails the parent, no retry ---
+# The silent-failure gap this closes: Inject succeeds and the pane never
+# visibly reacts (a CLI/wrapper that swallows the paste). confirmMissed still
+# files done/ (at-most-once, muxa#105) — no retry, no re-paste — but until
+# now the parent heard nothing at all. Print one prompt, then sink every byte
+# (the paste, its embedded newlines, and the broker's own Enter) into
+# /dev/null with no echo and no reprint, so the pane shows exactly "ready> "
+# before and after — the same shape as the production failure: two-signal
+# free, Inject nil, no visible reaction. (A `read` loop instead would reprint
+# its prompt once per newline embedded in a multi-line brief, which the
+# broker correctly reads as the pane reacting — that is not this failure.)
+swallow_loop='printf "ready> "; stty -echo; exec cat >/dev/null'
+tok_sw="BRKSW_$$"
+sw_json="$(printf '%s\n' "$tok_sw" | muxa_as "$parent_pane" dispatch --window --name dspswallow -- bash -c "$swallow_loop")"
+sw_pane="$(printf '%s' "$sw_json" | muxa-test-json json-get pane)"
+case "$sw_pane" in
+  %*) ok "swallowed-paste dispatch enqueues" ;;
+  *) bad "swallowed-paste dispatch enqueues" "got: $sw_json" ;;
+esac
+cap_sw_parent="$(wait_capture "$parent_pane" "dispatch unconfirmed: dspswallow" 80 || true)"
+case "$cap_sw_parent" in
+  *"dispatch unconfirmed: dspswallow"*"$sw_pane"*) ok "swallowed-paste dispatch mails the parent" ;;
+  *) bad "swallowed-paste dispatch mails the parent" "cap: $cap_sw_parent" ;;
+esac
+case "$cap_sw_parent" in
+  *"$tok_sw"*) bad "swallowed-paste notify omits the child brief body" "cap: $cap_sw_parent" ;;
+  *) ok "swallowed-paste notify omits the child brief body" ;;
+esac
+cap_sw_child="$(tmux -L "$SOCK" capture-pane -p -t "$sw_pane" 2>/dev/null || true)"
+case "$cap_sw_child" in
+  *"$tok_sw"*) bad "swallowed-paste child never echoes the brief" "cap: $cap_sw_child" ;;
+  *) ok "swallowed-paste child never echoes the brief" ;;
+esac
+n_sw_log="$(grep -c "payload not visible; will not retry" "$MUXA_BROKER_DIR/broker.log" 2>/dev/null || true)"
+[ "${n_sw_log:-0}" -eq 1 ] && ok "swallowed-paste dispatch is not retried (one inject, filed done/)" \
+  || bad "swallowed-paste dispatch is not retried (one inject, filed done/)" \
+         "count=$n_sw_log log: $(tail -20 "$MUXA_BROKER_DIR/broker.log" 2>/dev/null)"
+
 # --- E: agent-CLI composer pane takes the first brief immediately ---
 # The regression is timing as much as delivery: a first brief to an idle
 # composer must land because free-detection says free, not because a deadline

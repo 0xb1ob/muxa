@@ -95,6 +95,7 @@ func printUsage(w io.Writer) {
                                 stdout: {"name","id","pane","cwd","state":"dispatched","from","to"}
                                 broker waits until the CLI has drawn, gone quiet, and looks free
                                 if it never becomes ready: [muxa] from=broker in the parent, child unbriefed
+                                if paste is accepted but the pane still looks free: same, filed done, never retried
   muxa who [--json]                 roster (tmux pane options, cwd, STATE: idle|busy|ghost)
   muxa whoami                       this pane's alias
   muxa kill NAME|ID                 remove the pane (gone from muxa who)

@@ -230,10 +230,12 @@ free (cursor row still empty/prompt, not drawing). A first brief
 (`Kind=dispatch`) whose `Inject` returned nil MUST NOT be retried when
 confirm is inconclusive — Cursor Agent parks the hardware cursor on a blank
 footer row, so "still free" is a false negative and a later Tick would
-re-run the job. File that brief `done/` (no third queue directory). Later
-mail (`muxa send`) that stayed free remains **pending-safe-retry**. A pane
-that reacted MUST NOT be retried. The broker does not match the payload
-against pane captures. `delivered` is
+re-run the job. File that brief `done/` (no third queue directory) and mail
+the parent that the dispatch is unconfirmed, the same channel as
+never-ready — the parent otherwise has no signal at all that the paste
+landed nowhere. Later mail (`muxa send`) that stayed free remains
+**pending-safe-retry**. A pane that reacted MUST NOT be retried. The broker
+does not match the payload against pane captures. `delivered` is
 never recorded for an overwritten timeout paste. When the broker is down
 or the binary is missing, `muxa send` exits non-zero and pastes nothing.
 
@@ -293,9 +295,14 @@ and exits 0 once the pane exists and the brief is queued. The broker then
 waits until the child has drawn, gone quiet, and is free (broker
 free-detection), and pastes
 once. A CLI that never becomes ready produces a `[muxa] from=broker` turn
-in the parent; the brief is not pasted into the child. Brief on stdin or
-`--brief-file`, never a positional string. No worktree, lease, retry
-policy, or job id.
+in the parent; the brief is not pasted into the child. If the pane became
+ready and Inject ran but confirm stayed inconclusive (paste accepted, pane
+still looked free), the brief is filed `done/` as usual — at-most-once,
+never retried — and the parent also gets a `[muxa] from=broker` turn saying
+so; envelope facts only, never the brief body. Silence is the bug either
+way: the parent MUST hear one of a child turn, a never-ready turn, or an
+unconfirmed turn, not nothing. Brief on stdin or `--brief-file`, never a
+positional string. No worktree, lease, retry policy, or job id.
 
 Exit 0 on queued. Exit 2 if the name is unknown (including
 `muxa kill` and `muxa tail`) or the broker cannot be started/enqueued. Exit 3 if not
