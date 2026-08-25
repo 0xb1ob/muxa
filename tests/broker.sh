@@ -417,7 +417,13 @@ composer_holds_busy "F busy composer is not pasted over" busy "BRKFB_$$"
 # --- G-foreign: refuse paste when composer holds operator text (muxa#111) ---
 settle "$composer_pane"
 printf 'typed\n' >"$composer_state"
-sleep 0.5
+sleep 0.8
+settle "$composer_pane"
+cap_foreign_typed0="$(tmux -L "$SOCK" capture-pane -p -t "$composer_pane" 2>/dev/null || true)"
+case "$cap_foreign_typed0" in
+  *HUMANTYPING*) ok "foreign-composer shows operator text" ;;
+  *) bad "foreign-composer shows operator text" "cap: $cap_foreign_typed0" ;;
+esac
 tok_foreign="BRKFOREIGN_$$"
 muxa_as "$parent_pane" send composer "$tok_foreign" >/dev/null
 sleep 1.5
