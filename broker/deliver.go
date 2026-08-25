@@ -121,6 +121,18 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		}
 		return
 	}
+	pre, err := d.T.Snapshot(m.Pane)
+	if err != nil {
+		log.Printf("snapshot %s: %v", m.Pane, err)
+		return
+	}
+	if composerInputForeign(pre.Capture) {
+		if now >= m.DeadlineUnix && !m.isDispatch() {
+			d.noteHeld(m)
+		}
+		return
+	}
+
 	d.mu.Lock()
 	d.inflight[m.Pane] = true
 	d.mu.Unlock()
