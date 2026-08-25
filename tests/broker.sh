@@ -85,36 +85,10 @@ composer_log="$HOME_ISO/composer.log"
 composer_state="$HOME_ISO/composer.state"
 : >"$composer_log"
 printf 'idle\n' >"$composer_state"
-composer_loop='
-top="\033[38;2;38;38;38m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\033[0m"
-bot="\033[38;2;38;38;38m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\033[0m"
-frame() {
-  local row log out
-  case "$1" in
-    busy)  row="\033[48;2;38;38;38m \033[2m→ Add a follow-up   ctrl+c to stop\033[0m" ;;
-    typed) row="\033[48;2;38;38;38m HUMANTYPING\033[0m" ;;
-    *)     row="\033[48;2;38;38;38m \033[2m→ Plan, search, build anything\033[0m" ;;
-  esac
-  log="$(cat '"$composer_log"' 2>/dev/null || true)"
-  out="\033[H\033[2J"
-  [ -n "$log" ] && out="$out$log\n"
-  out="$out$top\n$row\n$bot\n Composer 2.5 Fast\n /tmp/fake-worktree\n"
-  printf "%b" "$out"
-}
-prev=""
-while true; do
-  st="$(cat '"$composer_state"' 2>/dev/null || true)"
-  timeout=0.3
-  [ "$st" = busy ] && timeout=0.05
-  if [ "$st" != "$prev" ] || [ "$st" = busy ]; then
-    prev="$st"
-    frame "$st"
-  fi
-  if IFS= read -r -t "$timeout" line; then
-    printf "%s\n" "$line" >>'"$composer_log"'
-    frame "$st"
-  fi
-done'
+composer_script="$HOME_ISO/composer-standin.sh"
+cp "$ROOT/scripts/composer-standin.sh" "$composer_script"
+chmod +x "$composer_script"
+composer_run="COMPOSER_LOG='$composer_log' COMPOSER_STATE='$composer_state' exec '$composer_script'"
 
 tmux -L "$SOCK" new-session -d -s muxa -n parent "$prompt_loop"
 tmux -L "$SOCK" split-window -h -t muxa:parent "$prompt_loop"
@@ -356,7 +330,7 @@ n_sw_log="$(grep -c "payload not visible; will not retry" "$MUXA_BROKER_DIR/brok
 # composer must land because free-detection says free, not because a deadline
 # expired. Control-mode silence should make that sub-second; the log must
 # never call it a fallback paste (that path is gone).
-tmux -L "$SOCK" split-window -v -t muxa:parent "$composer_loop"
+tmux -L "$SOCK" split-window -v -t muxa:parent "$composer_run"
 sleep 0.5
 composer_pane="$(tmux -L "$SOCK" list-panes -t muxa:parent -F '#{pane_id} #{pane_top}' | sort -k2,2n | awk 'END{print $1}')"
 muxa_as "$composer_pane" register --name composer --kind generic --parent parent >/dev/null

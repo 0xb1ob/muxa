@@ -26,4 +26,4 @@ jobs:
           else
             go test ./broker/
           fi
-          tests/run.sh && tests/tmux-facts.sh && tests/install.sh && tests/broker.sh
+          tests/run.sh && tests/bash32.sh && tests/tmux-facts.sh && tests/install.sh && tests/broker.sh
