@@ -249,6 +249,8 @@ parsed:
 	_ = t.SetPaneOpt(child, "@muxa_parent", parent)
 	_ = t.SetPaneOpt(child, "@muxa_kind", kind)
 	t.SetTitle(child, name)
+	// split-window/new-window select the child; restore parent focus (muxa#111).
+	t.SelectPane(pane)
 	return spawnResult{Name: name, ID: id, Pane: child, Cwd: cwd, Kind: kind, Parent: parent}, nil
 }
 

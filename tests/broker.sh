@@ -417,6 +417,27 @@ composer_holds_busy() {
 }
 composer_holds_busy "F busy composer is not pasted over" busy "BRKFB_$$"
 
+# --- G-foreign: refuse paste when composer holds operator text (muxa#111) ---
+settle "$composer_pane"
+printf 'typed\n' >"$composer_state"
+sleep 0.5
+tok_foreign="BRKFOREIGN_$$"
+muxa_as "$parent_pane" send composer "$tok_foreign" >/dev/null
+sleep 1.5
+cap_foreign="$(tmux -L "$SOCK" capture-pane -p -t "$composer_pane" 2>/dev/null || true)"
+case "$cap_foreign" in
+  *"$tok_foreign"*) bad "foreign-composer send does not paste over operator text" "cap: $cap_foreign" ;;
+  *HUMANTYPING*) ok "foreign-composer send waits while operator text present" ;;
+  *) bad "foreign-composer send waits while operator text present" "cap: $cap_foreign" ;;
+esac
+printf 'idle\n' >"$composer_state"
+cap_foreign_clear="$(wait_capture "$composer_pane" "$tok_foreign" 40 || true)"
+case "$cap_foreign_clear" in
+  *"$tok_foreign"*) ok "foreign-composer send delivers after composer cleared" ;;
+  *) bad "foreign-composer send delivers after composer cleared" "cap: $cap_foreign_clear" ;;
+esac
+sleep 0.3
+
 # --- G: the daemon outlives its starter's process group ---
 # The incident: nohup + disown left the broker in the caller's process group,
 # so the teardown at the end of the calling tool call killed it before its

@@ -461,7 +461,7 @@ func TestDispatchUnconfirmedNotifiesParent(t *testing.T) {
 func TestCursorCollapsedPasteIsDelivered(t *testing.T) {
 	dir := t.TempDir()
 	q, _ := OpenQueue(dir)
-	f := &fakeTMUX{captures: []string{"ready>", "[Pasted text +48 lines]", "working..."}, hideEcho: true}
+	f := &fakeTMUX{captures: []string{"ready>", "[Pasted text +48 lines]", "working...", "▄▄▄▄\n → Add a follow-up   ctrl+c to stop\n▀▀▀▀"}, hideEcho: true}
 	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
 	d.now = func() time.Time { return time.Unix(1000, 0) }
 	_ = q.Put(&Msg{
@@ -479,6 +479,65 @@ func TestCursorCollapsedPasteIsDelivered(t *testing.T) {
 	d.Tick()
 	if f.injectCount() != 1 {
 		t.Fatalf("retried a collapsed Cursor paste: %d", f.injectCount())
+	}
+}
+
+func TestDispatchRefusesComposerForeignInput(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	typed := "log\n▄▄▄▄▄\n operator-typed\n▀▀▀▀▀\n footer"
+	f := &fakeTMUX{captures: []string{typed, typed}}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	now := int64(1000)
+	d.now = func() time.Time { return time.Unix(now, 0) }
+	_ = q.Put(&Msg{
+		ID: "f1", Pane: "%1", From: "parent", To: "kid", Text: "SECRET-BRIEF",
+		DeadlineUnix: 1005, Kind: kindDispatch, ParentPane: "%2",
+	})
+	d.Tick()
+	if f.injectCount() != 0 {
+		t.Fatalf("pasted over foreign composer input: %d", f.injectCount())
+	}
+	now = 1005
+	d.Tick()
+	if f.injectCount() != 0 {
+		t.Fatalf("timeout-pasted over foreign composer: %d", f.injectCount())
+	}
+	if p, doneN, failed, _ := q.Counts(); doneN != 0 || failed != 1 || p != 1 {
+		t.Fatalf("want failed brief + parent notify pending, pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+	pending, _ := q.Pending()
+	if len(pending) != 1 || pending[0].From != "broker" {
+		t.Fatalf("parent notify: %+v", pending)
+	}
+	if !strings.Contains(pending[0].Text, "composer holds foreign input") {
+		t.Fatalf("notify text: %s", pending[0].Text)
+	}
+	if strings.Contains(pending[0].Text, "SECRET-BRIEF") {
+		t.Fatal("failure turn must not include the undelivered brief")
+	}
+}
+
+func TestUnsubmittedPasteDispatchNotifiesParent(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{captures: []string{"ready>", "[Pasted text #1 +79 lines]", "[Pasted text #1 +79 lines]"}, hideEcho: true}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	_ = q.Put(&Msg{
+		ID: "up1", Pane: "%1", From: "parent", To: "kid", Text: "BRIEF-BODY",
+		DeadlineUnix: 2000, Kind: kindDispatch, ParentPane: "%2",
+	})
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("want 1 inject, got %d", f.injectCount())
+	}
+	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 1 || failed != 0 {
+		t.Fatalf("unsubmitted paste pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+	pending, _ := q.Pending()
+	if len(pending) != 1 || !strings.Contains(pending[0].Text, "dispatch unconfirmed") {
+		t.Fatalf("parent notify: %+v", pending)
 	}
 }
 

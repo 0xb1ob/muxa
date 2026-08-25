@@ -264,6 +264,10 @@ n_split="$(tmux -L "$SOCK" list-panes -t "$bob_win" -F '#{pane_id}' | awk 'END {
 [ "$n_split" -eq $((expect + 1)) ] && ok "spawn adds a pane in the grid" \
   || bad "spawn adds a pane in the grid" "expected $((expect + 1)) panes, got $n_split"
 
+focus_active="$(tmux -L "$SOCK" list-panes -t "$bob_win" -F '#{pane_id} #{pane_active}' | awk '$2==1{print $1; exit}')"
+[ "$focus_active" = "$bob_pane" ] && ok "spawn leaves keyboard focus on parent" \
+  || bad "spawn leaves keyboard focus on parent" "active=$focus_active parent=$bob_pane"
+
 # Dedicated wide window: 4 default spawns must be 2D (not a single row/column).
 tmux -L "$SOCK" new-window -t muxa -n gridhost "exec sleep 3600"
 sleep 0.2
