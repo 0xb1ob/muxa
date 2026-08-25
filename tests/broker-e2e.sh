@@ -10,9 +10,11 @@ GO="${GO:-/usr/local/go/bin/go}"
 command -v "$GO" >/dev/null 2>&1 || GO="$(command -v go)"
 LOG="${MUXA_BROKER_E2E_LOG:-/tmp/muxa-broker-e2e.txt}"
 
+ver_flags="$("$ROOT/scripts/version-ldflags.sh")"
 ldflags=()
 case "$(uname -s)" in
-  Darwin) ldflags=(-ldflags=-linkmode=external) ;;
+  Darwin) ldflags=(-ldflags="-linkmode=external $ver_flags") ;;
+  *) ldflags=(-ldflags="$ver_flags") ;;
 esac
 "$GO" build "${ldflags[@]}" -o "$ROOT/bin/muxa" "$ROOT/broker"
 if [ "$(uname -s)" = Darwin ]; then

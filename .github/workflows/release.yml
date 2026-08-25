@@ -41,13 +41,17 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: ${{ matrix.goos == 'darwin' && '1' || '0' }}
           CC: ${{ matrix.cc }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
         run: |
           set -eux
           out="muxa-${GOOS}-${GOARCH}"
+          VERSION="${TAG#v}"
+          COMMIT="$(git rev-parse --short HEAD)"
+          VER_FLAGS="-X main.version=${VERSION} -X main.commit=${COMMIT}"
           # darwin 25+ SIGKILLs Mach-O without LC_UUID; only the external
           # linker emits it, so cgo + clang is required for darwin.
           if [ "$GOOS" = darwin ]; then
-            go build -ldflags=-linkmode=external -o "$out" ./broker
+            go build -ldflags="-linkmode=external ${VER_FLAGS}" -o "$out" ./broker
             xattr -c "$out" 2>/dev/null || true
             codesign -s - --force --timestamp=none "$out"
             otool -l "$out" | grep -q LC_UUID || {
@@ -55,7 +59,7 @@ jobs:
               exit 1
             }
           else
-            go build -o "$out" ./broker
+            go build -ldflags="${VER_FLAGS}" -o "$out" ./broker
           fi
       - uses: actions/upload-artifact@v4
         with:

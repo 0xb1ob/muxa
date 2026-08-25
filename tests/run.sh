@@ -6,9 +6,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PATH="$ROOT/bin:$PATH"
 GO="${GO:-/usr/local/go/bin/go}"
 command -v "$GO" >/dev/null 2>&1 || GO="$(command -v go)"
+ver_flags="$("$ROOT/scripts/version-ldflags.sh")"
 ldflags=()
 case "$(uname -s)" in
-  Darwin) ldflags=(-ldflags=-linkmode=external) ;;
+  Darwin) ldflags=(-ldflags="-linkmode=external $ver_flags") ;;
+  *) ldflags=(-ldflags="$ver_flags") ;;
 esac
 # darwin 25+ aborts a test binary without LC_UUID; only the external linker emits it.
 "$GO" test "${ldflags[@]}" "$ROOT/broker"

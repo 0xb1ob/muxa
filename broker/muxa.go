@@ -9,7 +9,17 @@ import (
 	"strings"
 )
 
-const version = "0.3.0"
+var (
+	version = "dev"
+	commit  = ""
+)
+
+func versionString() string {
+	if commit != "" {
+		return version + " (" + commit + ")"
+	}
+	return version
+}
 
 type cliErr struct {
 	code int
@@ -50,7 +60,7 @@ func dispatchMuxa(cmd string, args []string) error {
 		printUsage(os.Stdout)
 		return nil
 	case "version", "-v", "--version":
-		fmt.Println(version)
+		fmt.Println(versionString())
 		return nil
 	case "register":
 		return cmdRegister(args)
