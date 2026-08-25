@@ -215,7 +215,9 @@ between the `▄`/`▀` borders. The broker MUST treat non-placeholder content
 there as not free — including `[Pasted text …]` sitting unsubmitted — and
 MUST NOT paste a first brief over it. Past deadline, `Kind=dispatch` is
 failed and the parent gets a `[muxa] from=broker` **refused** turn (never
-the brief body). Later mail stays queued until the composer clears.
+the brief body). Later mail stays queued until the composer clears. Immediately before
+paste, the broker re-checks the composer box on a fresh capture so a
+quiescent two-signal pair cannot race operator typing (muxa#116).
 
 **Known sharp edge (muxa#44).** Two-signal, control-mode silence, and
 hardware cursor position are still blind to half-typed input that never

@@ -447,7 +447,7 @@ func TestDispatchSwallowedPasteNoParentNotify(t *testing.T) {
 func TestCursorCollapsedPasteIsDelivered(t *testing.T) {
 	dir := t.TempDir()
 	q, _ := OpenQueue(dir)
-	f := &fakeTMUX{captures: []string{"ready>", "[Pasted text +48 lines]", "working...", "▄▄▄▄\n → Add a follow-up   ctrl+c to stop\n▀▀▀▀"}, hideEcho: true}
+	f := &fakeTMUX{captures: []string{"ready>", "ready>", "[Pasted text +48 lines]", "working...", "▄▄▄▄\n → Add a follow-up   ctrl+c to stop\n▀▀▀▀"}, hideEcho: true}
 	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
 	d.now = func() time.Time { return time.Unix(1000, 0) }
 	_ = q.Put(&Msg{
@@ -507,7 +507,7 @@ func TestDispatchRefusesComposerForeignInput(t *testing.T) {
 func TestUnsubmittedPasteDispatchNotifiesParent(t *testing.T) {
 	dir := t.TempDir()
 	q, _ := OpenQueue(dir)
-	f := &fakeTMUX{captures: []string{"ready>", "[Pasted text #1 +79 lines]", "[Pasted text #1 +79 lines]"}, hideEcho: true}
+	f := &fakeTMUX{captures: []string{"ready>", "ready>", "[Pasted text #1 +79 lines]", "[Pasted text #1 +79 lines]"}, hideEcho: true}
 	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
 	d.now = func() time.Time { return time.Unix(1000, 0) }
 	_ = q.Put(&Msg{
@@ -726,5 +726,32 @@ func TestMailHoldsComposerForeignInput(t *testing.T) {
 	}
 	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 {
 		t.Fatalf("mail stays queued past deadline, pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+}
+
+func TestMailPreInjectComposerForeignBlocks(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	idle := "log\n▄▄▄▄▄\n → Plan, search, build anything\n▀▀▀▀▀\n footer"
+	typed := "log\n▄▄▄▄▄\n operator-typed\n▀▀▀▀▀\n footer"
+	f := &fakeTMUX{
+		captures: []string{
+			idle,
+			idle,
+			typed,
+		},
+		parkCursor: "2 20",
+	}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	text := formatOne("worker", "", "report")
+	_ = q.Put(&Msg{ID: "m116c", Pane: "%1", From: "worker", To: "parent", Text: text, DeadlineUnix: 2000})
+	d.Tick()
+	f.mu.Lock()
+	f.parkCursor = "4 0"
+	f.mu.Unlock()
+	d.Tick()
+	if f.injectCount() != 0 {
+		t.Fatalf("pre-inject composer gate must block stale free-detection: %d", f.injectCount())
 	}
 }
