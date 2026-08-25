@@ -124,3 +124,24 @@ func TestLastNContentLines(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestVersionString(t *testing.T) {
+	oldVersion, oldCommit := version, commit
+	t.Cleanup(func() { version, commit = oldVersion, oldCommit })
+
+	version, commit = "dev", ""
+	if got := versionString(); got != "dev" {
+		t.Fatalf("no commit: got %q", got)
+	}
+	version, commit = "1.0.10", "f9e615e"
+	if got := versionString(); got != "1.0.10 (f9e615e)" {
+		t.Fatalf("tag+commit: got %q", got)
+	}
+	version, commit = "dev", "abc1234"
+	if got := versionString(); got != "dev (abc1234)" {
+		t.Fatalf("dev+commit: got %q", got)
+	}
+	if version == "0.3.0" {
+		t.Fatal("version must not be the stale hardcoded 0.3.0 default")
+	}
+}
