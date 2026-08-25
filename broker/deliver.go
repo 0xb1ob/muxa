@@ -141,16 +141,28 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		d.notePaste(m)
 		log.Printf("delivered %s → %s id=%s", m.From, m.To, m.ID)
 		_ = d.Q.MarkDone(m)
+	case confirmUnsubmitted:
+		// Positive evidence: collapsed paste still visible and no agent turn
+		// started after one beat (muxa#111). File done/ (at-most-once) and
+		// tell the parent — unlike generic inconclusive confirm, this signal
+		// is not anti-correlated with healthy workers (muxa#110).
+		if m.isDispatch() {
+			d.notePaste(m)
+			log.Printf("unsubmitted %s → %s id=%s (paste visible but turn did not start; filed done/)", m.From, m.To, m.ID)
+			_ = d.Q.MarkDone(m)
+			d.notifyUnsubmitted(m)
+			return
+		}
+		log.Printf("unconfirmed %s → %s id=%s (pane still free; left queued)", m.From, m.To, m.ID)
 	default:
-		// Cursor Agent parks the hardware cursor on a blank footer row, so
-		// confirmMissed is a false negative after a first brief already
-		// submitted. Leaving Kind=dispatch queued would re-paste on the
-		// next Tick. Later mail (muxa send) still retries a genuine ghost.
+		// Generic inconclusive: parked cursor, fast agent, swallowed paste
+		// with no visible collapse — free-detection cannot distinguish
+		// success from failure (muxa#110). File first brief done/ (no retry)
+		// but do not mail the parent a failure-shaped turn.
 		if m.isDispatch() {
 			d.notePaste(m)
 			log.Printf("unknown %s → %s id=%s (paste accepted but payload not visible; will not retry)", m.From, m.To, m.ID)
 			_ = d.Q.MarkDone(m)
-			d.notifyUnconfirmed(m)
 			return
 		}
 		log.Printf("unconfirmed %s → %s id=%s (pane still free; left queued)", m.From, m.To, m.ID)
@@ -232,12 +244,11 @@ func (d *Deliverer) composerBlocked(pane string) bool {
 	return composerInputForeign(cur)
 }
 
-// notifyUnconfirmed mails the parent when a dispatch first brief was filed
-// done/ without a confirmed reaction (paste accepted but pane still looked
-// free). Filing stays done/ either way — at-most-once, muxa#105 — this only
-// closes the silence: today the parent gets no signal at all when Inject
-// ran and landed nowhere.
-func (d *Deliverer) notifyUnconfirmed(m *Msg) {
+// notifyUnsubmitted mails the parent when a dispatch brief was pasted but
+// confirm saw collapsed paste with no agent turn after one beat (muxa#111).
+// Generic inconclusive confirm does not notify — that signal was
+// anti-correlated with real failure (muxa#110).
+func (d *Deliverer) notifyUnsubmitted(m *Msg) {
 	if m.ParentPane == "" {
 		return
 	}
@@ -245,17 +256,17 @@ func (d *Deliverer) notifyUnconfirmed(m *Msg) {
 		Pane:         m.ParentPane,
 		From:         "broker",
 		To:           m.From,
-		Text:         dispatchUnconfirmedText(m),
+		Text:         dispatchUnsubmittedText(m),
 		DeadlineUnix: d.now().Add(24 * time.Hour).Unix(),
 	}
 	if err := d.Q.Put(note); err != nil {
-		log.Printf("dispatch unconfirmed notify %s: %v", m.ID, err)
+		log.Printf("dispatch unsubmitted notify %s: %v", m.ID, err)
 	}
 }
 
-func dispatchUnconfirmedText(m *Msg) string {
+func dispatchUnsubmittedText(m *Msg) string {
 	return "[muxa] from=broker\n" +
-		"dispatch unconfirmed: " + m.To + " pane=" + m.Pane + " paste accepted but pane still looked free\n" +
+		"dispatch unsubmitted: " + m.To + " pane=" + m.Pane + " brief paste visible but agent turn did not start\n" +
 		"id=" + m.ID + "\n" +
 		"Do not reply.\n"
 }
@@ -340,8 +351,9 @@ func visibleContent(capture string) bool {
 type confirmResult int
 
 const (
-	confirmMissed confirmResult = iota // still free — send may retry; dispatch must not
+	confirmMissed confirmResult = iota // inconclusive — still free; send may retry; dispatch files done/
 	confirmPasted                      // pane reacted; must not retry
+	confirmUnsubmitted                 // collapsed paste visible, no turn after wait
 )
 
 // confirm takes post-paste snapshot(s). A pane that reacted (cursor row
@@ -371,7 +383,7 @@ func (d *Deliverer) confirm(pane string) confirmResult {
 			return confirmPasted
 		}
 		if unsubmittedPasteVisible(snap.Capture) {
-			return confirmMissed
+			return confirmUnsubmitted
 		}
 	}
 	if snap.Capture != "" && !emptyAtCursor(snap.Capture, snap.CursorY, snap.CursorX) {

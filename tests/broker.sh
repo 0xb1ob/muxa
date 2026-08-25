@@ -316,17 +316,10 @@ case "$(cat "$MUXA_BROKER_DIR/broker.log" 2>/dev/null || true)" in
   *) bad "log records dispatch failure instead of a fallback paste" "log: $(tail -15 "$MUXA_BROKER_DIR/broker.log" 2>/dev/null)" ;;
 esac
 
-# --- dispatch: paste accepted but pane still looks free mails the parent, no retry ---
-# The silent-failure gap this closes: Inject succeeds and the pane never
-# visibly reacts (a CLI/wrapper that swallows the paste). confirmMissed still
-# files done/ (at-most-once, muxa#105) — no retry, no re-paste — but until
-# now the parent heard nothing at all. Print one prompt, then sink every byte
-# (the paste, its embedded newlines, and the broker's own Enter) into
-# /dev/null with no echo and no reprint, so the pane shows exactly "ready> "
-# before and after — the same shape as the production failure: two-signal
-# free, Inject nil, no visible reaction. (A `read` loop instead would reprint
-# its prompt once per newline embedded in a multi-line brief, which the
-# broker correctly reads as the pane reacting — that is not this failure.)
+# --- dispatch: paste swallowed with no visible collapse files done/, no parent mail ---
+# Inconclusive confirm (muxa#110): Inject succeeds, pane never visibly reacts,
+# but there is no positive unsubmitted-paste evidence — parent must not get a
+# failure-shaped broker turn. Filed done/ (at-most-once, muxa#105), no retry.
 swallow_loop='printf "ready> "; stty -echo; exec cat >/dev/null'
 tok_sw="BRKSW_$$"
 sw_json="$(printf '%s\n' "$tok_sw" | muxa_as "$parent_pane" dispatch --window --name dspswallow -- bash -c "$swallow_loop")"
@@ -335,10 +328,12 @@ case "$sw_pane" in
   %*) ok "swallowed-paste dispatch enqueues" ;;
   *) bad "swallowed-paste dispatch enqueues" "got: $sw_json" ;;
 esac
-cap_sw_parent="$(wait_capture "$parent_pane" "dispatch unconfirmed: dspswallow" 80 || true)"
+sleep 3
+cap_sw_parent="$(tmux -L "$SOCK" capture-pane -p -t "$parent_pane" 2>/dev/null || true)"
 case "$cap_sw_parent" in
-  *"dispatch unconfirmed: dspswallow"*"$sw_pane"*) ok "swallowed-paste dispatch mails the parent" ;;
-  *) bad "swallowed-paste dispatch mails the parent" "cap: $cap_sw_parent" ;;
+  *"dispatch unsubmitted: dspswallow"*|*"dispatch unconfirmed: dspswallow"*)
+    bad "inconclusive swallowed-paste dispatch must not mail the parent" "cap: $cap_sw_parent" ;;
+  *) ok "inconclusive swallowed-paste dispatch does not mail the parent" ;;
 esac
 case "$cap_sw_parent" in
   *"$tok_sw"*) bad "swallowed-paste notify omits the child brief body" "cap: $cap_sw_parent" ;;
