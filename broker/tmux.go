@@ -159,6 +159,11 @@ func (t *TMUX) SetTitle(pane, title string) {
 	_, _ = t.Run([]string{"select-pane", "-t", pane, "-T", title}, nil)
 }
 
+// SelectPane restores keyboard focus without changing pane options.
+func (t *TMUX) SelectPane(pane string) {
+	_, _ = t.Run([]string{"select-pane", "-t", pane}, nil)
+}
+
 func (t *TMUX) KillPane(pane string) error {
 	_, err := t.Run([]string{"kill-pane", "-t", pane}, nil)
 	return err

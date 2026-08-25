@@ -110,7 +110,11 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 	if !free {
 		if now >= m.DeadlineUnix {
 			if m.isDispatch() {
-				d.failDispatch(m)
+				if d.composerBlocked(m.Pane) {
+					d.failDispatchComposerForeign(m)
+				} else {
+					d.failDispatch(m)
+				}
 			} else {
 				d.noteHeld(m)
 			}
@@ -196,6 +200,38 @@ func dispatchFailText(m *Msg) string {
 		"Do not reply.\n"
 }
 
+func (d *Deliverer) failDispatchComposerForeign(m *Msg) {
+	log.Printf("dispatch refused %s → %s id=%s (composer holds foreign input)", m.From, m.To, m.ID)
+	_ = d.Q.MarkFailed(m)
+	if m.ParentPane == "" {
+		return
+	}
+	fail := &Msg{
+		Pane:         m.ParentPane,
+		From:         "broker",
+		To:           m.From,
+		Text:         dispatchComposerForeignText(m),
+		DeadlineUnix: d.now().Add(24 * time.Hour).Unix(),
+	}
+	if err := d.Q.Put(fail); err != nil {
+		log.Printf("dispatch composer-foreign notify %s: %v", m.ID, err)
+	}
+}
+
+func dispatchComposerForeignText(m *Msg) string {
+	return "[muxa] from=broker\n" +
+		"dispatch refused: " + m.To + " pane=" + m.Pane + " composer holds foreign input (clear it and re-dispatch)\n" +
+		"id=" + m.ID + "\n" +
+		"Do not reply.\n"
+}
+
+func (d *Deliverer) composerBlocked(pane string) bool {
+	d.mu.Lock()
+	cur := d.prev[pane]
+	d.mu.Unlock()
+	return composerInputForeign(cur)
+}
+
 // notifyUnconfirmed mails the parent when a dispatch first brief was filed
 // done/ without a confirmed reaction (paste accepted but pane still looked
 // free). Filing stays done/ either way — at-most-once, muxa#105 — this only
@@ -254,9 +290,19 @@ func (d *Deliverer) canPaste(pane string) (bool, error) {
 		// No frame pair yet. Control-mode silence already passed (not
 		// drawing); empty-at-cursor is the remaining two-signal half.
 		// Without it a first tick would paste over shell typing.
-		return empty, nil
+		if !empty {
+			return false, nil
+		}
+	} else if !two {
+		return false, nil
 	}
-	return two, nil
+	d.mu.Lock()
+	cur := d.prev[pane]
+	d.mu.Unlock()
+	if composerInputForeign(cur) {
+		return false, nil
+	}
+	return true, nil
 }
 
 func (d *Deliverer) drawing(pane string) bool {
@@ -298,17 +344,37 @@ const (
 	confirmPasted                      // pane reacted; must not retry
 )
 
-// confirm takes one post-paste snapshot. A pane that reacted (cursor row
-// no longer empty/prompt, or control-mode drawing) is pasted and must not
-// be retried. A pane that stayed free is confirmMissed: deliverOne files
-// a first brief done/ (no retry) and leaves later mail queued. No payload
-// string-matching against the capture.
+// confirm takes post-paste snapshot(s). A pane that reacted (cursor row
+// no longer empty/prompt, control-mode drawing, or agent turn started) is
+// pasted and must not be retried. Collapsed "[Pasted text …]" with no turn
+// start is unsubmitted (muxa#111). A pane that stayed free is
+// confirmMissed: deliverOne files a first brief done/ (no retry) and leaves
+// later mail queued. No payload string-matching against the capture.
 func (d *Deliverer) confirm(pane string) confirmResult {
 	snap, err := d.T.Snapshot(pane)
-	if err == nil && snap.Capture != "" && !emptyAtCursor(snap.Capture, snap.CursorY, snap.CursorX) {
-		return confirmPasted
+	if err != nil {
+		return confirmMissed
 	}
 	if d.drawing(pane) {
+		return confirmPasted
+	}
+	if unsubmittedPasteVisible(snap.Capture) && !agentTurnStarted(snap.Capture) {
+		time.Sleep(d.T.Delay)
+		if d.drawing(pane) {
+			return confirmPasted
+		}
+		snap2, err2 := d.T.Snapshot(pane)
+		if err2 == nil {
+			snap = snap2
+		}
+		if agentTurnStarted(snap.Capture) {
+			return confirmPasted
+		}
+		if unsubmittedPasteVisible(snap.Capture) {
+			return confirmMissed
+		}
+	}
+	if snap.Capture != "" && !emptyAtCursor(snap.Capture, snap.CursorY, snap.CursorX) {
 		return confirmPasted
 	}
 	return confirmMissed

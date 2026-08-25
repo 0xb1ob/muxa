@@ -91,7 +91,9 @@ splits a pane in the parent's window. The child's start directory is
 what `cd worktree && muxa spawn` sets when the agent's shell is a
 subprocess (Cursor) and does not change the tmux pane path. Splits the parent pane (`split-window -h`, falling back to `-v` on failure,
 then against the largest pane if both fail), then `select-layout tiled` on
-the window so successive children fill a 2D grid rather than a single row.
+the window so successive children fill a 2D grid rather than a single row,
+then `select-pane` back to the parent so spawn does not steal keyboard
+focus (muxa#111).
 `--window` opens a dedicated tmux window instead. If a live registered worker already
 occupies that start directory (same physical path, including a worktree),
 spawn prints a warning on stderr and still creates the pane. Ghosts and
@@ -207,16 +209,19 @@ user-configurable, so no fixed prompt/status model can be correct:
    pair; control-mode silence already covers quiescence, and empty-at-cursor
    is the remaining half.
 
-**Known sharp edge (muxa#44, accepted muxa#79).** Cursor Agent draws typed
-input inside its composer box and parks the hardware cursor on the blank
-row below the splash footer. Two-signal, control-mode silence, and hardware
-cursor position are all blind to half-typed unsubmitted input there — the
-same quiescence and empty-at-cursor as an idle composer. Pasting over
-someone mid-prompt is recoverable in seconds when the human is at that
-pane; the ~700-line typed-in-box parser that closed that hole was dropped
-as poor ROI for a lightweight tool. **Etiquette:** do not leave half-typed
-input in worker panes. `muxa -check-pane %id` prints the two-signal
-verdict.
+**Composer-box gate (muxa#111).** Agent CLIs that draw a half-block composer
+box (Cursor, Claude, pi) expose typed or collapsed-paste input on the row
+between the `▄`/`▀` borders. The broker MUST treat non-placeholder content
+there as not free — including `[Pasted text …]` sitting unsubmitted — and
+MUST NOT paste a first brief over it. Past deadline, `Kind=dispatch` is
+failed and the parent gets a `[muxa] from=broker` **refused** turn (never
+the brief body). Later mail stays queued until the composer clears.
+
+**Known sharp edge (muxa#44).** Two-signal, control-mode silence, and
+hardware cursor position are still blind to half-typed input that never
+reaches the composer box (e.g. a shell prompt). **Etiquette:** do not leave
+half-typed input in worker panes. `muxa -check-pane %id` prints the
+two-signal verdict.
 
 Retry until the pane is actually free. `MUXA_BROKER_DEADLINE` (default 600)
 is how long a *dead* pane is retried before the message is failed; a live
@@ -225,7 +230,9 @@ NOT timeout-fallback paste: two fallbacks into one busy composer overwrite
 each other, both get filed as `done/`, and the agent never sees the first.
 After a paste, confirmation has two snapshot outcomes. **delivered**
 (filed `done/`, never retried): the pane reacted — cursor row no longer
-empty/prompt, or control-mode drawing. **inconclusive**: the pane stayed
+empty/prompt, control-mode drawing, or an agent turn started (e.g. `ctrl+c
+to stop`). Collapsed `[Pasted text …]` with no turn start is
+**inconclusive** — wait one beat and re-check before filing. **inconclusive**: the pane stayed
 free (cursor row still empty/prompt, not drawing). A first brief
 (`Kind=dispatch`) whose `Inject` returned nil MUST NOT be retried when
 confirm is inconclusive — Cursor Agent parks the hardware cursor on a blank
@@ -300,7 +307,8 @@ ready and Inject ran but confirm stayed inconclusive (paste accepted, pane
 still looked free), the brief is filed `done/` as usual — at-most-once,
 never retried — and the parent also gets a `[muxa] from=broker` turn saying
 so; envelope facts only, never the brief body. Silence is the bug either
-way: the parent MUST hear one of a child turn, a never-ready turn, or an
+way: the parent MUST hear one of a child turn, a never-ready turn, a
+refused turn (composer holds foreign input), or an
 unconfirmed turn, not nothing. Brief on stdin or `--brief-file`, never a
 positional string. No worktree, lease, retry policy, or job id.
 
@@ -325,8 +333,8 @@ repeat you already handled.
 
 Role instructions live in the **muxa-parent** and **muxa-worker** skills.
 
-Do not leave half-typed input in worker panes — the broker cannot see
-unsubmitted Cursor Agent composer text (muxa#79).
+Do not leave half-typed input in worker panes — the broker checks
+composer-box content but cannot see unsubmitted shell-prompt typing.
 
 ## muxa / command-post boundary
 
