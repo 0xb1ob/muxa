@@ -435,6 +435,62 @@ case "$cap_foreign_clear" in
 esac
 sleep 0.3
 
+# --- G-parent: worker mail to a parent composer with operator text (muxa#116) ---
+# Point the parent alias at the existing composer stand-in. Rename through
+# register so roster lookup is unambiguous (findPaneByName is first-match).
+muxa_as "$parent_pane" register --name parent-shell --kind generic >/dev/null
+muxa_as "$composer_pane" register --name parent --kind generic --parent parent-shell >/dev/null
+parent_composer_pane="$composer_pane"
+settle "$parent_composer_pane"
+printf 'typed\n' >"$composer_state"
+sleep 0.8
+settle "$parent_composer_pane"
+cap_parent_typed0="$(tmux -L "$SOCK" capture-pane -p -t "$parent_composer_pane" 2>/dev/null || true)"
+case "$cap_parent_typed0" in
+  *HUMANTYPING*) ok "G-parent composer shows operator text" ;;
+  *) bad "G-parent composer shows operator text" "cap: $cap_parent_typed0" ;;
+esac
+tok_parent_foreign="BRK116PARENT_$$"
+sent_parent_foreign="$(muxa_as "$child_pane" send --json parent "$tok_parent_foreign")"
+case "$sent_parent_foreign" in
+  *'"pane"'*) ok "G-parent child→parent enqueues while parent composer typed" ;;
+  *) bad "G-parent child→parent enqueues while parent composer typed" "got: $sent_parent_foreign" ;;
+esac
+parent_foreign_pane="$(printf '%s' "$sent_parent_foreign" | muxa-test-json json-get pane 2>/dev/null || true)"
+[ "$parent_foreign_pane" = "$parent_composer_pane" ] \
+  && ok "G-parent send targets the composer parent pane" \
+  || bad "G-parent send targets the composer parent pane" "want=$parent_composer_pane got=$parent_foreign_pane"
+sleep 1.5
+cap_parent_foreign="$(tmux -L "$SOCK" capture-pane -p -t "$parent_composer_pane" 2>/dev/null || true)"
+case "$cap_parent_foreign" in
+  *"$tok_parent_foreign"*) bad "G-parent mail does not paste over operator text" "cap: $cap_parent_foreign" ;;
+  *HUMANTYPING*) ok "G-parent mail waits while parent composer holds operator text" ;;
+  *) bad "G-parent mail waits while parent composer holds operator text" "cap: $cap_parent_foreign" ;;
+esac
+if find "$MUXA_BROKER_DIR/pending" -name '*.json' -print0 2>/dev/null \
+  | xargs -0 grep -l "$tok_parent_foreign" >/dev/null 2>&1; then
+  ok "G-parent mail stays pending while composer occupied"
+else
+  bad "G-parent mail stays pending while composer occupied" \
+    "pending dir: $(ls "$MUXA_BROKER_DIR/pending" 2>/dev/null || true)"
+fi
+printf 'idle\n' >"$composer_state"
+sleep 2
+settle "$parent_composer_pane"
+cap_parent_foreign_clear="$(wait_capture "$parent_composer_pane" "$tok_parent_foreign" 80 || true)"
+if [ -z "$cap_parent_foreign_clear" ]; then
+  cap_parent_foreign_clear="$(tmux -L "$SOCK" capture-pane -p -t "$parent_composer_pane" 2>/dev/null || true)"
+fi
+case "$cap_parent_foreign_clear" in
+  *"$tok_parent_foreign"*|*"[muxa] from=child"*) ok "G-parent mail delivers after parent composer cleared" ;;
+  *) bad "G-parent mail delivers after parent composer cleared" "cap: $cap_parent_foreign_clear; log: $(grep -E '116PARENT|worker → parent' "$MUXA_BROKER_DIR/broker.log" 2>/dev/null | tail -5 || true)" ;;
+esac
+muxa_as "$composer_pane" register --name composer --kind generic --parent parent-shell >/dev/null
+muxa_as "$parent_pane" register --name parent --kind generic >/dev/null
+muxa_as "$composer_pane" register --name composer --kind generic --parent parent >/dev/null
+muxa_as "$child_pane" register --name child --kind generic --parent parent >/dev/null
+sleep 0.3
+
 # --- G: the daemon outlives its starter's process group ---
 # The incident: nohup + disown left the broker in the caller's process group,
 # so the teardown at the end of the calling tool call killed it before its

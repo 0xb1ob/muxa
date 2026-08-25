@@ -136,8 +136,12 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		log.Printf("inject %s: %v", m.ID, err)
 		return
 	}
-	switch d.confirm(m.Pane) {
+	switch d.confirm(m.Pane, m) {
 	case confirmPasted:
+		if !m.isDispatch() && !d.mailLanded(m) {
+			log.Printf("unconfirmed %s → %s id=%s (pane reacted but mail did not land; left queued)", m.From, m.To, m.ID)
+			return
+		}
 		d.notePaste(m)
 		log.Printf("delivered %s → %s id=%s", m.From, m.To, m.ID)
 		_ = d.Q.MarkDone(m)
@@ -356,13 +360,34 @@ const (
 	confirmUnsubmitted                 // collapsed paste visible, no turn after wait
 )
 
+// mailLanded reports whether a muxa send actually reached the target pane
+// as its own turn (muxa#116). Pane-busy alone is not enough — Enter can
+// submit unrelated composer text. The envelope marker is authoritative.
+func (d *Deliverer) mailLanded(m *Msg) bool {
+	if m == nil || m.isDispatch() {
+		return true
+	}
+	marker := "[muxa] from=" + m.From
+	check := func(s string) bool {
+		return strings.Contains(stripANSI(s), marker)
+	}
+	if snap, err := d.T.Snapshot(m.Pane); err == nil && check(snap.Capture) {
+		return true
+	}
+	if hist, err := d.T.CaptureHistory(m.Pane); err == nil && check(hist) {
+		return true
+	}
+	return false
+}
+
 // confirm takes post-paste snapshot(s). A pane that reacted (cursor row
 // no longer empty/prompt, control-mode drawing, or agent turn started) is
 // pasted and must not be retried. Collapsed "[Pasted text …]" with no turn
 // start is unsubmitted (muxa#111). A pane that stayed free is
 // confirmMissed: deliverOne files a first brief done/ (no retry) and leaves
-// later mail queued. No payload string-matching against the capture.
-func (d *Deliverer) confirm(pane string) confirmResult {
+// later mail queued. Dispatch does not match payload against the capture;
+// muxa send must (muxa#116).
+func (d *Deliverer) confirm(pane string, m *Msg) confirmResult {
 	snap, err := d.T.Snapshot(pane)
 	if err != nil {
 		return confirmMissed
