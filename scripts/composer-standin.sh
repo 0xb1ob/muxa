@@ -3,12 +3,13 @@
 # Simulates a Cursor/Claude half-block composer TUI in a tmux pane.
 #
 # MUST run under bash 3.2+ (/bin/bash on macOS). Do not use fractional
-# read -t — bash 3.2 rejects it (muxa#119). Use sleep + read -t 0 instead.
+# read -t — bash 3.2 rejects it (muxa#119). Idle polls use integer read -t 1;
+# busy polls use sleep + non-blocking read -t 0.
 #
 # Test-only. Never attach to an operator pane (respawn-pane with this script
 # on a live parent was the muxa#119 incident; debug copies were named
 # parent-composer.sh under /tmp/muxa-debug.*).
-set -euo pipefail
+set -uo pipefail
 
 COMPOSER_LOG="${COMPOSER_LOG:-composer.log}"
 COMPOSER_STATE="${COMPOSER_STATE:-composer.state}"
@@ -30,20 +31,23 @@ frame() {
   out=$'\033[H\033[2J'
   [ -n "$log" ] && out="$out$log"$'\n'
   out="$out$top"$'\n'"$row"$'\n'"$bot"$'\n'" Composer 2.5 Fast"$'\n'" /tmp/fake-worktree"$'\n'
-  printf '%b' "$out"
+  printf '%s' "$out"
 }
 
 prev=""
 while true; do
   st="$(cat "$COMPOSER_STATE" 2>/dev/null || true)"
-  poll=0.3
-  [ "$st" = busy ] && poll=0.05
   if [ "$st" != "$prev" ] || [ "$st" = busy ]; then
     prev="$st"
     frame "$st"
   fi
-  sleep "$poll"
-  if IFS= read -r -t 0 line; then
+  if [ "$st" = busy ]; then
+    sleep 0.05
+    if IFS= read -r -t 0 line; then
+      printf '%s\n' "$line" >>"$COMPOSER_LOG"
+      frame "$st"
+    fi
+  elif IFS= read -r -t 1 line; then
     printf '%s\n' "$line" >>"$COMPOSER_LOG"
     frame "$st"
   fi

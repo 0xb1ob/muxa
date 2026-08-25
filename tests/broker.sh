@@ -88,7 +88,7 @@ printf 'idle\n' >"$composer_state"
 composer_script="$HOME_ISO/composer-standin.sh"
 cp "$ROOT/scripts/composer-standin.sh" "$composer_script"
 chmod +x "$composer_script"
-composer_run="COMPOSER_LOG='$composer_log' COMPOSER_STATE='$composer_state' exec '$composer_script'"
+composer_run="COMPOSER_LOG='$composer_log' COMPOSER_STATE='$composer_state' bash '$composer_script'"
 
 tmux -L "$SOCK" new-session -d -s muxa -n parent "$prompt_loop"
 tmux -L "$SOCK" split-window -h -t muxa:parent "$prompt_loop"
