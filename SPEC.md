@@ -243,8 +243,11 @@ still visible and no agent turn started after one beat; that is positive
 evidence the brief did not submit. Generic inconclusive confirm MUST NOT
 mail the parent: it is anti-correlated with real failure (muxa#110).
 Later mail (`muxa send`) that stayed free remains
-**pending-safe-retry**. A pane that reacted MUST NOT be retried. The broker
-does not match the payload against pane captures. `delivered` is
+**pending-safe-retry**. A pane that reacted MUST NOT be retried for dispatch;
+for mail, a reaction without the `[muxa] from=` envelope in the pane capture
+or history is **not delivered** — the message stays in `pending/` and may retry
+(muxa#116). The broker does not match dispatch payloads against pane captures.
+Mail delivery matches only the `[muxa] from=` envelope marker. `delivered` is
 never recorded for an overwritten timeout paste. When the broker is down
 or the binary is missing, `muxa send` exits non-zero and pastes nothing.
 

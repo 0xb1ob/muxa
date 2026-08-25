@@ -68,7 +68,6 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 			}
 		}
 		f.lastCap = s
-		// Cursor follows the pasted text when the inject is still visible so
 		// emptyAtCursor sees a reacted pane without matching the payload.
 		if f.parkCursor != "" {
 			f.cursor = f.parkCursor
@@ -172,7 +171,7 @@ func TestRetryUntilFree(t *testing.T) {
 	}}
 	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
 	d.now = func() time.Time { return time.Unix(1000, 0) }
-	_ = q.Put(&Msg{ID: "r1", Pane: "%1", From: "c", To: "p", Text: "TOKEN-RETRY", DeadlineUnix: 2000})
+	_ = q.Put(&Msg{ID: "r1", Pane: "%1", From: "c", To: "p", Text: formatOne("c", "", "TOKEN-RETRY"), DeadlineUnix: 2000})
 
 	d.Tick()
 	if f.injectCount() != 0 {
@@ -194,7 +193,7 @@ func TestRetryUntilFree(t *testing.T) {
 	if len(pending) != 0 {
 		t.Fatalf("still pending: %+v", pending)
 	}
-	if f.lastInject() != "TOKEN-RETRY" {
+	if f.lastInject() != formatOne("c", "", "TOKEN-RETRY") {
 		t.Fatalf("payload=%q", f.lastInject())
 	}
 	if p, doneN, failed, err := q.Counts(); err != nil || p != 0 || doneN != 1 || failed != 0 {
@@ -231,7 +230,7 @@ func TestUnconfirmedPasteNotDone(t *testing.T) {
 	f := &fakeTMUX{captures: []string{"ready>"}, hideEcho: true}
 	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
 	d.now = func() time.Time { return time.Unix(1000, 0) }
-	_ = q.Put(&Msg{ID: "u1", Pane: "%1", From: "c", To: "p", Text: "TOKEN-GHOST", DeadlineUnix: 2000})
+	_ = q.Put(&Msg{ID: "u1", Pane: "%1", From: "c", To: "p", Text: formatOne("c", "", "TOKEN-GHOST"), DeadlineUnix: 2000})
 
 	d.Tick()
 	if f.injectCount() != 1 {
@@ -256,8 +255,8 @@ func TestBusyPaneDeliversInOrderAfterFree(t *testing.T) {
 	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
 	now := int64(1000)
 	d.now = func() time.Time { return time.Unix(now, 0) }
-	_ = q.Put(&Msg{ID: "a", Pane: "%1", From: "c", To: "p", Text: "first-mail", EnqueuedUnix: 1, DeadlineUnix: 1005})
-	_ = q.Put(&Msg{ID: "b", Pane: "%1", From: "c", To: "p", Text: "second-mail", EnqueuedUnix: 2, DeadlineUnix: 1005})
+	_ = q.Put(&Msg{ID: "a", Pane: "%1", From: "c", To: "p", Text: formatOne("c", "", "first-mail"), EnqueuedUnix: 1, DeadlineUnix: 1005})
+	_ = q.Put(&Msg{ID: "b", Pane: "%1", From: "c", To: "p", Text: formatOne("c", "", "second-mail"), EnqueuedUnix: 2, DeadlineUnix: 1005})
 
 	d.Tick()
 	now = 1010
@@ -275,7 +274,7 @@ func TestBusyPaneDeliversInOrderAfterFree(t *testing.T) {
 		t.Fatalf("pasted on first free frame after busy (two-signal needs a pair): %d", f.injectCount())
 	}
 	d.Tick()
-	if f.injectCount() != 1 || f.lastInject() != "first-mail" {
+	if f.injectCount() != 1 || f.lastInject() != formatOne("c", "", "first-mail") {
 		t.Fatalf("first paste=%q count=%d", f.lastInject(), f.injectCount())
 	}
 	if ids := d.pasteIDs(); len(ids) != 1 || ids[0] != "%1|a" {
@@ -287,7 +286,7 @@ func TestBusyPaneDeliversInOrderAfterFree(t *testing.T) {
 	f.capI = 0
 	f.mu.Unlock()
 	d.Tick()
-	if f.injectCount() != 2 || f.lastInject() != "second-mail" {
+	if f.injectCount() != 2 || f.lastInject() != formatOne("c", "", "second-mail") {
 		t.Fatalf("second paste=%q count=%d", f.lastInject(), f.injectCount())
 	}
 	if ids := d.pasteIDs(); len(ids) != 2 || ids[0] != "%1|a" || ids[1] != "%1|b" {
@@ -304,7 +303,7 @@ func TestNoDoubleDelivery(t *testing.T) {
 	f := &fakeTMUX{captures: []string{"ready>"}}
 	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
 	d.now = func() time.Time { return time.Unix(1000, 0) }
-	_ = q.Put(&Msg{ID: "d1", Pane: "%1", From: "c", To: "p", Text: "ONCE", DeadlineUnix: 2000})
+	_ = q.Put(&Msg{ID: "d1", Pane: "%1", From: "c", To: "p", Text: formatOne("c", "", "ONCE"), DeadlineUnix: 2000})
 
 	d.Tick()
 	d.Tick()
@@ -328,8 +327,8 @@ func TestSkipOtherPaneWhileOneInflight(t *testing.T) {
 	f := &fakeTMUX{captures: []string{"ready>"}}
 	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
 	d.now = func() time.Time { return time.Unix(1000, 0) }
-	_ = q.Put(&Msg{ID: "a", Pane: "%1", From: "c", To: "p", Text: "first", DeadlineUnix: 2000})
-	_ = q.Put(&Msg{ID: "b", Pane: "%1", From: "c", To: "p", Text: "second", DeadlineUnix: 2000})
+	_ = q.Put(&Msg{ID: "a", Pane: "%1", From: "c", To: "p", Text: formatOne("c", "", "first"), DeadlineUnix: 2000})
+	_ = q.Put(&Msg{ID: "b", Pane: "%1", From: "c", To: "p", Text: formatOne("c", "", "second"), DeadlineUnix: 2000})
 	d.Tick()
 	if f.injectCount() != 1 {
 		t.Fatalf("same-pane batch should paste at most one per tick, got %d", f.injectCount())
@@ -672,5 +671,60 @@ func TestInjectErrorStaysPending(t *testing.T) {
 	}
 	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 {
 		t.Fatalf("inject error pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+}
+
+func TestMailNotDoneWhenPaneReactsWithoutLanding(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{captures: []string{"ready>", "esc to interrupt\nworking"}, hideEcho: true}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	text := formatOne("worker", "", "JOB-DONE REPORT")
+	_ = q.Put(&Msg{ID: "m116a", Pane: "%1", From: "worker", To: "parent", Text: text, DeadlineUnix: 2000})
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("want 1 inject, got %d", f.injectCount())
+	}
+	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 {
+		t.Fatalf("mail must stay pending when pane reacts without landing, pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+	f.mu.Lock()
+	f.captures = []string{"ready>", "ready>"}
+	f.capI = 0
+	f.echo = ""
+	f.hideEcho = false
+	f.mu.Unlock()
+	d.Tick()
+	d.Tick()
+	if f.injectCount() != 2 {
+		t.Fatalf("mail must retry after false-positive confirm once pane is free, got %d injects", f.injectCount())
+	}
+	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 {
+		t.Fatalf("mail retries until landing, pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+}
+
+func TestMailHoldsComposerForeignInput(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	typed := "log\n▄▄▄▄▄\n operator-typed\n▀▀▀▀▀\n footer"
+	f := &fakeTMUX{captures: []string{typed, typed}}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	now := int64(1000)
+	d.now = func() time.Time { return time.Unix(now, 0) }
+	text := formatOne("worker", "", "REPORT")
+	_ = q.Put(&Msg{ID: "m116b", Pane: "%1", From: "worker", To: "parent", Text: text, DeadlineUnix: 1005})
+	d.Tick()
+	if f.injectCount() != 0 {
+		t.Fatalf("pasted over foreign composer input: %d", f.injectCount())
+	}
+	now = 1005
+	d.Tick()
+	if f.injectCount() != 0 {
+		t.Fatalf("timeout-pasted mail over foreign composer: %d", f.injectCount())
+	}
+	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 {
+		t.Fatalf("mail stays queued past deadline, pending=%d done=%d failed=%d", p, doneN, failed)
 	}
 }
