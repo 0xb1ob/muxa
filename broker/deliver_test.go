@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -10,19 +13,20 @@ import (
 )
 
 type fakeTMUX struct {
-	mu       sync.Mutex
-	dead     bool
-	mode     bool
-	captures []string
-	capI     int
-	injects  []string
-	failInj  bool
+	mu              sync.Mutex
+	dead            bool
+	mode            bool
+	captures        []string
+	capI            int
+	injects         []string
+	failInj         bool
 	echo            string
 	hideEcho        bool
 	lastCap         string
 	cursor          string // optional "#{cursor_y} #{cursor_x}" override
 	parkCursor      string // if set, capture-pane leaves the hardware cursor here
 	parkAfterInject string // after Inject, park on a blank footer row (#105)
+	kind            string // @muxa_kind for this pane ("" = unregistered)
 }
 
 func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
@@ -50,6 +54,8 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 				return f.cursor, nil
 			}
 			return fakeCursorPos(f.lastCap), nil
+		case "#{@muxa_kind}":
+			return f.kind, nil
 		}
 		return "0", nil
 	case "capture-pane":
@@ -754,4 +760,78 @@ func TestMailPreInjectComposerForeignBlocks(t *testing.T) {
 	if f.injectCount() != 0 {
 		t.Fatalf("pre-inject composer gate must block stale free-detection: %d", f.injectCount())
 	}
+}
+
+// muxa#127: a mid-turn Claude Code pane accepts a paste into its own input
+// queue and echoes nothing — the payload is absent from Snapshot and from
+// CaptureHistory, the composer row is empty, and the pane is not drawing.
+// All three confirm guards then fall the wrong way at once and the message
+// is left queued, so the next Tick pastes the same envelope a second time.
+func TestClaudeConsumedPasteNotRetried(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{captures: []string{"ready>"}, hideEcho: true, kind: "claude"}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	text := formatOne("worker", "", "REPORT pr=https://example.invalid/pr/1")
+	_ = q.Put(&Msg{ID: "m127", Pane: "%9", From: "worker", To: "crisp-lark", Text: text, DeadlineUnix: 2000})
+
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("want 1 inject, got %d", f.injectCount())
+	}
+	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 {
+		t.Fatalf("consumed paste pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+	if a := doneAttempts(t, dir, "m127"); a != 1 {
+		t.Fatalf("want attempts=1, got %d", a)
+	}
+
+	// The pane finishes its turn and goes idle; the envelope still never
+	// appears in the capture. Nothing may re-paste it.
+	f.mu.Lock()
+	f.captures = []string{"ready>", "ready>"}
+	f.capI = 0
+	f.echo = ""
+	f.mu.Unlock()
+	d.Tick()
+	d.Tick()
+	if n := f.injectCountOf(text); n != 1 {
+		t.Fatalf("re-pasted an envelope a claude pane had already consumed: %d", n)
+	}
+	if a := doneAttempts(t, dir, "m127"); a != 1 {
+		t.Fatalf("attempts grew after retry ticks: %d", a)
+	}
+}
+
+// A non-claude pane keeps pending-safe-retry: absence of the envelope there
+// really is evidence the paste missed (muxa#116).
+func TestGenericPaneStillRetriesGhostSend(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{captures: []string{"ready>"}, hideEcho: true, kind: "generic"}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	_ = q.Put(&Msg{ID: "g127", Pane: "%1", From: "c", To: "p", Text: formatOne("c", "", "GHOST"), DeadlineUnix: 2000})
+	d.Tick()
+	d.Tick()
+	if f.injectCount() != 2 {
+		t.Fatalf("generic ghost send must retry, got %d", f.injectCount())
+	}
+	if p, doneN, _, _ := q.Counts(); p != 1 || doneN != 0 {
+		t.Fatalf("generic ghost send pending=%d done=%d", p, doneN)
+	}
+}
+
+func doneAttempts(t *testing.T, dir, id string) int {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "done", id+".json"))
+	if err != nil {
+		t.Fatalf("read done/%s: %v", id, err)
+	}
+	var m Msg
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("decode done/%s: %v", id, err)
+	}
+	return m.Attempts
 }
