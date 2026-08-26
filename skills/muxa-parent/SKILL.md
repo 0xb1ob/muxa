@@ -32,6 +32,7 @@ muxa who
 muxa who --json
 muxa whoami
 muxa kill <name|id>
+muxa adopt <dead-alias>
 muxa tail <name>
 muxa tail <name> -n 40
 muxa send <name> <text>
@@ -60,6 +61,8 @@ Spawn only the CLI and optional `--model`. Do not pass trust, yolo, skip-permiss
 The worker's cwd is already set — do not tell the worker to `cd` unless dispatch `cwd` was wrong.
 
 Do not brief `ghost` rows from `muxa who`. `muxa kill NAME|ID` removes the pane from the roster.
+
+When a parent pane dies, its children keep `@muxa_parent` pointing at the dead alias and `muxa send` to them is forbidden until a root re-parents them. From the new root pane: `muxa adopt <dead-alias>`. That sets each orphan's `@muxa_parent` to your alias without taking the dead name. `muxa tail NAME` still reads any pane regardless of parenthood.
 
 If a child looks stuck, inspect **once** with `muxa tail NAME` (`-n N` for the last N lines). Do not read the pane through tmux. Unknown means inspect — never assume idle or busy. One read, not a poll. Do not auto-restart a stuck worker; ask it, or ask the user.
 

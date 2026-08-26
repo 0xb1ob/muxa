@@ -64,6 +64,8 @@ func dispatchMuxa(cmd string, args []string) error {
 		return nil
 	case "register":
 		return cmdRegister(args)
+	case "adopt":
+		return cmdAdopt(args)
 	case "spawn":
 		return cmdSpawn(args)
 	case "dispatch":
@@ -94,6 +96,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprint(w, `muxa — message other AI CLIs in this tmux server
 
   muxa register [--name NAME] [--id ID] [--parent NAME] [--kind claude|cursor|pi|generic]
+  muxa adopt DEAD-ALIAS                 re-parent orphans of a dead alias onto this root
   muxa spawn [--name NAME] [--kind KIND] [--cwd DIR] [--window] -- COMMAND...
                                 spawn flags must precede -- or the command word
                                 omit --name to get a unique adjective-noun alias (swift-oak)

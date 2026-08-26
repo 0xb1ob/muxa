@@ -81,6 +81,7 @@ muxa who
 | Command | What |
 | --- | --- |
 | `muxa register [--name --id --parent --kind]` | Set pane identity (spawn already does this for children) |
+| `muxa adopt DEAD-ALIAS` | Re-parent orphans of a dead alias onto this root |
 | `muxa spawn [--name NAME] [--cwd DIR] [--window] -- CMD` | Child pane in a tiled grid. cwd: `--cwd`, else `$PWD`, else pane path |
 | `muxa dispatch [--name NAME] [--cwd DIR] [--brief-file F] -- CMD` | Spawn + first brief (stdin or `--brief-file`) |
 | `muxa who` / `muxa who --json` | Roster |

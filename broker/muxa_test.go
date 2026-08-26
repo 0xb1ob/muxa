@@ -121,6 +121,44 @@ func mustAbsDir(t *testing.T, p string) string {
 	return abs
 }
 
+func TestOrphansOf(t *testing.T) {
+	rows := []rosterEntry{
+		{Pane: "%1", Name: "new", Parent: ""},
+		{Pane: "%2", Name: "a", Parent: "p"},
+		{Pane: "%3", Name: "b", Parent: "p"},
+		{Pane: "%4", Name: "c", Parent: "other"},
+	}
+	got := orphansOf(rows, "p")
+	if len(got) != 2 || got[0].Name != "a" || got[1].Name != "b" {
+		t.Fatalf("orphansOf(p): %+v", got)
+	}
+	if len(orphansOf(rows, "missing")) != 0 {
+		t.Fatal("expected no orphans for missing parent")
+	}
+}
+
+func TestAdoptCanSend(t *testing.T) {
+	rows := []rosterEntry{
+		{Pane: "%1", Name: "new", Parent: ""},
+		{Pane: "%2", Name: "a", Parent: "p"},
+		{Pane: "%3", Name: "b", Parent: "p"},
+	}
+	if canSend(rows, "new", "a") {
+		t.Fatal("cannot send before adopt")
+	}
+	for i := range rows {
+		if rows[i].Name == "a" || rows[i].Name == "b" {
+			rows[i].Parent = "new"
+		}
+	}
+	if !canSend(rows, "new", "a") || !canSend(rows, "a", "new") {
+		t.Fatal("can send after parent rewrite")
+	}
+	if !canSend(rows, "new", "b") {
+		t.Fatal("can send to second orphan")
+	}
+}
+
 func TestCanSend(t *testing.T) {
 	rows := []rosterEntry{
 		{Pane: "%1", Name: "bob", Parent: ""},

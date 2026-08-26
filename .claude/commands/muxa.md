@@ -9,6 +9,7 @@ Run **one** Bash command:
 - Roster: `muxa who` / `muxa who --json`
 - Pane read: `muxa tail <name>` (one-shot; never a poll)
 - Kill pane: `muxa kill <name>` (removes the pane)
+- Adopt orphans: `muxa adopt <dead-alias>` (root only; re-parent dead parent's children)
 - Send: `muxa send <name> <text from the rest of this invocation>`
 - Send from file: `muxa send --file <path> <name>`
 - Send JSON: `muxa send --json <name> <text>` (queued id + pane)
