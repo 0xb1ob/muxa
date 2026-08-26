@@ -243,6 +243,18 @@ the brief body). Later mail stays queued until the composer clears. Immediately 
 paste, the broker re-checks the composer box on a fresh capture so a
 quiescent two-signal pair cannot race operator typing (muxa#116).
 
+**Cursor-parent typing guard (muxa#139).** Cursor parent panes keep the dim
+idle hint (`\x1b[2m…\x1b[0m`) on screen while operator keystrokes render in
+normal weight after the reset sequence. A text-only composer check still
+sees the placeholder substring and treats the pane as free; Claude parents
+replace the hint and do not hit this path. The broker MUST treat a composer
+row with any non-faint visible rune as foreign input. Idle and busy cursor
+rows stay entirely dim; post-turn `→ Add a follow-up` idle stays dim-only
+(muxa#123). Truecolor SGR parameters (`38;2`, `48;2`) MUST NOT be read as
+faint (SGR 2). Long in-box typing may wrap across multiple rows inside the
+box; the gate MUST scan every content row between the `▄`/`▀` borders, not
+only the first.
+
 **Known sharp edge (muxa#44).** Two-signal, control-mode silence, and
 hardware cursor position are still blind to half-typed input that never
 reaches the composer box (e.g. a shell prompt). **Etiquette:** do not leave

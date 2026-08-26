@@ -1,21 +1,35 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // composerInputForeign reports whether an agent-CLI composer holds text the
 // broker did not put there. Two-signal is blind to in-box typing (muxa#79);
 // this is the dispatch safety gate for defect 3 in muxa#111.
 func composerInputForeign(capture string) bool {
-	if row, ok := composerInputRow(capture); ok {
-		return composerRowForeign(row)
+	if rows, ok := composerBoxRows(capture); ok {
+		for _, row := range rows {
+			if composerRowForeign(row) {
+				return true
+			}
+		}
+		return false
 	}
 	return strings.Contains(stripANSI(capture), "[Pasted text")
 }
 
 func composerRowForeign(row string) bool {
+	// Cursor keeps the dim idle hint on screen and paints operator keystrokes
+	// in normal weight after a reset sequence. stripANSI still contains the
+	// placeholder substring, so text-only matching treats mid-typing as free
+	// (muxa#139). SGR faint is the cursor idle/typing discriminator.
+	if composerRowHasNonFaintText(row) {
+		return true
+	}
 	plain := strings.TrimSpace(stripANSI(row))
 	if plain == "" {
 		return false
@@ -74,15 +88,113 @@ func composerFollowUpIdle(s string) bool {
 	return strings.EqualFold(trim, "Add a follow-up")
 }
 
-func composerInputRow(capture string) (string, bool) {
-	lines := strings.Split(capture, "\n")
-	for i := 0; i+2 < len(lines); i++ {
-		if !isComposerBorderTop(lines[i]) || !isComposerBorderBottom(lines[i+2]) {
+// composerRowHasNonFaintText reports whether a capture-pane -e composer row
+// renders any visible rune without SGR faint (2). Cursor idle placeholders
+// are entirely dim; operator typing is drawn after \x1b[0m/\x1b[22m.
+func composerRowHasNonFaintText(row string) bool {
+	dim := false
+	for i := 0; i < len(row); {
+		if row[i] == 0x1b {
+			if n, ok := skipCSI(row[i:]); ok {
+				if seq := row[i : i+n]; seq[len(seq)-1] == 'm' {
+					dim = applySGRDim(dim, seq[2:len(seq)-1])
+				}
+				i += n
+				continue
+			}
+			if n, ok := skipOSC(row[i:]); ok {
+				i += n
+				continue
+			}
+			i += minInt(2, len(row)-i)
 			continue
 		}
-		return lines[i+1], true
+		r, size := utf8.DecodeRuneInString(row[i:])
+		if !unicode.IsSpace(r) && !dim {
+			return true
+		}
+		i += size
 	}
-	return "", false
+	return false
+}
+
+func applySGRDim(dim bool, params string) bool {
+	if params == "" {
+		return false
+	}
+	for i := 0; i < len(params); {
+		j := i
+		for j < len(params) && params[j] >= '0' && params[j] <= '9' {
+			j++
+		}
+		if j == i {
+			i++
+			continue
+		}
+		n, _ := strconv.Atoi(params[i:j])
+		i = j
+		if i < len(params) && params[i] == ';' {
+			i++
+		}
+		switch n {
+		case 0:
+			dim = false
+		case 2:
+			dim = true
+		case 22:
+			dim = false
+		case 38, 48:
+			if i < len(params) && params[i] == '2' {
+				for skip := 0; skip < 3 && i < len(params); skip++ {
+					for i < len(params) && params[i] != ';' {
+						i++
+					}
+					if i < len(params) {
+						i++
+					}
+				}
+			} else if i < len(params) && params[i] == '5' {
+				for i < len(params) && params[i] != ';' {
+					i++
+				}
+				if i < len(params) {
+					i++
+				}
+			}
+		}
+	}
+	return dim
+}
+
+func composerInputRow(capture string) (string, bool) {
+	rows, ok := composerBoxRows(capture)
+	if !ok || len(rows) == 0 {
+		return "", false
+	}
+	return rows[0], true
+}
+
+// composerBoxRows returns every content line between a half-block top border
+// and its matching bottom border. Cursor wraps long in-box typing across
+// multiple rows; a single-line read misses the gate (muxa#139).
+func composerBoxRows(capture string) ([]string, bool) {
+	lines := strings.Split(capture, "\n")
+	for i := 0; i < len(lines); i++ {
+		if !isComposerBorderTop(lines[i]) {
+			continue
+		}
+		var rows []string
+		for j := i + 1; j < len(lines); j++ {
+			if isComposerBorderBottom(lines[j]) {
+				if len(rows) == 0 {
+					return nil, false
+				}
+				return rows, true
+			}
+			rows = append(rows, lines[j])
+		}
+	}
+	return nil, false
 }
 
 func isComposerBorderTop(line string) bool {

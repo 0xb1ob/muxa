@@ -968,6 +968,27 @@ func TestMailPreInjectComposerForeignBlocks(t *testing.T) {
 	}
 }
 
+func TestMailHoldsCursorParentComposerTyping(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	// muxa#139: dim placeholder substring remains while operator text is non-faint.
+	typing := "log\n▄▄▄▄▄\n" +
+		"\x1b[48;2;38;38;38m \x1b[2m→ Plan, search, build anything\x1b[0moperator-typed\x1b[0m\n" +
+		"▀▀▀▀▀\n footer"
+	f := &fakeTMUX{captures: []string{typing, typing}, kind: "cursor"}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	text := formatOne("worker", "", "REPORT")
+	_ = q.Put(&Msg{ID: "m139", Pane: "%1", From: "worker", To: "parent", Text: text, DeadlineUnix: 1005})
+	d.Tick()
+	if f.injectCount() != 0 {
+		t.Fatalf("pasted over cursor parent composer typing: %d", f.injectCount())
+	}
+	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 {
+		t.Fatalf("mail stays queued, pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+}
+
 // muxa#127: a mid-turn Claude Code pane accepts a paste into its own input
 // queue and echoes nothing — the payload is absent from Snapshot and from
 // CaptureHistory, the composer row is empty, and the pane is not drawing.

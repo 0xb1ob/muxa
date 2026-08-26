@@ -23,9 +23,10 @@ bot=$'\033[38;2;38;38;38m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀�
 frame() {
   local row log out
   case "$1" in
-    busy)  row=$'\033[48;2;38;38;38m \033[2m→ Add a follow-up   ctrl+c to stop\033[0m' ;;
-    typed) row=$'\033[48;2;38;38;38m HUMANTYPING\033[0m' ;;
-    *)     row=$'\033[48;2;38;38;38m \033[2m→ Plan, search, build anything\033[0m' ;;
+  busy)  row=$'\033[48;2;38;38;38m \033[2m→ Add a follow-up   ctrl+c to stop\033[0m' ;;
+  typed) row=$'\033[48;2;38;38;38m HUMANTYPING\033[0m' ;;
+  cursor-typed) row=$'\033[48;2;38;38;38m \033[2m→ Plan, search, build anything\033[0mHUMANTYPING\033[0m' ;;
+  *)     row=$'\033[48;2;38;38;38m \033[2m→ Plan, search, build anything\033[0m' ;;
   esac
   log="$(cat "$COMPOSER_LOG" 2>/dev/null || true)"
   out=$'\033[H\033[2J'
