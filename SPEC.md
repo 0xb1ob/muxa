@@ -226,9 +226,9 @@ user-configurable, so no fixed prompt/status model can be correct:
    silence rather than a 250 ms poll. `muxa who` STATE `busy` is this
    same window, with no hook involvement.
 3. Two-signal (muxa#44), sharing the same decision as the poll fallback so
-   the paths cannot drift: (a) this capture equals the previous poll
-   (quiescence); (b) text left of the hardware cursor is empty or a prompt
-   marker. Neither half is enough alone — a busy Claude pane parks the
+   the paths cannot drift: (a) this capture shows the same picture as the
+   previous poll (quiescence, see the caret-blink rule below); (b) text left
+   of the hardware cursor is empty or a prompt marker. Neither half is enough alone — a busy Claude pane parks the
    cursor on an empty composer. On the first observation there is no frame
    pair; control-mode silence already covers quiescence, and empty-at-cursor
    is the remaining half.
@@ -267,6 +267,22 @@ caret covers one cell, so the broker MUST NOT count a reverse-video run of a
 single visible rune as typed text, and MUST count a longer reverse run as
 content. Text drawn beside the caret is judged on faint as before, so
 mid-keystroke panes (muxa#139) stay refused.
+
+**Caret blink and quiescence (muxa#144).** The caret also *blinks*, so two
+`capture-pane -e` frames of a pane that is doing nothing differ by the SGR run
+around one cell — 49 of 142 sampled frames of one live cursor worker carried
+it. Byte-comparing frames called that animation: quiescence reset on nearly
+every poll and mail to a live worker sat at `last_gate=two-signal` with
+`refusals=8476` before a lucky matching pair let it through. Quiescence
+therefore MUST compare frames with caret decoration normalised away, on the
+same one-cell rule as the exemption above: a one-cell reverse-video run is
+compared as the style that cell wears with no caret on it, and a longer
+reverse run is compared as itself. Everything else MUST survive the
+comparison — text, faint, colours, every other attribute — so a pane that
+animates a spinner, an elapsed timer, a token count or a colour still WAITs.
+A caret that *moves* with no other change reads as quiescent; cursor motion is
+not output, and the composer gate above is what stands between a paste and
+half-typed input.
 
 **Known sharp edge (muxa#44).** Two-signal, control-mode silence, and
 hardware cursor position are still blind to half-typed input that never

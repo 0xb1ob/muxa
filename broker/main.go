@@ -258,7 +258,7 @@ func checkPaneVerdicts(pane string) error {
 	}
 	two := TwoSignalFree(a.Capture, b.Capture, b.CursorY, b.CursorX)
 	fmt.Printf("pane=%s cursor_y=%d cursor_x=%d quiescent=%v two-signal=%s\n",
-		pane, b.CursorY, b.CursorX, a.Capture == b.Capture, freeWord(two))
+		pane, b.CursorY, b.CursorX, sameFrame(a.Capture, b.Capture), freeWord(two))
 	return nil
 }
 
