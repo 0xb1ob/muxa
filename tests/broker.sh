@@ -511,6 +511,52 @@ muxa_as "$composer_pane" register --name composer --kind generic --parent parent
 muxa_as "$child_pane" register --name child --kind generic --parent parent >/dev/null
 sleep 0.3
 
+# --- G-parent-cursor: worker mail to a cursor parent mid-keystroke (muxa#139) ---
+: >"$composer_log"
+muxa_as "$parent_pane" register --name parent-shell --kind generic >/dev/null
+muxa_as "$composer_pane" register --name parent --kind cursor --parent parent-shell >/dev/null
+parent_cursor_pane="$composer_pane"
+settle "$parent_cursor_pane"
+printf 'cursor-typed\n' >"$composer_state"
+sleep 0.8
+settle "$parent_cursor_pane"
+cap_cursor_typed0="$(tmux -L "$SOCK" capture-pane -p -e -t "$parent_cursor_pane" 2>/dev/null || true)"
+case "$cap_cursor_typed0" in
+  *HUMANTYP*) ok "G-parent-cursor composer shows non-faint operator text" ;;
+  *) bad "G-parent-cursor composer shows non-faint operator text" "cap: $cap_cursor_typed0" ;;
+esac
+tok_cursor_parent="BRK139PARENT_$$"
+sent_cursor_parent="$(muxa_as "$child_pane" send --json parent "$tok_cursor_parent")"
+case "$sent_cursor_parent" in
+  *'"pane"'*) ok "G-parent-cursor child→parent enqueues while parent typing" ;;
+  *) bad "G-parent-cursor child→parent enqueues while parent typing" "got: $sent_cursor_parent" ;;
+esac
+sleep 1.5
+cap_cursor_parent="$(tmux -L "$SOCK" capture-pane -p -t "$parent_cursor_pane" 2>/dev/null || true)"
+case "$cap_cursor_parent" in
+  *"$tok_cursor_parent"*) bad "G-parent-cursor mail does not paste over operator typing" "cap: $cap_cursor_parent" ;;
+  *HUMANTYP*) ok "G-parent-cursor mail waits while parent composer holds operator text" ;;
+  *) bad "G-parent-cursor mail waits while parent composer holds operator text" "cap: $cap_cursor_parent" ;;
+esac
+if find "$MUXA_BROKER_DIR/pending" -name '*.json' -print0 2>/dev/null \
+  | xargs -0 grep -l "$tok_cursor_parent" >/dev/null 2>&1; then
+  ok "G-parent-cursor mail stays pending while composer occupied"
+else
+  bad "G-parent-cursor mail stays pending while composer occupied" \
+    "pending dir: $(ls "$MUXA_BROKER_DIR/pending" 2>/dev/null || true)"
+fi
+printf 'idle\n' >"$composer_state"
+cap_cursor_clear="$(wait_capture "$parent_cursor_pane" "$tok_cursor_parent" 80 || true)"
+case "$cap_cursor_clear" in
+  *"$tok_cursor_parent"*|*"[muxa] from=child"*) ok "G-parent-cursor mail delivers after composer cleared" ;;
+  *) bad "G-parent-cursor mail delivers after composer cleared" "cap: $cap_cursor_clear" ;;
+esac
+muxa_as "$composer_pane" register --name composer --kind generic --parent parent-shell >/dev/null
+muxa_as "$parent_pane" register --name parent --kind generic >/dev/null
+muxa_as "$composer_pane" register --name composer --kind generic --parent parent >/dev/null
+muxa_as "$child_pane" register --name child --kind generic --parent parent >/dev/null
+sleep 0.3
+
 # --- G: the daemon outlives its starter's process group ---
 # The incident: nohup + disown left the broker in the caller's process group,
 # so the teardown at the end of the calling tool call killed it before its
