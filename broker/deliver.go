@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -18,9 +19,19 @@ type Deliverer struct {
 	pastes   []string           // test hook: pane ids pasted, in order
 	prev     map[string]string  // last capture-pane per pane, for two-signal
 	held     map[string]bool    // already logged "holding past deadline"
+	heldNote map[string][]heldLine // batched held alerts keyed by sender alias
 	drew     map[string]bool    // pane has shown visible content (dispatch ready)
 	retryAt  map[string]int64   // msg id -> unix nanos before which a failed Inject is not retried
 	errs     map[string]errNote // msg id -> last delivery error logged, for rate limiting
+}
+
+// heldLine is one stuck message included in a coalesced parent alert (muxa#125).
+type heldLine struct {
+	toAlias string
+	pane    string
+	ageSec  int64
+	attempts int
+	gate    string
 }
 
 // errNote is the last per-message delivery error the log has seen, plus how
@@ -43,6 +54,7 @@ func NewDeliverer(q *Queue, t *TMUX, poll time.Duration) *Deliverer {
 		inflight: map[string]bool{},
 		prev:     map[string]string{},
 		held:     map[string]bool{},
+		heldNote: map[string][]heldLine{},
 		drew:     map[string]bool{},
 		retryAt:  map[string]int64{},
 		errs:     map[string]errNote{},
@@ -96,6 +108,7 @@ func (d *Deliverer) Tick() {
 		seen[m.Pane] = true
 		d.deliverOne(m, now)
 	}
+	d.flushHeldAlerts(now)
 }
 
 func (d *Deliverer) busy(pane string) bool {
@@ -155,7 +168,7 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 				// not something to re-examine every tick (muxa#124).
 				d.failDispatchComposerForeign(m)
 			} else {
-				d.noteHeld(m)
+				d.noteHeld(m, now)
 			}
 		}
 		return
@@ -327,7 +340,7 @@ func (d *Deliverer) holdOrFail(m *Msg, now int64) {
 		return
 	}
 	if !m.isDispatch() {
-		d.noteHeld(m)
+		d.noteHeld(m, now)
 		return
 	}
 	if d.composerBlocked(m.Pane) {
@@ -391,15 +404,91 @@ func (d *Deliverer) notePaste(m *Msg) {
 	d.mu.Unlock()
 }
 
-func (d *Deliverer) noteHeld(m *Msg) {
+func (d *Deliverer) noteHeld(m *Msg, now int64) {
 	d.mu.Lock()
 	if d.held[m.ID] {
 		d.mu.Unlock()
 		return
 	}
 	d.held[m.ID] = true
+	if m.From != "" && m.From != "broker" {
+		age := now - m.EnqueuedUnix
+		if age < 0 {
+			age = 0
+		}
+		d.heldNote[m.From] = append(d.heldNote[m.From], heldLine{
+			toAlias:  m.To,
+			pane:     m.Pane,
+			ageSec:   age,
+			attempts: m.Attempts,
+			gate:     "not-free",
+		})
+	}
 	d.mu.Unlock()
 	log.Printf("holding %s → %s id=%s (pane not free after deadline; left queued)", m.From, m.To, m.ID)
+}
+
+func (d *Deliverer) flushHeldAlerts(now int64) {
+	d.mu.Lock()
+	batches := d.heldNote
+	d.heldNote = map[string][]heldLine{}
+	d.mu.Unlock()
+	if len(batches) == 0 {
+		return
+	}
+	rows, err := loadRoster(d.T)
+	if err != nil {
+		log.Printf("held alert: roster: %v", err)
+		return
+	}
+	for from, lines := range batches {
+		if len(lines) == 0 {
+			continue
+		}
+		fromPane, ok := findPaneByName(rows, from)
+		if !ok {
+			log.Printf("held alert: unknown sender %q (%d stuck)", from, len(lines))
+			continue
+		}
+		note := &Msg{
+			Pane:         fromPane,
+			From:         "broker",
+			To:           from,
+			Text:         heldAlertText(lines),
+			DeadlineUnix: now + 86400,
+		}
+		if err := d.Q.Put(note); err != nil {
+			log.Printf("held alert notify %s: %v", from, err)
+		}
+	}
+}
+
+func heldAlertText(lines []heldLine) string {
+	n := len(lines)
+	word := "message"
+	if n != 1 {
+		word = "messages"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "[muxa] from=broker\n%d %s have not been delivered and are past deadline:\n", n, word)
+	for _, ln := range lines {
+		fmt.Fprintf(&b, "  %-14s pane=%s  age=%s  attempts=%d  gate=%s\n",
+			ln.toAlias, ln.pane, formatHeldAge(ln.ageSec), ln.attempts, ln.gate)
+	}
+	b.WriteString("Inspect: muxa tail <name>.  Queue: muxa broker status.\n")
+	return b.String()
+}
+
+func formatHeldAge(secs int64) string {
+	if secs < 60 {
+		return fmt.Sprintf("%ds", secs)
+	}
+	h := secs / 3600
+	m := (secs % 3600) / 60
+	if h > 0 {
+		return fmt.Sprintf("%dh%02dm", h, m)
+	}
+	return fmt.Sprintf("%dm", m)
 }
 
 func (d *Deliverer) failDispatch(m *Msg) {
