@@ -27,6 +27,7 @@ type fakeTMUX struct {
 	parkCursor      string // if set, capture-pane leaves the hardware cursor here
 	parkAfterInject string // after Inject, park on a blank footer row (#105)
 	kind            string // @muxa_kind for this pane ("" = unregistered)
+	afterInject     func() // test hook: runs after a successful Inject
 }
 
 func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
@@ -93,6 +94,9 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 		f.echo = string(stdin)
 		if f.parkAfterInject != "" {
 			f.parkCursor = f.parkAfterInject
+		}
+		if f.afterInject != nil {
+			f.afterInject()
 		}
 		return "", nil
 	case "paste-buffer":
@@ -553,6 +557,49 @@ func TestUnsubmittedPasteDispatchNotifiesParent(t *testing.T) {
 	}
 	if !strings.Contains(f.lastInject(), "dispatch unsubmitted") {
 		t.Fatalf("parent paste=%q", f.lastInject())
+	}
+}
+
+// muxa#126: a human keystroke during the confirm window emits %output and
+// changes the capture. Neither is proof the brief submitted; the parent must
+// still be told when the collapsed placeholder remains after quiescence.
+func TestDispatchUnsubmittedNotifiesDespiteMidConfirmActivity(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{
+		captures: []string{
+			"ready>",
+			"ready>",
+			"[Pasted text #1 +79 lines]",
+			"→ x\n[Pasted text #1 +79 lines]",
+			"[Pasted text #1 +79 lines]",
+		},
+		hideEcho: true,
+	}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.T.Delay = 5 * time.Millisecond
+	h := NewControlHub(nil, 10*time.Millisecond)
+	h.setLive(true)
+	f.afterInject = func() { h.note("%1") }
+	d.Ctrl = h
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	_ = q.Put(&Msg{
+		ID: "u126", Pane: "%1", From: "parent", To: "kid", Text: "BRIEF-BODY",
+		DeadlineUnix: 2000, Kind: kindDispatch, ParentPane: "%2",
+	})
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("want 1 inject, got %d", f.injectCount())
+	}
+	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 1 || failed != 0 {
+		t.Fatalf("unsubmitted paste pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+	pending, _ := q.Pending()
+	if len(pending) != 1 || pending[0].From != "broker" || pending[0].Pane != "%2" {
+		t.Fatalf("parent notify: %+v", pending)
+	}
+	if !strings.Contains(pending[0].Text, "dispatch unsubmitted") {
+		t.Fatalf("notify text: %s", pending[0].Text)
 	}
 }
 
