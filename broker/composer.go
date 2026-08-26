@@ -36,6 +36,9 @@ func composerIdlePlaceholder(s string) bool {
 	if strings.Contains(lower, "ask anything") || strings.Contains(lower, "type a message") {
 		return true
 	}
+	if composerFollowUpIdle(s) {
+		return true
+	}
 	trim := strings.TrimSpace(s)
 	if trim == "" || trim == "→" {
 		return true
@@ -54,6 +57,21 @@ func composerIdlePlaceholder(s string) bool {
 		return true
 	}
 	return false
+}
+
+// composerFollowUpIdle reports whether row is cursor-agent's post-turn empty
+// composer. Once a turn completes cursor swaps the cold hint for
+// "→ Add a follow-up", which composerRowForeign read as typed text — so the
+// broker refused every paste into an idle cursor pane, silently (muxa#123).
+//
+// Cursor paints the same words all through a turn, with a right-aligned
+// "ctrl+c to stop" on the same row, so the match is exact once the arrow and
+// tmux's trailing pad are trimmed: the busy row and anything a human typed
+// keep their extra text and stay foreign (muxa#44/#79/#105).
+func composerFollowUpIdle(s string) bool {
+	trim := strings.TrimSpace(s)
+	trim = strings.TrimSpace(strings.TrimPrefix(trim, "→"))
+	return strings.EqualFold(trim, "Add a follow-up")
 }
 
 func composerInputRow(capture string) (string, bool) {
