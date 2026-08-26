@@ -16,6 +16,7 @@ type fakeTMUX struct {
 	mu              sync.Mutex
 	dead            bool
 	gone            bool     // pane id no longer exists (muxa#124)
+	roster          []rosterEntry
 	capErr          pasteErr // if set, capture-pane keeps failing
 	mode            bool
 	captures        []string
@@ -39,6 +40,18 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 		return "", nil
 	}
 	switch args[0] {
+	case "list-panes":
+		if len(f.roster) == 0 {
+			return "", nil
+		}
+		var lines []string
+		for _, r := range f.roster {
+			lines = append(lines, strings.Join([]string{
+				r.Pane, r.Name, r.ID, r.Parent, r.Kind,
+				r.Where, r.Cwd, r.Cmd,
+			}, rosterSep))
+		}
+		return strings.Join(lines, "\n"), nil
 	case "display-message":
 		if f.gone {
 			// Real tmux resolves display-message with no pane in scope,
@@ -229,6 +242,116 @@ func TestRetryUntilFree(t *testing.T) {
 	if p, doneN, failed, err := q.Counts(); err != nil || p != 0 || doneN != 1 || failed != 0 {
 		t.Fatalf("counts pending=%d done=%d failed=%d err=%v", p, doneN, failed, err)
 	}
+}
+
+// muxa#125: past-deadline mail left queued must tell the sender once, with
+// attempts and the refusing gate — not only a log line nobody reads.
+func TestHeldPastDeadlineNotifiesSender(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{
+		captures: []string{"ready> never clears"},
+		roster: []rosterEntry{
+			{Pane: "%2", Name: "parent"},
+			{Pane: "%1", Name: "stuck"},
+		},
+	}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	now := int64(1000)
+	d.now = func() time.Time { return time.Unix(now, 0) }
+	_ = q.Put(&Msg{ID: "h1", Pane: "%1", From: "parent", To: "stuck", Text: "TOKEN-HELD", DeadlineUnix: 1005, EnqueuedUnix: 900})
+
+	d.Tick()
+	now = 1005
+	d.Tick()
+	if f.injectCount() != 0 {
+		t.Fatalf("timeout-pasted held mail: %d", f.injectCount())
+	}
+	pending, _ := q.Pending()
+	var alert *Msg
+	for _, m := range pending {
+		if m.From == "broker" && m.ID != "h1" {
+			alert = m
+		}
+	}
+	if alert == nil {
+		t.Fatal("want broker held alert enqueued for sender, got none")
+	}
+	if alert.Pane != "%2" {
+		t.Fatalf("alert pane=%q want %%2", alert.Pane)
+	}
+	if !strings.Contains(alert.Text, "past deadline") {
+		t.Fatalf("alert text: %s", alert.Text)
+	}
+	if !strings.Contains(alert.Text, "stuck") || !strings.Contains(alert.Text, "pane=%1") {
+		t.Fatalf("alert missing target: %s", alert.Text)
+	}
+	if !strings.Contains(alert.Text, "attempts=0") {
+		t.Fatalf("alert missing attempts: %s", alert.Text)
+	}
+	if !strings.Contains(alert.Text, "gate=") {
+		t.Fatalf("alert missing gate: %s", alert.Text)
+	}
+
+	f.mu.Lock()
+	f.captures = []string{"ready>"}
+	f.capI = 0
+	f.echo = ""
+	f.mu.Unlock()
+	d.Tick()
+	if f.injectCount() != 1 || !strings.Contains(f.lastInject(), "past deadline") {
+		t.Fatalf("parent alert paste=%q count=%d", f.lastInject(), f.injectCount())
+	}
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("held alert repeated: %d pastes", f.injectCount())
+	}
+}
+
+func TestHeldAlertCoalescedAcrossTargets(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{
+		captures: []string{"ready> blocked", "ready> blocked"},
+		roster: []rosterEntry{
+			{Pane: "%9", Name: "parent"},
+			{Pane: "%1", Name: "brave-grove"},
+			{Pane: "%2", Name: "noble-sparrow"},
+		},
+	}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	now := int64(1000)
+	d.now = func() time.Time { return time.Unix(now, 0) }
+	_ = q.Put(&Msg{ID: "a1", Pane: "%1", From: "parent", To: "brave-grove", Text: "one", DeadlineUnix: 1005, EnqueuedUnix: 900})
+	_ = q.Put(&Msg{ID: "a2", Pane: "%2", From: "parent", To: "noble-sparrow", Text: "two", DeadlineUnix: 1005, EnqueuedUnix: 901})
+
+	now = 1005
+	d.Tick()
+	var alerts []*Msg
+	for _, m := range mustPending(t, q) {
+		if m.From == "broker" {
+			alerts = append(alerts, m)
+		}
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("want 1 coalesced alert, got %d: %+v", len(alerts), alerts)
+	}
+	body := alerts[0].Text
+	if !strings.Contains(body, "2 messages") {
+		t.Fatalf("coalesce count: %s", body)
+	}
+	if !strings.Contains(body, "brave-grove") || !strings.Contains(body, "noble-sparrow") {
+		t.Fatalf("coalesce targets: %s", body)
+	}
+}
+
+func mustPending(t *testing.T, q *Queue) []*Msg {
+	t.Helper()
+	p, err := q.Pending()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 func TestNoTimeoutFallbackPaste(t *testing.T) {
