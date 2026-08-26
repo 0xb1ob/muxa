@@ -27,7 +27,7 @@ func main() {
 		switch os.Args[1] {
 		case "ping", "status", "drawing", "enqueue":
 			os.Exit(runCLI(os.Args[1:]))
-		case "register", "spawn", "dispatch", "who", "tail", "kill",
+		case "register", "adopt", "spawn", "dispatch", "who", "tail", "kill",
 			"whoami", "parent", "send", "hook", "broker",
 			"version", "-v", "--version", "help", "-h", "--help":
 			os.Exit(runMuxa(os.Args[1:]))

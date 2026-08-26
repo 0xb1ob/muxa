@@ -540,6 +540,71 @@ func lastNContentLines(s string, n int) string {
 	return strings.Join(lines[start:end], "\n") + "\n"
 }
 
+func orphansOf(rows []rosterEntry, deadAlias string) []rosterEntry {
+	var out []rosterEntry
+	for _, r := range rows {
+		if r.Parent == deadAlias {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func cmdAdopt(args []string) error {
+	if err := needTmux(); err != nil {
+		return err
+	}
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			return dief("adopt: unknown flag %s", a)
+		}
+	}
+	if len(args) != 1 {
+		return die("adopt: DEAD-ALIAS required")
+	}
+	deadAlias := args[0]
+
+	t := NewTMUX()
+	pane, err := thisPane(t)
+	if err != nil {
+		return err
+	}
+	rows, err := loadRoster(t)
+	if err != nil {
+		return die(err.Error())
+	}
+	callerName, _ := t.fmt(pane, "#{@muxa_name}")
+	if callerName == "" {
+		return die("this pane is not registered (muxa register)")
+	}
+	callerParent, _ := t.fmt(pane, "#{@muxa_parent}")
+	if callerParent != "" {
+		return die("adopt: only a root pane may adopt orphans")
+	}
+	if callerName == deadAlias {
+		return die("adopt: cannot adopt orphans of your own name")
+	}
+	if _, ok := findPaneByName(rows, deadAlias); ok {
+		return dief("adopt: alias '%s' is still registered on a live pane", deadAlias)
+	}
+	orphans := orphansOf(rows, deadAlias)
+	if len(orphans) == 0 {
+		return dief("no orphans of '%s'", deadAlias)
+	}
+	for _, child := range orphans {
+		if parentWouldCycle(rows, child.Name, callerName) {
+			return dief("adopt: parent '%s' would create a cycle for '%s'", callerName, child.Name)
+		}
+	}
+	for _, child := range orphans {
+		if err := t.SetPaneOpt(child.Pane, "@muxa_parent", callerName); err != nil {
+			return die(err.Error())
+		}
+		fmt.Printf("adopted %s from %s → %s\n", child.Name, deadAlias, callerName)
+	}
+	return nil
+}
+
 func cmdKill(args []string) error {
 	if err := needTmux(); err != nil {
 		return err

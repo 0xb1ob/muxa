@@ -1261,6 +1261,91 @@ else
     "before=${daemon_pid_before:-none} after=${daemon_pid_after:-none}"
 fi
 
+# --- adopt ---
+tmux -L "$SOCK" new-window -t muxa -n adopt "exec sleep 3600"
+sleep 0.2
+oldp_pane="$(tmux -L "$SOCK" list-panes -t muxa:adopt -F '#{pane_id}')"
+muxa_as "$oldp_pane" register --name oldp --kind generic >/dev/null
+
+tmux -L "$SOCK" split-window -h -t muxa:adopt "exec sleep 3600"
+tmux -L "$SOCK" split-window -h -t muxa:adopt "exec sleep 3600"
+sleep 0.2
+adopt_panes="$(tmux -L "$SOCK" list-panes -t muxa:adopt -F '#{pane_id}')"
+adopt_c1="$(printf '%s\n' "$adopt_panes" | sed -n '2p')"
+adopt_c2="$(printf '%s\n' "$adopt_panes" | sed -n '3p')"
+muxa_as "$adopt_c1" register --name adoptchild1 --kind generic --parent oldp >/dev/null
+muxa_as "$adopt_c2" register --name adoptchild2 --kind generic --parent oldp >/dev/null
+
+sent_oldp="$(muxa_as "$oldp_pane" send adoptchild1 'before-kill')"
+assert_contains "$sent_oldp" "queued" "oldp→child send works before kill"
+
+tmux -L "$SOCK" kill-pane -t "$oldp_pane"
+sleep 0.2
+
+who_adopt="$(muxa_as "$bob_pane" who)"
+assert_contains "$who_adopt" "adoptchild1" "orphan adoptchild1 listed"
+assert_contains "$who_adopt" "adoptchild2" "orphan adoptchild2 listed"
+case "$who_adopt" in
+  *$'\n'"oldp "*) bad "oldp gone from who after kill-pane" "who still lists oldp" ;;
+  *) ok "oldp gone from who after kill-pane" ;;
+esac
+
+tmux -L "$SOCK" new-window -t muxa -n newp "exec sleep 3600"
+sleep 0.2
+newp_pane="$(tmux -L "$SOCK" list-panes -t muxa:newp -F '#{pane_id}')"
+muxa_as "$newp_pane" register --kind generic >/dev/null
+newp_name="$(muxa_as "$newp_pane" whoami)"
+
+forbid_adopt="$(muxa_as "$newp_pane" send adoptchild1 hi 2>&1 || true)"
+assert_contains "$forbid_adopt" "forbidden" "newp→child forbidden before adopt"
+
+adopt_out="$(muxa_as "$newp_pane" adopt oldp)"
+assert_contains "$adopt_out" "adopted adoptchild1 from oldp → $newp_name" "adopt child1"
+assert_contains "$adopt_out" "adopted adoptchild2 from oldp → $newp_name" "adopt child2"
+
+par1="$(muxa_as "$adopt_c1" parent)"
+[ "$par1" = "$newp_name" ] && ok "adoptchild1 parent is newp" \
+  || bad "adoptchild1 parent is newp" "got=$par1 want=$newp_name"
+par2="$(muxa_as "$adopt_c2" parent)"
+[ "$par2" = "$newp_name" ] && ok "adoptchild2 parent is newp" \
+  || bad "adoptchild2 parent is newp" "got=$par2 want=$newp_name"
+
+sent_newp="$(muxa_as "$newp_pane" send adoptchild1 hi)"
+assert_contains "$sent_newp" "queued" "newp→child after adopt"
+sent_child="$(muxa_as "$adopt_c1" send "$newp_name" hi)"
+assert_contains "$sent_child" "queued" "child→newp after adopt"
+
+sib_adopt="$(muxa_as "$adopt_c1" send adoptchild2 nope 2>&1 || true)"
+assert_contains "$sib_adopt" "forbidden" "siblings still forbidden after adopt"
+
+r2r_adopt="$(muxa_as "$newp_pane" send bob nope 2>&1 || true)"
+assert_contains "$r2r_adopt" "forbidden" "unrelated root still forbidden after adopt"
+
+again_adopt="$(muxa_as "$newp_pane" adopt oldp 2>&1 || true)"
+assert_contains "$again_adopt" "no orphans of 'oldp'" "second adopt finds no orphans"
+
+live_adopt="$(muxa_as "$newp_pane" adopt bob 2>&1 || true)"
+assert_contains "$live_adopt" "still registered" "adopt refuses live alias"
+
+child_adopt="$(muxa_as "$adopt_c1" adopt oldp 2>&1 || true)"
+assert_contains "$child_adopt" "only a root pane may adopt orphans" "child cannot adopt"
+
+tmux -L "$SOCK" new-window -t muxa -n unregadopt "exec sleep 3600"
+sleep 0.2
+unreg_adopt_pane="$(tmux -L "$SOCK" list-panes -t muxa:unregadopt -F '#{pane_id}')"
+unreg_adopt="$(muxa_as "$unreg_adopt_pane" adopt oldp 2>&1 || true)"
+assert_contains "$unreg_adopt" "not registered" "unregistered pane cannot adopt"
+
+tailed_adopt="$(muxa_as "$bob_pane" tail adoptchild1)"
+[ -n "$tailed_adopt" ] && ok "tail orphan from unrelated root" \
+  || bad "tail orphan from unrelated root" "empty output"
+
+tmux -L "$SOCK" new-window -t muxa -n reclaim "exec sleep 3600"
+sleep 0.2
+reclaim_pane="$(tmux -L "$SOCK" list-panes -t muxa:reclaim -F '#{pane_id}')"
+reg_oldp="$(muxa_as "$reclaim_pane" register --name oldp --kind generic)"
+assert_contains "$reg_oldp" "registered oldp" "vacated name register after adopt"
+
 # --- jobs/preflight gone; muxa must not require br, git, or python3 ---
 nobr_bin="$tmpdir/nobr-bin"
 mkdir -p "$nobr_bin"
@@ -1291,6 +1376,7 @@ help_nobr="$(PATH="$nobr_path" muxa help)"
 assert_contains "$help_nobr" "muxa send" "help works with br absent from PATH"
 assert_contains "$help_nobr" "muxa dispatch" "help mentions dispatch"
 assert_contains "$help_nobr" "muxa kill" "help mentions kill"
+assert_contains "$help_nobr" "muxa adopt" "help mentions adopt"
 case "$help_nobr" in
   *"muxa jobs"*|*"muxa preflight"*) bad "help does not mention jobs or preflight" "out=$help_nobr" ;;
   *) ok "help does not mention jobs or preflight" ;;

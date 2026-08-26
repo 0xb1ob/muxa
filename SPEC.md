@@ -22,7 +22,7 @@ muxa pays for the body once, as a user message, and nothing else.
 ## Actors
 
 - **tmux** is the process manager and roster
-- **muxa** is one Go binary: the CLI (`register`, `spawn`, `dispatch`, `who`,
+- **muxa** is one Go binary: the CLI (`register`, `adopt`, `spawn`, `dispatch`, `who`,
   `tail`, `kill`, `whoami`, `parent`, `send`, `hook`, `broker`) and the
   delivery daemon (`muxa broker`). The daemon owns a unix socket, a
   file-backed queue, and paste-buffer + Enter when the pane looks free. It
@@ -88,6 +88,15 @@ a job id.
 Names are unique per tmux server. Duplicate register fails. Ids are unique
 even when two panes run the same CLI on the same project.
 
+When a parent pane dies, its children keep `@muxa_parent` set to the dead
+alias. `muxa who` lists them with that parent string even though no roster
+row has that name. A registered **root** may run `muxa adopt DEAD-ALIAS` to
+set `@muxa_parent` on every live orphan to the caller's own alias, restoring
+parent↔child mail without impersonating the dead alias. The dead name stays
+vacated unless someone later `muxa register --name DEAD-ALIAS` on a new
+pane (vacated-name registration — same live-roster uniqueness rule as
+today, not orphan recovery).
+
 A parent creates children with `muxa spawn --name NAME -- command…`, which
 splits a pane in the parent's window. The child's start directory is
 `--cwd DIR` if given, otherwise the `muxa` process working directory
@@ -129,6 +138,14 @@ muxa does not know about orchestrators. It only enforces a tree:
 - child → its parent: allowed
 - child → sibling or unrelated: forbidden (exit 4)
 - roots (no parent) → other roots: forbidden (exit 4)
+
+`muxa adopt DEAD-ALIAS` is roster-only: a registered root re-parents every
+live pane whose `@muxa_parent` equals `DEAD-ALIAS` onto the caller. It does
+not paste into children, does not take the dead alias onto the caller, and
+does not notify anyone. Refuses if the caller is unregistered, is not a root,
+equals `DEAD-ALIAS`, or `DEAD-ALIAS` is still a live roster name (including
+`ghost`). Zero orphans exit 2. Child process `MUXA_PARENT` env stays stale
+until that process restarts; `@muxa_parent` is the source of truth.
 
 ## Delivery
 
@@ -342,6 +359,7 @@ muxa who
 muxa who --json
 muxa tail <name> [-n N]
 muxa kill <name|id>
+muxa adopt <dead-alias>
 muxa whoami
 muxa parent
 muxa spawn [--name worker] [--cwd DIR] [--window] -- command…
