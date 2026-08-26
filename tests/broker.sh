@@ -245,6 +245,46 @@ else
   bad "queued messages arrive in order, none clobbered" "cap: $cap_u"
 fi
 
+# --- muxa#124: mail to a pane that no longer exists fails once, quietly ---
+# tmux answers display-message for a closed pane id by exiting 0 with an empty
+# format, so #{pane_dead} read as "alive" and delivery fell through to the
+# free-check, where capture-pane failed on every 100 ms tick: the message never
+# expired and broker.log grew without bound (22 MB in 8 hours in the report).
+tmux -L "$SOCK" new-window -t muxa -n gonekid "$prompt_loop"
+sleep 0.3
+gone_pane="$(tmux -L "$SOCK" list-panes -t muxa:gonekid -F '#{pane_id}' | head -1)"
+muxa_as "$gone_pane" register --name gonekid --kind generic --parent parent >/dev/null
+settle "$gone_pane"
+# Block the composer so the mail is still queued when the pane goes away.
+tmux -L "$SOCK" send-keys -t "$gone_pane" "BLOCKEDGONE"
+sleep 0.2
+tok_gone="BRKGONE_$$"
+sent_gone="$(muxa_as "$parent_pane" send gonekid "$tok_gone")"
+case "$sent_gone" in
+  *broker*) ok "muxa#124 send to a live pane enqueues" ;;
+  *) bad "muxa#124 send to a live pane enqueues" "got: $sent_gone" ;;
+esac
+gone_pending="$(grep -rlF "$tok_gone" "$MUXA_BROKER_DIR/pending" 2>/dev/null | head -1)"
+[ -n "$gone_pending" ] && ok "muxa#124 mail is queued before the pane closes"   || bad "muxa#124 mail is queued before the pane closes" "not in pending/"
+tmux -L "$SOCK" kill-pane -t "$gone_pane"
+sleep 0.3
+lines_before="$(wc -l < "$MUXA_BROKER_DIR/broker.log" 2>/dev/null || echo 0)"
+sleep $((MUXA_BROKER_DEADLINE + 3))
+lines_after="$(wc -l < "$MUXA_BROKER_DIR/broker.log" 2>/dev/null || echo 0)"
+grew=$((lines_after - lines_before))
+if grep -rlF "$tok_gone" "$MUXA_BROKER_DIR/failed" >/dev/null 2>&1; then
+  ok "muxa#124 closed-pane mail lands in failed/"
+else
+  bad "muxa#124 closed-pane mail lands in failed/"     "pending=$(find "$MUXA_BROKER_DIR/pending" -name '*.json' 2>/dev/null | wc -l | tr -d ' ') grew=$grew"
+fi
+n_drop="$(grep -cF "pane $gone_pane dead after deadline" "$MUXA_BROKER_DIR/broker.log" 2>/dev/null || true)"
+[ "$n_drop" -eq 1 ] && ok "muxa#124 one drop line for the closed pane"   || bad "muxa#124 one drop line for the closed pane" "drop lines=$n_drop"
+# Pre-fix this was one "can't find pane" line per poll tick for as long as the
+# broker ran; ~110 ticks fit in the window below.
+[ "$grew" -le 20 ] && ok "muxa#124 closed pane does not hot-spin the log (+$grew lines)"   || bad "muxa#124 closed pane does not hot-spin the log"      "grew=$grew lines: $(tail -5 "$MUXA_BROKER_DIR/broker.log" 2>/dev/null)"
+n_spin="$(grep -cF "can't find pane: $gone_pane" "$MUXA_BROKER_DIR/broker.log" 2>/dev/null || true)"
+[ "$n_spin" -le 2 ] && ok "muxa#124 free-check error is not logged per tick ($n_spin)"   || bad "muxa#124 free-check error is not logged per tick" "count=$n_spin"
+
 # --- dispatch: first brief after ready; never-ready fails to parent, not child ---
 tok_dsp="BRKDSP_$$"
 dsp_json="$(printf '%s\n' "$tok_dsp" | muxa_as "$parent_pane" dispatch --window --name dspkid -- bash -c "$prompt_loop")"

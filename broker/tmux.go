@@ -61,9 +61,21 @@ func (t *TMUX) fmt(pane, format string) (string, error) {
 	return strings.TrimSpace(out), err
 }
 
+// PaneDead reports whether a pane cannot be pasted into: it is marked dead
+// (`remain-on-exit`), or its id no longer exists on the server at all.
+//
+// The second case does not look like a failure. tmux runs
+// `display-message -t %gone -p '#{pane_dead}'`, finds no pane to resolve
+// the format against, expands it to the **empty string**, and exits **0**
+// — only commands that need the pane itself (`capture-pane`,
+// `paste-buffer`) report `can't find pane`. So an empty answer means gone,
+// never alive. Reading it as alive let a closed pane fall through to the
+// free-check, where `capture-pane` failed on every poll tick: 22 MB of
+// `can't find pane` in eight hours and the message never expired
+// (muxa#124). tests/tmux-facts.sh pins the tmux behaviour.
 func (t *TMUX) PaneDead(pane string) bool {
 	v, err := t.fmt(pane, "#{pane_dead}")
-	return err != nil || v == "1"
+	return err != nil || v == "" || v == "1"
 }
 
 func (t *TMUX) InMode(pane string) bool {

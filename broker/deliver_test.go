@@ -15,6 +15,8 @@ import (
 type fakeTMUX struct {
 	mu              sync.Mutex
 	dead            bool
+	gone            bool     // pane id no longer exists (muxa#124)
+	capErr          pasteErr // if set, capture-pane keeps failing
 	mode            bool
 	captures        []string
 	capI            int
@@ -38,6 +40,11 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 	}
 	switch args[0] {
 	case "display-message":
+		if f.gone {
+			// Real tmux resolves display-message with no pane in scope,
+			// exits 0, and expands every pane format to empty (muxa#124).
+			return "", nil
+		}
 		fmt := args[len(args)-1]
 		switch fmt {
 		case "#{pane_dead}":
@@ -60,6 +67,12 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 		}
 		return "0", nil
 	case "capture-pane":
+		if f.gone {
+			return "", errNoPane
+		}
+		if f.capErr != "" {
+			return "", f.capErr
+		}
 		s := ""
 		if f.capI < len(f.captures) {
 			s = f.captures[f.capI]
@@ -100,6 +113,9 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 		}
 		return "", nil
 	case "paste-buffer":
+		if f.gone {
+			return "", errNoPane
+		}
 		if f.failInj {
 			return "", errPaste
 		}
@@ -138,6 +154,10 @@ type pasteErr string
 func (e pasteErr) Error() string { return string(e) }
 
 const errPaste pasteErr = "paste failed"
+
+// errNoPane is what tmux says about a pane id that no longer exists
+// (muxa#124). display-message does not report it; capture-pane does.
+const errNoPane pasteErr = "exit status 1: can't find pane: %1"
 
 func (f *fakeTMUX) injectCount() int {
 	f.mu.Lock()
