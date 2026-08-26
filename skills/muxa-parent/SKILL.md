@@ -51,7 +51,7 @@ Start a worker with one call. Do not `muxa spawn` then `muxa send` — that brie
 
 muxa starts the child in the **process `$PWD`**, not the tmux pane path. `muxa dispatch --cwd DIR -- agent …` if you cannot cd. A warning on stderr still creates the pane.
 
-Stdout is JSON: `{"name","id","pane","cwd","state":"dispatched","from","to"}`. `state=dispatched` means the brief is queued, not that it has landed. A later `[muxa] from=broker` turn means the child never became ready (brief not pasted), the composer held foreign input (refused), or the brief paste was visible but did not submit (unsubmitted). Generic inconclusive confirm (paste accepted, pane still looked free) files the brief done with no parent turn — do not treat silence after dispatch as failure; use `muxa tail NAME` if unsure. Do not re-dispatch the same brief. Do not scrape tmux for that.
+Stdout is JSON: `{"name","id","pane","cwd","state":"dispatched","from","to"}`. `state=dispatched` means the brief is queued, not that it has landed. A later `[muxa] from=broker` turn means the child never became ready (brief not pasted), the composer held foreign input (refused), the paste command itself failed every attempt (failed), or the brief paste was visible but did not submit (unsubmitted). Generic inconclusive confirm (paste accepted, pane still looked free) files the brief done with no parent turn — do not treat silence after dispatch as failure; use `muxa tail NAME` if unsure. Do not re-dispatch the same brief. Do not scrape tmux for that.
 
 Muxa assigns a unique `adjective-noun` alias. Omit `--name` unless you need a stable alias. Dispatch puts the parent's `muxa` on the child's PATH. Point a worker at the worktree's `bin/muxa` only when the job is to change muxa itself.
 

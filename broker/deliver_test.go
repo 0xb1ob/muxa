@@ -230,27 +230,32 @@ func TestNoTimeoutFallbackPaste(t *testing.T) {
 	}
 }
 
-func TestUnconfirmedPasteNotDone(t *testing.T) {
+// muxa#129: an unconfirmed paste is delivered-unverified, not undelivered.
+// Inject returned nil, so tmux took the text; the pane simply never showed
+// it. Re-pasting on that inference is what pasted one envelope 16 times.
+func TestUnconfirmedPasteIsFiledNotRetried(t *testing.T) {
 	dir := t.TempDir()
 	q, _ := OpenQueue(dir)
 	f := &fakeTMUX{captures: []string{"ready>"}, hideEcho: true}
 	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
 	d.now = func() time.Time { return time.Unix(1000, 0) }
-	_ = q.Put(&Msg{ID: "u1", Pane: "%1", From: "c", To: "p", Text: formatOne("c", "", "TOKEN-GHOST"), DeadlineUnix: 2000})
+	text := formatOne("c", "", "TOKEN-GHOST")
+	_ = q.Put(&Msg{ID: "u1", Pane: "%1", From: "c", To: "p", Text: text, DeadlineUnix: 2000})
 
 	d.Tick()
 	if f.injectCount() != 1 {
 		t.Fatalf("want 1 inject, got %d", f.injectCount())
 	}
-	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 {
+	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 {
 		t.Fatalf("unconfirmed pending=%d done=%d failed=%d", p, doneN, failed)
 	}
 	d.Tick()
-	if f.injectCount() != 2 {
-		t.Fatalf("ghost send must retry, got %d", f.injectCount())
+	d.Tick()
+	if n := f.injectCountOf(text); n != 1 {
+		t.Fatalf("re-pasted an unconfirmed send: %d", n)
 	}
-	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 {
-		t.Fatalf("ghost retry still pending=%d done=%d failed=%d", p, doneN, failed)
+	if a := doneAttempts(t, dir, "u1"); a != 1 {
+		t.Fatalf("want attempts=1, got %d", a)
 	}
 }
 
@@ -680,7 +685,11 @@ func TestInjectErrorStaysPending(t *testing.T) {
 	}
 }
 
-func TestMailNotDoneWhenPaneReactsWithoutLanding(t *testing.T) {
+// muxa#116 made a missing `[muxa] from=` envelope mean "not delivered".
+// muxa#129 keeps the envelope check as logging confidence and drops the
+// retry: the pane reacted to a paste tmux accepted, so a second paste would
+// deliver the same envelope twice.
+func TestMailReactedWithoutEnvelopeNotRetried(t *testing.T) {
 	dir := t.TempDir()
 	q, _ := OpenQueue(dir)
 	f := &fakeTMUX{captures: []string{"ready>", "esc to interrupt\nworking"}, hideEcho: true}
@@ -692,8 +701,8 @@ func TestMailNotDoneWhenPaneReactsWithoutLanding(t *testing.T) {
 	if f.injectCount() != 1 {
 		t.Fatalf("want 1 inject, got %d", f.injectCount())
 	}
-	if p, doneN, failed, _ := q.Counts(); p != 1 || doneN != 0 || failed != 0 {
-		t.Fatalf("mail must stay pending when pane reacts without landing, pending=%d done=%d failed=%d", p, doneN, failed)
+	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 {
+		t.Fatalf("mail filed once tmux accepted the paste, pending=%d done=%d failed=%d", p, doneN, failed)
 	}
 	f.mu.Lock()
 	f.captures = []string{"ready>", "ready>"}
@@ -703,11 +712,8 @@ func TestMailNotDoneWhenPaneReactsWithoutLanding(t *testing.T) {
 	f.mu.Unlock()
 	d.Tick()
 	d.Tick()
-	if f.injectCount() != 2 {
-		t.Fatalf("mail must retry after false-positive confirm once pane is free, got %d injects", f.injectCount())
-	}
-	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 {
-		t.Fatalf("mail retries until landing, pending=%d done=%d failed=%d", p, doneN, failed)
+	if n := f.injectCountOf(text); n != 1 {
+		t.Fatalf("re-pasted a report whose envelope never showed: %d", n)
 	}
 }
 
@@ -804,23 +810,218 @@ func TestClaudeConsumedPasteNotRetried(t *testing.T) {
 	}
 }
 
-// A non-claude pane keeps pending-safe-retry: absence of the envelope there
-// really is evidence the paste missed (muxa#116).
-func TestGenericPaneStillRetriesGhostSend(t *testing.T) {
+// muxa#128 spared only kind=claude. muxa#129 generalises it: a generic pane
+// that never echoes the payload is also filed once, because the reason the
+// broker cannot see the text is not something it can observe.
+func TestGenericPaneGhostSendNotRetried(t *testing.T) {
 	dir := t.TempDir()
 	q, _ := OpenQueue(dir)
 	f := &fakeTMUX{captures: []string{"ready>"}, hideEcho: true, kind: "generic"}
 	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
 	d.now = func() time.Time { return time.Unix(1000, 0) }
-	_ = q.Put(&Msg{ID: "g127", Pane: "%1", From: "c", To: "p", Text: formatOne("c", "", "GHOST"), DeadlineUnix: 2000})
+	text := formatOne("c", "", "GHOST")
+	_ = q.Put(&Msg{ID: "g127", Pane: "%1", From: "c", To: "p", Text: text, DeadlineUnix: 2000})
 	d.Tick()
 	d.Tick()
-	if f.injectCount() != 2 {
-		t.Fatalf("generic ghost send must retry, got %d", f.injectCount())
+	if n := f.injectCountOf(text); n != 1 {
+		t.Fatalf("generic ghost send re-pasted: %d", n)
 	}
-	if p, doneN, _, _ := q.Counts(); p != 1 || doneN != 0 {
-		t.Fatalf("generic ghost send pending=%d done=%d", p, doneN)
+	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 {
+		t.Fatalf("generic ghost send pending=%d done=%d failed=%d", p, doneN, failed)
 	}
+}
+
+// The incident test. Both times an operator had to kill a CLI, one message
+// had been pasted into one pane 16 and 18 times. The pane never confirmed;
+// nothing else was wrong. Assert the exact paste count, for every kind —
+// a ceiling alone would still have let this through N times (muxa#129).
+func TestNeverConfirmingPaneGetsExactlyOnePaste(t *testing.T) {
+	for _, kind := range []string{"claude", "cursor", "pi", "generic", ""} {
+		name := kind
+		if name == "" {
+			name = "unregistered"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			q, _ := OpenQueue(dir)
+			// hideEcho: the payload never reaches the capture or the
+			// history, and the pane sits at a quiescent prompt — the exact
+			// shape of muxa#127, and of every future CLI that consumes
+			// pasted input.
+			f := &fakeTMUX{captures: []string{"ready>"}, hideEcho: true, kind: kind}
+			d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+			now := time.Unix(1000, 0)
+			d.now = func() time.Time { return now }
+			text := formatOne("worker", "", "REPORT pr=https://example.invalid/pr/1")
+			_ = q.Put(&Msg{ID: "n129", Pane: "%9", From: "worker", To: "parent", Text: text, DeadlineUnix: 2000})
+
+			for i := 0; i < 20; i++ {
+				d.Tick()
+				now = now.Add(time.Second)
+			}
+			if n := f.injectCountOf(text); n != 1 {
+				t.Fatalf("%s pane: want exactly 1 paste, got %d", name, n)
+			}
+			if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 {
+				t.Fatalf("%s pane: pending=%d done=%d failed=%d", name, p, doneN, failed)
+			}
+			if a := doneAttempts(t, dir, "n129"); a != 1 {
+				t.Fatalf("%s pane: want attempts=1, got %d", name, a)
+			}
+		})
+	}
+}
+
+// A dispatch brief into a never-confirming pane is already at-most-once
+// (muxa#105); pin it alongside mail so the two paths cannot drift apart.
+func TestNeverConfirmingPaneGetsExactlyOneBrief(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{captures: []string{"ready>"}, hideEcho: true, kind: "cursor"}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	now := time.Unix(1000, 0)
+	d.now = func() time.Time { return now }
+	_ = q.Put(&Msg{
+		ID: "n129d", Pane: "%1", From: "parent", To: "kid", Text: "FIRST-BRIEF",
+		DeadlineUnix: 2000, Kind: kindDispatch, ParentPane: "%2",
+	})
+	for i := 0; i < 20; i++ {
+		d.Tick()
+		now = now.Add(time.Second)
+	}
+	if n := f.injectCountOf("FIRST-BRIEF"); n != 1 {
+		t.Fatalf("want exactly 1 brief paste, got %d", n)
+	}
+}
+
+// muxa#128 left this window live: mail whose confirm resolves to
+// confirmUnsubmitted stayed queued and re-pasted on the next Tick. A
+// collapsed "[Pasted text …]" is a rendering fact, and Cursor parks one on
+// screen long after the paste was taken (muxa#111/#105).
+func TestMailUnsubmittedPasteNotRetried(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{
+		captures: []string{"ready>", "ready>", "[Pasted text #1 +79 lines]", "[Pasted text #1 +79 lines]"},
+		hideEcho: true, kind: "cursor",
+	}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	text := formatOne("worker", "", "REPORT")
+	_ = q.Put(&Msg{ID: "m129u", Pane: "%1", From: "worker", To: "parent", Text: text, DeadlineUnix: 2000})
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("want 1 inject, got %d", f.injectCount())
+	}
+	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 1 || failed != 0 {
+		t.Fatalf("unsubmitted mail pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+	// Unlike dispatch, mail has no parent pane to warn; nothing is enqueued.
+	if pending, _ := q.Pending(); len(pending) != 0 {
+		t.Fatalf("mail must not enqueue a broker turn: %+v", pending)
+	}
+	f.mu.Lock()
+	f.captures = []string{"ready>", "ready>"}
+	f.capI = 0
+	f.echo = ""
+	f.hideEcho = false
+	f.mu.Unlock()
+	d.Tick()
+	d.Tick()
+	if n := f.injectCountOf(text); n != 1 {
+		t.Fatalf("re-pasted mail that showed as an unsubmitted collapse: %d", n)
+	}
+}
+
+// The seatbelt (muxa#129). Inject returning an error is observable and
+// unambiguous — nothing was pasted — so it is the one path that may retry.
+// It is bounded and backed off, and files failed/ when the ceiling trips.
+func TestInjectFailureRetriesToCeilingThenFails(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{captures: []string{"ready>"}, failInj: true}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	now := time.Unix(1000, 0)
+	d.now = func() time.Time { return now }
+	_ = q.Put(&Msg{ID: "inj1", Pane: "%1", From: "c", To: "p", Text: formatOne("c", "", "NOPE"), DeadlineUnix: 9000})
+
+	d.Tick()
+	if a := queuedAttempts(t, dir, "pending", "inj1"); a != 1 {
+		t.Fatalf("attempt 1: got %d", a)
+	}
+	// Inside the backoff window the poll loop must not re-run the command.
+	d.Tick()
+	d.Tick()
+	if a := queuedAttempts(t, dir, "pending", "inj1"); a != 1 {
+		t.Fatalf("retried inside the backoff window: attempts=%d", a)
+	}
+	now = now.Add(time.Second)
+	d.Tick()
+	if a := queuedAttempts(t, dir, "pending", "inj1"); a != 2 {
+		t.Fatalf("attempt 2: got %d", a)
+	}
+	now = now.Add(2 * time.Second)
+	d.Tick()
+	if p, doneN, failed, _ := q.Counts(); p != 0 || doneN != 0 || failed != 1 {
+		t.Fatalf("ceiling must file failed/, pending=%d done=%d failed=%d", p, doneN, failed)
+	}
+	if a := queuedAttempts(t, dir, "failed", "inj1"); a != maxInjectAttempts {
+		t.Fatalf("want attempts=%d at the ceiling, got %d", maxInjectAttempts, a)
+	}
+	// Nothing was ever pasted, so nothing can be double-delivered.
+	if f.injectCount() != 0 {
+		t.Fatalf("failed inject counted as a paste: %d", f.injectCount())
+	}
+	now = now.Add(time.Minute)
+	d.Tick()
+	if p, _, failed, _ := q.Counts(); p != 0 || failed != 1 {
+		t.Fatalf("kept retrying past the ceiling, pending=%d failed=%d", p, failed)
+	}
+}
+
+// A dispatch brief tmux never accepted is a real loss, and the parent is
+// told — the same shape as the deadline path, which already notifies.
+func TestInjectFailureCeilingNotifiesDispatchParent(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	f := &fakeTMUX{captures: []string{"ready>"}, failInj: true}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	now := time.Unix(1000, 0)
+	d.now = func() time.Time { return now }
+	_ = q.Put(&Msg{
+		ID: "inj2", Pane: "%1", From: "parent", To: "kid", Text: "SECRET-BRIEF",
+		DeadlineUnix: 9000, Kind: kindDispatch, ParentPane: "%2",
+	})
+	for i := 0; i < maxInjectAttempts; i++ {
+		d.Tick()
+		now = now.Add(time.Minute)
+	}
+	if _, _, failed, _ := q.Counts(); failed != 1 {
+		t.Fatalf("brief not filed failed/: failed=%d", failed)
+	}
+	pending, _ := q.Pending()
+	if len(pending) != 1 || pending[0].From != "broker" || pending[0].Pane != "%2" {
+		t.Fatalf("parent notify: %+v", pending)
+	}
+	if strings.Contains(pending[0].Text, "SECRET-BRIEF") {
+		t.Fatal("failure turn must not include the undelivered brief")
+	}
+	if !strings.Contains(pending[0].Text, "kid") || !strings.Contains(pending[0].Text, "inj2") {
+		t.Fatalf("notify missing name/id: %s", pending[0].Text)
+	}
+}
+
+func queuedAttempts(t *testing.T, dir, sub, id string) int {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, sub, id+".json"))
+	if err != nil {
+		t.Fatalf("read %s/%s: %v", sub, id, err)
+	}
+	var m Msg
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("decode %s/%s: %v", sub, id, err)
+	}
+	return m.Attempts
 }
 
 func doneAttempts(t *testing.T, dir, id string) int {

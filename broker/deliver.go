@@ -19,6 +19,7 @@ type Deliverer struct {
 	prev     map[string]string // last capture-pane per pane, for two-signal
 	held     map[string]bool   // already logged "holding past deadline"
 	drew     map[string]bool   // pane has shown visible content (dispatch ready)
+	retryAt  map[string]int64  // msg id -> unix nanos before which a failed Inject is not retried
 }
 
 func NewDeliverer(q *Queue, t *TMUX, poll time.Duration) *Deliverer {
@@ -34,6 +35,7 @@ func NewDeliverer(q *Queue, t *TMUX, poll time.Duration) *Deliverer {
 		prev:     map[string]string{},
 		held:     map[string]bool{},
 		drew:     map[string]bool{},
+		retryAt:  map[string]int64{},
 	}
 }
 
@@ -66,7 +68,9 @@ func (d *Deliverer) wake() <-chan struct{} {
 // Tick tries to deliver every pending message at most once per pane.
 // A pane that is not free is left queued — including past its deadline.
 // Timeout-fallback paste is how two messages into one busy composer
-// clobber each other and still get filed as done.
+// clobber each other and still get filed as done. A message only reaches a
+// second Tick if it was never pasted: the pane was not free, or Inject
+// itself failed (muxa#129).
 func (d *Deliverer) Tick() {
 	msgs, err := d.Q.Pending()
 	if err != nil {
@@ -94,8 +98,12 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 	if d.T.PaneDead(m.Pane) {
 		if now >= m.DeadlineUnix {
 			log.Printf("drop %s: pane %s dead after deadline", m.ID, m.Pane)
+			d.clearRetryAt(m.ID)
 			_ = d.Q.MarkFailed(m)
 		}
+		return
+	}
+	if !d.retryDue(m.ID, d.now()) {
 		return
 	}
 	free, err := d.canPaste(m.Pane)
@@ -145,72 +153,142 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 	m.Attempts++
 	_ = d.Q.Save(m)
 	if err := d.T.Inject(m.Pane, m.Text); err != nil {
-		log.Printf("inject %s: %v", m.ID, err)
+		d.noteInjectFailed(m, err)
 		return
 	}
-	switch d.confirm(m.Pane, m) {
-	case confirmPasted:
-		if !m.isDispatch() && !d.mailLanded(m) {
-			// The envelope marker is the muxa#116 landing proof. A pane
-			// that consumes paste without echoing it cannot produce that
-			// proof mid-turn, and its absence must not mean retry
-			// (muxa#127).
-			if d.paneConsumesPaste(m.Pane) {
-				d.fileConsumed(m)
-				return
-			}
-			log.Printf("unconfirmed %s → %s id=%s (pane reacted but mail did not land; left queued)", m.From, m.To, m.ID)
-			return
-		}
-		d.notePaste(m)
-		log.Printf("delivered %s → %s id=%s", m.From, m.To, m.ID)
-		_ = d.Q.MarkDone(m)
-	case confirmConsumed:
-		d.fileConsumed(m)
-	case confirmUnsubmitted:
-		// Positive evidence: collapsed paste still visible and no agent turn
-		// started after one beat (muxa#111). File done/ (at-most-once) and
-		// tell the parent — unlike generic inconclusive confirm, this signal
-		// is not anti-correlated with healthy workers (muxa#110).
-		if m.isDispatch() {
-			d.notePaste(m)
-			log.Printf("unsubmitted %s → %s id=%s (paste visible but turn did not start; filed done/)", m.From, m.To, m.ID)
-			_ = d.Q.MarkDone(m)
-			d.notifyUnsubmitted(m)
-			return
-		}
-		log.Printf("unconfirmed %s → %s id=%s (pane still free; left queued)", m.From, m.To, m.ID)
-	default:
-		// Generic inconclusive: parked cursor, fast agent, swallowed paste
-		// with no visible collapse — free-detection cannot distinguish
-		// success from failure (muxa#110). File first brief done/ (no retry)
-		// but do not mail the parent a failure-shaped turn.
-		if m.isDispatch() {
-			d.notePaste(m)
-			log.Printf("unknown %s → %s id=%s (paste accepted but payload not visible; will not retry)", m.From, m.To, m.ID)
-			_ = d.Q.MarkDone(m)
-			return
-		}
-		log.Printf("unconfirmed %s → %s id=%s (pane still free; left queued)", m.From, m.To, m.ID)
+	// Inject returned nil: load-buffer, paste-buffer -p -d and send-keys
+	// Enter all exited 0, so tmux has accepted the payload into the pane.
+	// That is the delivery boundary. muxa mail is at-most-once (muxa#129):
+	// past this line the message is filed and never re-pasted, whatever
+	// confirm saw. Whether the CLI *renders* the text is a question about
+	// pixels the broker neither controls nor versions, and inferring
+	// "never arrived" from it is what double-delivered envelopes 16 and 18
+	// times (muxa#127).
+	res := d.confirm(m.Pane, m)
+	d.fileDelivered(m, d.confidence(m, res))
+	if res == confirmUnsubmitted && m.isDispatch() {
+		// Positive evidence that the brief did not submit: collapsed paste
+		// still visible and no agent turn after one beat (muxa#111). Tell
+		// the parent — unlike generic inconclusive confirm, this signal is
+		// not anti-correlated with healthy workers (muxa#110).
+		d.notifyUnsubmitted(m)
 	}
 }
 
-// fileConsumed files a paste into a consuming CLI as delivered (muxa#127).
-// Inject returned nil, so paste-buffer and Enter both reached the pane; the
-// payload is simply invisible because the CLI queued it. Filing done/ trades
-// rare silent loss for never double-delivering: a receiving agent cannot
-// tell a duplicate envelope from a genuine repeat instruction, and acting on
-// a worker report twice is worse than the parent noticing a missing reply.
-func (d *Deliverer) fileConsumed(m *Msg) {
+// fileDelivered files a paste tmux accepted, with the confidence that
+// post-paste observation earned it. The confidence text is diagnostic: an
+// operator can tell "delivered, confirmed" from "delivered, unverified" in
+// the log, but no value of it can cause a second paste (muxa#129).
+func (d *Deliverer) fileDelivered(m *Msg, confidence string) {
 	d.notePaste(m)
-	log.Printf("consumed %s → %s id=%s (paste accepted by a pane that does not echo it; will not retry)", m.From, m.To, m.ID)
+	log.Printf("delivered %s → %s id=%s (%s)", m.From, m.To, m.ID, confidence)
 	_ = d.Q.MarkDone(m)
+}
+
+// confidence renders the post-paste evidence for a message Inject already
+// accepted. Every branch files done/; they differ only in what the log says
+// (muxa#129). Absence of the payload is still worth naming — it separates
+// a consuming CLI (muxa#127) from a pane that stayed visibly free — it is
+// just not evidence the paste missed.
+func (d *Deliverer) confidence(m *Msg, res confirmResult) string {
+	switch res {
+	case confirmPasted:
+		if m.isDispatch() {
+			return "confirmed: pane reacted to the paste"
+		}
+		// The envelope marker is the muxa#116 landing proof.
+		if d.mailLanded(m) {
+			return "confirmed: pane reacted and the [muxa] envelope is visible"
+		}
+		if d.paneConsumesPaste(m.Pane) {
+			return "unverified: pane reacted; a consuming CLI does not echo the envelope"
+		}
+		return "unverified: pane reacted but the [muxa] envelope never appeared"
+	case confirmConsumed:
+		return "unverified: paste accepted by a pane that does not echo it"
+	case confirmUnsubmitted:
+		return "unverified: collapsed paste still visible, no agent turn started"
+	}
+	return "unverified: payload not visible after a successful paste"
+}
+
+// maxInjectAttempts bounds the one path that may still re-paste: Inject
+// itself returning an error. That is an observable, unambiguous failure
+// (a tmux command exited non-zero), not a scraped inference, so retrying
+// it is sound — but only up to a ceiling, so a pane that rejects every
+// paste cannot spin forever. After the ceiling the message is filed
+// failed/ with an explicit outcome.
+const maxInjectAttempts = 3
+
+// injectRetryBackoff is the wait before the second attempt; it doubles for
+// each further one. Without it the poll loop retries a failing tmux command
+// several times a second.
+const injectRetryBackoff = 500 * time.Millisecond
+
+// noteInjectFailed schedules or gives up on the Inject-failed path.
+func (d *Deliverer) noteInjectFailed(m *Msg, err error) {
+	if m.Attempts >= maxInjectAttempts {
+		d.failInject(m, err)
+		return
+	}
+	back := injectRetryBackoff << uint(m.Attempts-1)
+	d.mu.Lock()
+	d.retryAt[m.ID] = d.now().Add(back).UnixNano()
+	d.mu.Unlock()
+	log.Printf("inject %s → %s id=%s attempt=%d/%d (retrying in %s): %v",
+		m.From, m.To, m.ID, m.Attempts, maxInjectAttempts, back, err)
+}
+
+// failInject files a message tmux never accepted. Nothing was pasted, so
+// there is no duplicate to worry about; the loss is real and must be
+// visible.
+func (d *Deliverer) failInject(m *Msg, err error) {
+	d.clearRetryAt(m.ID)
+	log.Printf("undelivered %s → %s id=%s (paste failed %d/%d times, last: %v; filed failed/)",
+		m.From, m.To, m.ID, m.Attempts, maxInjectAttempts, err)
+	_ = d.Q.MarkFailed(m)
+	if !m.isDispatch() || m.ParentPane == "" {
+		return
+	}
+	fail := &Msg{
+		Pane:         m.ParentPane,
+		From:         "broker",
+		To:           m.From,
+		Text:         dispatchInjectFailedText(m),
+		DeadlineUnix: d.now().Add(24 * time.Hour).Unix(),
+	}
+	if err := d.Q.Put(fail); err != nil {
+		log.Printf("dispatch inject-fail notify %s: %v", m.ID, err)
+	}
+}
+
+func dispatchInjectFailedText(m *Msg) string {
+	return "[muxa] from=broker\n" +
+		"dispatch failed: " + m.To + " pane=" + m.Pane + " paste command failed every attempt\n" +
+		"id=" + m.ID + "\n" +
+		"Do not reply.\n"
+}
+
+// retryDue reports whether a message whose Inject failed has waited out its
+// backoff. Messages with no recorded failure are always due.
+func (d *Deliverer) retryDue(id string, now time.Time) bool {
+	d.mu.Lock()
+	at, ok := d.retryAt[id]
+	d.mu.Unlock()
+	return !ok || now.UnixNano() >= at
+}
+
+func (d *Deliverer) clearRetryAt(id string) {
+	d.mu.Lock()
+	delete(d.retryAt, id)
+	d.mu.Unlock()
 }
 
 func (d *Deliverer) notePaste(m *Msg) {
 	d.mu.Lock()
 	d.pastes = append(d.pastes, m.Pane+"|"+m.ID)
 	delete(d.held, m.ID)
+	delete(d.retryAt, m.ID)
 	d.mu.Unlock()
 }
 
@@ -227,6 +305,7 @@ func (d *Deliverer) noteHeld(m *Msg) {
 
 func (d *Deliverer) failDispatch(m *Msg) {
 	log.Printf("dispatch failed %s → %s id=%s (never ready; left unbriefed)", m.From, m.To, m.ID)
+	d.clearRetryAt(m.ID)
 	_ = d.Q.MarkFailed(m)
 	if m.ParentPane == "" {
 		return
@@ -252,6 +331,7 @@ func dispatchFailText(m *Msg) string {
 
 func (d *Deliverer) failDispatchComposerForeign(m *Msg) {
 	log.Printf("dispatch refused %s → %s id=%s (composer holds foreign input)", m.From, m.To, m.ID)
+	d.clearRetryAt(m.ID)
 	_ = d.Q.MarkFailed(m)
 	if m.ParentPane == "" {
 		return
@@ -388,11 +468,13 @@ func visibleContent(capture string) bool {
 
 type confirmResult int
 
+// No confirmResult drives a retry (muxa#129). They rank how much evidence
+// backs a paste tmux already accepted, for the log line only.
 const (
-	confirmMissed      confirmResult = iota // inconclusive — still free; send may retry; dispatch files done/
-	confirmPasted                           // pane reacted; must not retry
+	confirmMissed      confirmResult = iota // pane stayed free; payload never appeared
+	confirmPasted                           // pane reacted
 	confirmUnsubmitted                      // collapsed paste visible, no turn after wait
-	confirmConsumed                         // paste accepted by a CLI that does not echo it; must not retry
+	confirmConsumed                         // pane kind takes paste without echoing it
 )
 
 // mailLanded reports whether a muxa send actually reached the target pane
@@ -415,13 +497,17 @@ func (d *Deliverer) mailLanded(m *Msg) bool {
 	return false
 }
 
-// confirm takes post-paste snapshot(s). A pane that reacted (cursor row
-// no longer empty/prompt, control-mode drawing, or agent turn started) is
-// pasted and must not be retried. Collapsed "[Pasted text …]" with no turn
-// start is unsubmitted (muxa#111). A pane that stayed free is
-// confirmMissed: deliverOne files a first brief done/ (no retry) and leaves
-// later mail queued. Dispatch does not match payload against the capture;
-// muxa send must (muxa#116).
+// confirm takes post-paste snapshot(s) and reports how visible the paste
+// is: a pane that reacted (cursor row no longer empty/prompt, control-mode
+// drawing, or agent turn started) is confirmPasted; collapsed
+// "[Pasted text …]" with no turn start is confirmUnsubmitted (muxa#111); a
+// pane whose kind consumes paste without echoing it is confirmConsumed
+// (muxa#127); a pane that stayed visibly free is confirmMissed.
+//
+// None of these decide delivery. Inject already did that: deliverOne files
+// the message either way and never re-pastes it (muxa#129). Screen-scraped
+// absence is not evidence a paste missed, and treating it as such is what
+// pasted one envelope sixteen times.
 func (d *Deliverer) confirm(pane string, m *Msg) confirmResult {
 	snap, err := d.T.Snapshot(pane)
 	if err != nil {
@@ -458,10 +544,12 @@ func (d *Deliverer) confirm(pane string, m *Msg) confirmResult {
 // paneConsumesPaste reports whether the target CLI takes pasted input into
 // its own queue without echoing it. Claude Code does exactly that while a
 // turn is running: paste-buffer + Enter is accepted and queued, and nothing
-// about the payload reaches the capture until the turn ends. For such a
-// pane "payload not visible after a successful Inject" is not evidence the
-// paste missed, so no absence-of-evidence outcome may drive a retry — the
-// pane already has the message and a retry double-delivers it (muxa#127).
+// about the payload reaches the capture until the turn ends (muxa#127).
+//
+// Since muxa#129 no pane kind is retried after a successful Inject, so this
+// no longer gates a retry — it names *why* the payload is invisible in the
+// log, which is the difference between a healthy consuming CLI and a pane
+// that sat there doing nothing.
 //
 // This reads @muxa_kind, the roster fact `muxa who` prints. It is not
 // chrome modelling: nothing here inspects what the pane drew.
