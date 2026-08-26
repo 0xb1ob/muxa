@@ -248,12 +248,25 @@ idle hint (`\x1b[2m…\x1b[0m`) on screen while operator keystrokes render in
 normal weight after the reset sequence. A text-only composer check still
 sees the placeholder substring and treats the pane as free; Claude parents
 replace the hint and do not hit this path. The broker MUST treat a composer
-row with any non-faint visible rune as foreign input. Idle and busy cursor
-rows stay entirely dim; post-turn `→ Add a follow-up` idle stays dim-only
-(muxa#123). Truecolor SGR parameters (`38;2`, `48;2`) MUST NOT be read as
-faint (SGR 2). Long in-box typing may wrap across multiple rows inside the
+row with any non-faint visible rune as foreign input, subject to the caret
+exemption below. Truecolor SGR parameters (`38;2`, `48;2`) MUST NOT be read
+as faint (SGR 2). Long in-box typing may wrap across multiple rows inside the
 box; the gate MUST scan every content row between the `▄`/`▀` borders, not
 only the first.
+
+**Caret exemption (muxa#141).** Cursor parks a reverse-video caret on the
+first character of its placeholder — a cold pane draws
+`\x1b[2m→ \x1b[0;7mP\x1b[0;2mlan, search, build anything`, and the post-turn
+row draws the same caret on the `A` of `→ Add a follow-up` (muxa#123). SGR 7
+arrives with a reset that clears faint, so a placeholder is *not* entirely
+dim and the non-faint rule above, applied alone, refuses an empty composer.
+That refused every dispatch into a freshly spawned cursor worker for the
+whole deadline — `attempts=0`, `last_gate=foreign-composer`, refusals in the
+thousands — while parents that had already run a turn kept receiving mail. A
+caret covers one cell, so the broker MUST NOT count a reverse-video run of a
+single visible rune as typed text, and MUST count a longer reverse run as
+content. Text drawn beside the caret is judged on faint as before, so
+mid-keystroke panes (muxa#139) stay refused.
 
 **Known sharp edge (muxa#44).** Two-signal, control-mode silence, and
 hardware cursor position are still blind to half-typed input that never

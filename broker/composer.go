@@ -91,13 +91,27 @@ func composerFollowUpIdle(s string) bool {
 // composerRowHasNonFaintText reports whether a capture-pane -e composer row
 // renders any visible rune without SGR faint (2). Cursor idle placeholders
 // are entirely dim; operator typing is drawn after \x1b[0m/\x1b[22m.
+//
+// Cursor parks a reverse-video caret on the first character of the idle
+// placeholder — a cold pane draws
+// "\x1b[2m→ \x1b[0;7mP\x1b[0;2mlan, search, build anything" — and SGR 7
+// arrives with a reset that clears faint. Counting that one cell as typed
+// text refused every paste into a freshly spawned cursor worker, on every
+// tick, forever (muxa#141). A caret covers a single cell, so a reverse run of
+// one visible rune is decoration; a longer run is content the operator can
+// see and must not be pasted over.
 func composerRowHasNonFaintText(row string) bool {
-	dim := false
+	var sgr sgrState
+	revRun := 0
 	for i := 0; i < len(row); {
 		if row[i] == 0x1b {
 			if n, ok := skipCSI(row[i:]); ok {
 				if seq := row[i : i+n]; seq[len(seq)-1] == 'm' {
-					dim = applySGRDim(dim, seq[2:len(seq)-1])
+					was := sgr.reverse
+					sgr = applySGR(sgr, seq[2:len(seq)-1])
+					if was && !sgr.reverse {
+						revRun = 0
+					}
 				}
 				i += n
 				continue
@@ -110,17 +124,36 @@ func composerRowHasNonFaintText(row string) bool {
 			continue
 		}
 		r, size := utf8.DecodeRuneInString(row[i:])
-		if !unicode.IsSpace(r) && !dim {
+		i += size
+		if unicode.IsSpace(r) {
+			revRun = 0
+			continue
+		}
+		if sgr.reverse {
+			revRun++
+			if revRun > 1 {
+				return true
+			}
+			continue
+		}
+		revRun = 0
+		if !sgr.dim {
 			return true
 		}
-		i += size
 	}
 	return false
 }
 
-func applySGRDim(dim bool, params string) bool {
+// sgrState is the subset of SGR the composer gate reads: faint separates a
+// dim placeholder from typed text, and reverse marks the terminal caret.
+type sgrState struct {
+	dim     bool
+	reverse bool
+}
+
+func applySGR(sgr sgrState, params string) sgrState {
 	if params == "" {
-		return false
+		return sgrState{}
 	}
 	for i := 0; i < len(params); {
 		j := i
@@ -138,11 +171,15 @@ func applySGRDim(dim bool, params string) bool {
 		}
 		switch n {
 		case 0:
-			dim = false
+			sgr = sgrState{}
 		case 2:
-			dim = true
+			sgr.dim = true
+		case 7:
+			sgr.reverse = true
 		case 22:
-			dim = false
+			sgr.dim = false
+		case 27:
+			sgr.reverse = false
 		case 38, 48:
 			if i < len(params) && params[i] == '2' {
 				for skip := 0; skip < 3 && i < len(params); skip++ {
@@ -163,7 +200,7 @@ func applySGRDim(dim bool, params string) bool {
 			}
 		}
 	}
-	return dim
+	return sgr
 }
 
 func composerInputRow(capture string) (string, bool) {
