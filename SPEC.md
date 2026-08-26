@@ -196,7 +196,10 @@ what its chrome looks like. The bottom line of an agent CLI is
 user-configurable, so no fixed prompt/status model can be correct:
 
 1. `#{pane_dead}` or `#{pane_in_mode}` → not free (copy-mode paste is
-   silent-loss).
+   silent-loss). A pane id the server has *forgotten* counts as dead:
+   `display-message` exits 0 for it and expands every pane format to the
+   empty string, so an empty `#{pane_dead}` MUST NOT be read as alive
+   (muxa#124).
 2. Drawing — `%output` inside the quiet window (muxa#46) → not free. A busy
    agent draws continuously; an idle one draws nothing. Delivery wakes on
    silence rather than a 250 ms poll. `muxa who` STATE `busy` is this
@@ -226,10 +229,19 @@ half-typed input in worker panes. `muxa -check-pane %id` prints the
 two-signal verdict.
 
 Retry until the pane is actually free. `MUXA_BROKER_DEADLINE` (default 600)
-is how long a *dead* pane is retried before the message is failed; a live
-busy pane keeps its mail in `pending/` past that deadline. The broker MUST
-NOT timeout-fallback paste: two fallbacks into one busy composer overwrite
-each other, both get filed as `done/`, and the agent never sees the first.
+is how long a *dead or missing* pane is retried before the message is
+failed; a live busy pane keeps its mail in `pending/` past that deadline.
+The broker MUST NOT timeout-fallback paste: two fallbacks into one busy
+composer overwrite each other, both get filed as `done/`, and the agent
+never sees the first.
+
+Every retry path MUST consult that deadline. A message that cannot make
+progress — the pane is dead or gone, the free-check keeps erroring, an
+`Inject` backoff outlives the deadline — MUST end in `failed/`, never spin
+in `pending/` indefinitely. A repeated per-message delivery error MUST be
+rate-limited in the log rather than written once per poll tick: an
+undeliverable message produced 22 MB of two alternating lines in eight
+hours and buried every other event in `broker.log` (muxa#124).
 
 **At-most-once (muxa#129).** A successful `Inject` — `load-buffer`,
 `paste-buffer -p -d` and `send-keys Enter` all exiting 0 — is the delivery
@@ -400,7 +412,7 @@ argument is a br key, the command is in the wrong repo.
 | `MUXA_BROKER_SOCK` | `$MUXA_BROKER_DIR/broker.sock` | Unix socket |
 | `MUXA_BROKER_PID` | `$MUXA_BROKER_DIR/broker.pid` | Pidfile |
 | `MUXA_BROKER_BIN` | this `muxa` binary | Optional override of the daemon executable |
-| `MUXA_BROKER_DEADLINE` | `600` | Seconds after which a *dead* pane's mail is failed; a live busy pane stays queued |
+| `MUXA_BROKER_DEADLINE` | `600` | Seconds after which a *dead or missing* pane's mail is failed; a live busy pane stays queued |
 | `MUXA_BROKER_POLL_MS` | `250` | Broker retry interval (fallback if control-mode attach fails) |
 | `MUXA_BROKER_QUIET_MS` | `250` | Control-mode silence window before a pane is considered not drawing |
 | `MUXA_BROKER_VERSION` | latest release | Install-time: release tag to fetch the muxa asset from |

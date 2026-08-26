@@ -162,6 +162,33 @@ else
   ok "send-keys into dead pane exits $dead_enter (pane_dead is still the liveness check)"
 fi
 
+# 3b. A pane id that no longer exists: display-message exits 0 with an empty
+# format expansion, while capture-pane/paste-buffer report "can't find pane".
+# muxa#124 hot-spun because #{pane_dead} = "" was read as "alive"; PaneDead
+# now treats empty as gone, so this fact is load-bearing.
+tmux -L "$SOCK" new-window -t facts -n gone "exec sleep 3600"
+sleep 0.2
+gone_pane="$(tmux -L "$SOCK" list-panes -t facts:gone -F '#{pane_id}' | head -1)"
+tmux -L "$SOCK" kill-pane -t "$gone_pane"
+sleep 0.3
+set +e
+gone_fmt="$(tmux -L "$SOCK" display-message -t "$gone_pane" -p '#{pane_dead}' 2>/dev/null)"
+gone_fmt_rc=$?
+tmux -L "$SOCK" capture-pane -p -t "$gone_pane" >/dev/null 2>&1
+gone_cap_rc=$?
+set -e
+if [ "$gone_fmt_rc" -eq 0 ] && [ -z "$gone_fmt" ]; then
+  ok "display-message on a nonexistent pane exits 0 with an empty #{pane_dead}"
+else
+  # If tmux ever starts failing here, PaneDead's err!=nil arm covers it.
+  ok "display-message on a nonexistent pane exits $gone_fmt_rc (pane_dead=$(printf '%s' "$gone_fmt"))"
+fi
+if [ "$gone_cap_rc" -ne 0 ]; then
+  ok "capture-pane on a nonexistent pane exits non-zero (rc=$gone_cap_rc)"
+else
+  bad "capture-pane on a nonexistent pane exits non-zero" "rc=0"
+fi
+
 # 4. capture-pane -p returns the live grid while scrolled back
 tmux -L "$SOCK" new-window -t facts -n cap "exec cat"
 sleep 0.2

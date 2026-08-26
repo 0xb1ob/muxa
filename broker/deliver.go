@@ -14,12 +14,21 @@ type Deliverer struct {
 	Poll     time.Duration
 	now      func() time.Time
 	mu       sync.Mutex
-	inflight map[string]bool   // pane currently being injected
-	pastes   []string          // test hook: pane ids pasted, in order
-	prev     map[string]string // last capture-pane per pane, for two-signal
-	held     map[string]bool   // already logged "holding past deadline"
-	drew     map[string]bool   // pane has shown visible content (dispatch ready)
-	retryAt  map[string]int64  // msg id -> unix nanos before which a failed Inject is not retried
+	inflight map[string]bool    // pane currently being injected
+	pastes   []string           // test hook: pane ids pasted, in order
+	prev     map[string]string  // last capture-pane per pane, for two-signal
+	held     map[string]bool    // already logged "holding past deadline"
+	drew     map[string]bool    // pane has shown visible content (dispatch ready)
+	retryAt  map[string]int64   // msg id -> unix nanos before which a failed Inject is not retried
+	errs     map[string]errNote // msg id -> last delivery error logged, for rate limiting
+}
+
+// errNote is the last per-message delivery error the log has seen, plus how
+// many identical repeats have been swallowed since (muxa#124).
+type errNote struct {
+	text string
+	at   time.Time
+	n    int
 }
 
 func NewDeliverer(q *Queue, t *TMUX, poll time.Duration) *Deliverer {
@@ -36,6 +45,7 @@ func NewDeliverer(q *Queue, t *TMUX, poll time.Duration) *Deliverer {
 		held:     map[string]bool{},
 		drew:     map[string]bool{},
 		retryAt:  map[string]int64{},
+		errs:     map[string]errNote{},
 	}
 }
 
@@ -95,20 +105,28 @@ func (d *Deliverer) busy(pane string) bool {
 }
 
 func (d *Deliverer) deliverOne(m *Msg, now int64) {
+	// A pane that is dead or gone will not come back for this message.
+	// PaneDead now recognises a pane id tmux has forgotten, so this branch
+	// is reached instead of the free-check below (muxa#124).
 	if d.T.PaneDead(m.Pane) {
 		if now >= m.DeadlineUnix {
 			log.Printf("drop %s: pane %s dead after deadline", m.ID, m.Pane)
-			d.clearRetryAt(m.ID)
+			d.forget(m.ID)
 			_ = d.Q.MarkFailed(m)
 		}
 		return
 	}
 	if !d.retryDue(m.ID, d.now()) {
+		// Waiting out an Inject backoff. Nothing was pasted, so once the
+		// deadline is gone there is nothing left to wait for (muxa#124).
+		if now >= m.DeadlineUnix {
+			d.failRetryExpired(m)
+		}
 		return
 	}
 	free, err := d.canPaste(m.Pane)
 	if err != nil {
-		log.Printf("free %s: %v", m.Pane, err)
+		d.noteDeliverErr(m, "free "+m.Pane, err)
 		free = false
 	}
 	if m.isDispatch() && !d.sawDraw(m.Pane) {
@@ -116,27 +134,29 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		free = false
 	}
 	if !free {
-		if now >= m.DeadlineUnix {
-			if m.isDispatch() {
-				if d.composerBlocked(m.Pane) {
-					d.failDispatchComposerForeign(m)
-				} else {
-					d.failDispatch(m)
-				}
-			} else {
-				d.noteHeld(m)
-			}
-		}
+		d.holdOrFail(m, now)
 		return
 	}
 	pre, err := d.T.Snapshot(m.Pane)
 	if err != nil {
-		log.Printf("snapshot %s: %v", m.Pane, err)
+		// canPaste just captured this pane successfully, so this is a race
+		// (the pane went away between the two calls) rather than a steady
+		// state. Treat it as "not free" so the deadline still applies and
+		// the error cannot log once per tick forever (muxa#124).
+		d.noteDeliverErr(m, "snapshot "+m.Pane, err)
+		d.holdOrFail(m, now)
 		return
 	}
 	if composerInputForeign(pre.Capture) {
-		if now >= m.DeadlineUnix && !m.isDispatch() {
-			d.noteHeld(m)
+		if now >= m.DeadlineUnix {
+			if m.isDispatch() {
+				// The muxa#116 re-check caught foreign input the
+				// two-signal pair missed. Past deadline that is a refusal,
+				// not something to re-examine every tick (muxa#124).
+				d.failDispatchComposerForeign(m)
+			} else {
+				d.noteHeld(m)
+			}
 		}
 		return
 	}
@@ -243,7 +263,7 @@ func (d *Deliverer) noteInjectFailed(m *Msg, err error) {
 // there is no duplicate to worry about; the loss is real and must be
 // visible.
 func (d *Deliverer) failInject(m *Msg, err error) {
-	d.clearRetryAt(m.ID)
+	d.forget(m.ID)
 	log.Printf("undelivered %s → %s id=%s (paste failed %d/%d times, last: %v; filed failed/)",
 		m.From, m.To, m.ID, m.Attempts, maxInjectAttempts, err)
 	_ = d.Q.MarkFailed(m)
@@ -284,11 +304,90 @@ func (d *Deliverer) clearRetryAt(id string) {
 	d.mu.Unlock()
 }
 
+// forget drops every per-message bookkeeping entry for a message leaving
+// pending/. Without it the maps grow for the life of the daemon.
+func (d *Deliverer) forget(id string) {
+	d.mu.Lock()
+	delete(d.retryAt, id)
+	delete(d.held, id)
+	delete(d.errs, id)
+	d.mu.Unlock()
+}
+
+// holdOrFail applies the deadline to a message the broker could not paste
+// on this tick. A live-but-busy pane keeps its mail queued past the
+// deadline on purpose — SPEC: "a live busy pane keeps its mail in
+// pending/", because a timeout-fallback paste into a busy composer is
+// silent loss. A dispatch is failed instead, so the parent learns its
+// worker was never briefed. Every non-progress return in deliverOne routes
+// here or files the message, so no path loops without the deadline being
+// consulted (muxa#124).
+func (d *Deliverer) holdOrFail(m *Msg, now int64) {
+	if now < m.DeadlineUnix {
+		return
+	}
+	if !m.isDispatch() {
+		d.noteHeld(m)
+		return
+	}
+	if d.composerBlocked(m.Pane) {
+		d.failDispatchComposerForeign(m)
+		return
+	}
+	d.failDispatch(m)
+}
+
+// failRetryExpired files a message whose deadline passed while it was
+// waiting out an Inject backoff. Inject failed, so nothing was pasted and
+// there is no duplicate to create by giving up (muxa#124).
+func (d *Deliverer) failRetryExpired(m *Msg) {
+	log.Printf("undelivered %s → %s id=%s (deadline passed waiting to retry a failed paste after %d/%d attempts; filed failed/)",
+		m.From, m.To, m.ID, m.Attempts, maxInjectAttempts)
+	d.forget(m.ID)
+	_ = d.Q.MarkFailed(m)
+}
+
+// errLogEvery bounds how often one message's repeated delivery error
+// reaches the log. Logging it per poll tick wrote 22 MB of two alternating
+// lines in eight hours and buried every other event in broker.log, which
+// is how an unrelated delivery bug went unnoticed (muxa#124).
+const errLogEvery = 30 * time.Second
+
+// noteDeliverErr logs a per-message delivery error, at most once per
+// errLogEvery while the text is unchanged, and says how many identical
+// repeats it swallowed. A *changed* error is always logged immediately: it
+// is new information about the pane, not the same failure again.
+func (d *Deliverer) noteDeliverErr(m *Msg, what string, err error) {
+	text := what + ": " + err.Error()
+	now := d.now()
+	d.mu.Lock()
+	prev, seen := d.errs[m.ID]
+	same := seen && prev.text == text
+	if same && now.Sub(prev.at) < errLogEvery {
+		prev.n++
+		d.errs[m.ID] = prev
+		d.mu.Unlock()
+		return
+	}
+	rep := 0
+	if same {
+		rep = prev.n
+	}
+	d.errs[m.ID] = errNote{text: text, at: now}
+	d.mu.Unlock()
+	if rep > 0 {
+		log.Printf("%s (id=%s; %d identical repeats suppressed)", text, m.ID, rep)
+		return
+	}
+	log.Printf("%s (id=%s)", text, m.ID)
+}
+
 func (d *Deliverer) notePaste(m *Msg) {
 	d.mu.Lock()
 	d.pastes = append(d.pastes, m.Pane+"|"+m.ID)
 	delete(d.held, m.ID)
 	delete(d.retryAt, m.ID)
+	delete(d.errs, m.ID)
 	d.mu.Unlock()
 }
 
@@ -305,7 +404,7 @@ func (d *Deliverer) noteHeld(m *Msg) {
 
 func (d *Deliverer) failDispatch(m *Msg) {
 	log.Printf("dispatch failed %s → %s id=%s (never ready; left unbriefed)", m.From, m.To, m.ID)
-	d.clearRetryAt(m.ID)
+	d.forget(m.ID)
 	_ = d.Q.MarkFailed(m)
 	if m.ParentPane == "" {
 		return
@@ -331,7 +430,7 @@ func dispatchFailText(m *Msg) string {
 
 func (d *Deliverer) failDispatchComposerForeign(m *Msg) {
 	log.Printf("dispatch refused %s → %s id=%s (composer holds foreign input)", m.From, m.To, m.ID)
-	d.clearRetryAt(m.ID)
+	d.forget(m.ID)
 	_ = d.Q.MarkFailed(m)
 	if m.ParentPane == "" {
 		return
