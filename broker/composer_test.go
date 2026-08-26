@@ -79,6 +79,89 @@ func TestComposerInputForeignCursorParentTyping(t *testing.T) {
 	}
 }
 
+// muxa#141: a cold cursor-agent pane parks a reverse-video caret on the first
+// character of its placeholder. SGR 7 arrives as "\x1b[0;7m", and the reset
+// clears faint — so the muxa#139 non-faint scan read that one cell as typed
+// text and refused every dispatch into a freshly spawned cursor worker,
+// attempts=0, refusals in the thousands. Rows below are verbatim
+// `capture-pane -e` output from cursor-agent v2026.08.11 with an empty
+// composer, trailing pad trimmed.
+func TestComposerInputForeignCursorColdCaretIdle(t *testing.T) {
+	idle := "  Cursor Agent\n" +
+		"  \x1b[2mTip: Use /plan to plan execution and reach the right outcome faster.\x1b[0m\n" +
+		" \x1b[38;2;38;38;38m▄▄▄▄▄\x1b[39m\n" +
+		" \x1b[48;2;38;38;38m \x1b[2m→ \x1b[0;7m\x1b[48;2;38;38;38mP\x1b[0;2m\x1b[48;2;38;38;38mlan, search, build anything\x1b[0m\x1b[48;2;38;38;38m    \x1b[49m\n" +
+		" \x1b[38;2;38;38;38m▀▀▀▀▀\x1b[39m\n" +
+		"  \x1b[2mComposer 2.5 Fast\x1b[0m\n"
+	if composerRowHasNonFaintText(strings.Split(idle, "\n")[3]) {
+		t.Fatal("a one-cell reverse caret is not typed text (muxa#141)")
+	}
+	if composerInputForeign(idle) {
+		t.Fatal("cold cursor composer with a caret must not block paste (muxa#141)")
+	}
+}
+
+// The same caret on the post-turn placeholder, verbatim from a live cursor
+// worker pane. muxa#123 allowed these words; muxa#139 started refusing them
+// again whenever the caret happened to sit on the "A".
+func TestComposerInputForeignCursorFollowUpCaretIdle(t *testing.T) {
+	idle := "  the day starts in green\n" +
+		" \x1b[38;2;242;242;242m▄▄▄▄▄\x1b[39m\n" +
+		" \x1b[48;2;242;242;242m \x1b[2m→ \x1b[0;7m\x1b[48;2;242;242;242mA\x1b[0;2m\x1b[48;2;242;242;242mdd a follow-up\x1b[0m\x1b[48;2;242;242;242m    \x1b[49m\n" +
+		" \x1b[38;2;242;242;242m▀▀▀▀▀\x1b[39m\n" +
+		"  \x1b[2mCursor Grok 4.6 High\x1b[0m\n"
+	if composerInputForeign(idle) {
+		t.Fatal("post-turn cursor placeholder with a caret must not block paste (muxa#141)")
+	}
+}
+
+// The busy row keeps its stop hint, so the caret exemption must not free it.
+func TestComposerInputForeignCursorCaretBusy(t *testing.T) {
+	busy := " \x1b[38;2;242;242;242m▄▄▄▄▄\x1b[39m\n" +
+		" \x1b[48;2;242;242;242m \x1b[2m→ \x1b[0;7m\x1b[48;2;242;242;242mA\x1b[0;2m\x1b[48;2;242;242;242mdd a follow-up      \x1b[2mctrl+c to stop\x1b[0m\x1b[48;2;242;242;242m \x1b[49m\n" +
+		" \x1b[38;2;242;242;242m▀▀▀▀▀\x1b[39m\n"
+	if !composerInputForeign(busy) {
+		t.Fatal("busy cursor composer must still block paste")
+	}
+}
+
+// Typing keeps the caret one cell wide, so the muxa#141 exemption cannot
+// swallow the operator text the muxa#139 scan exists to see.
+func TestComposerInputForeignCursorTypingWithCaret(t *testing.T) {
+	typing := " \x1b[38;2;38;38;38m▄▄▄▄▄\x1b[39m\n" +
+		" \x1b[48;2;38;38;38m \x1b[2m→ Plan, search, build anything\x1b[0mHUMANTYPING\x1b[0;7m \x1b[0m\n" +
+		" \x1b[38;2;38;38;38m▀▀▀▀▀\x1b[39m\n"
+	if !composerInputForeign(typing) {
+		t.Fatal("operator text beside a caret must still block paste (muxa#139)")
+	}
+}
+
+// A reverse run wider than one cell is content — a highlighted selection, a
+// mouse-mode marker — not a caret, so it keeps blocking paste.
+func TestComposerRowHasNonFaintTextReverseRunIsContent(t *testing.T) {
+	caret := "\x1b[48;2;38;38;38m \x1b[2m→ \x1b[0;7mP\x1b[0;2mlan\x1b[0m"
+	if composerRowHasNonFaintText(caret) {
+		t.Fatal("one reverse cell is a caret")
+	}
+	selected := "\x1b[48;2;38;38;38m \x1b[2m→ \x1b[0;7mPICKED\x1b[0;2m\x1b[0m"
+	if !composerRowHasNonFaintText(selected) {
+		t.Fatal("a multi-cell reverse run is content, not a caret")
+	}
+}
+
+// SGR 27 ends reverse without a full reset, so the cell after it is judged on
+// faint alone.
+func TestComposerRowHasNonFaintTextReverseOffRestoresScan(t *testing.T) {
+	row := "\x1b[2m→ \x1b[7mP\x1b[27mlan\x1b[0m"
+	if composerRowHasNonFaintText(row) {
+		t.Fatal("reverse off must leave the surrounding faint text faint")
+	}
+	typed := "\x1b[2m→ \x1b[7mP\x1b[27;22mlan\x1b[0m"
+	if !composerRowHasNonFaintText(typed) {
+		t.Fatal("SGR 22 after the caret exposes non-faint text")
+	}
+}
+
 func TestComposerRowHasNonFaintTextIdlePlaceholder(t *testing.T) {
 	idle := "\x1b[48;2;38;38;38m  \x1b[2m→ Add a follow-up                              \x1b[49m"
 	if composerRowHasNonFaintText(idle) {

@@ -989,6 +989,33 @@ func TestMailHoldsCursorParentComposerTyping(t *testing.T) {
 	}
 }
 
+// muxa#141: a cold cursor worker draws a reverse-video caret on the first
+// character of its placeholder, and SGR 7 arrives with a reset that clears
+// faint. Reading that cell as typed text held every dispatch at
+// last_gate=foreign-composer with attempts=0 until the deadline, so a freshly
+// spawned cursor worker never received its brief.
+func TestDispatchPastesIntoColdCursorComposerCaret(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	cold := "\n\n  Cursor Agent\n" +
+		" \x1b[38;2;38;38;38m▄▄▄▄▄\x1b[39m\n" +
+		" \x1b[48;2;38;38;38m \x1b[2m→ \x1b[0;7m\x1b[48;2;38;38;38mP\x1b[0;2m\x1b[48;2;38;38;38mlan, search, build anything\x1b[0m\x1b[48;2;38;38;38m   \x1b[49m\n" +
+		" \x1b[38;2;38;38;38m▀▀▀▀▀\x1b[39m\n" +
+		"  \x1b[2mComposer 2.5 Fast\x1b[0m\n"
+	// Cursor leaves the hardware cursor on the blank row below its footer
+	// (the muxa#44/#79 hole two-signal accepts), so the composer gate is the
+	// only thing standing between this pane and the brief.
+	f := &fakeTMUX{captures: []string{cold, cold}, kind: "cursor", parkCursor: "7 0"}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	text := formatOne("parent", "", "BRIEF")
+	_ = q.Put(&Msg{ID: "m141", Pane: "%1", From: "parent", To: "worker", Text: text, DeadlineUnix: 1600, Kind: "dispatch", ParentPane: "%0"})
+	d.Tick()
+	if f.injectCount() != 1 {
+		t.Fatalf("dispatch must paste into an empty cold cursor composer, injects=%d", f.injectCount())
+	}
+}
+
 // muxa#127: a mid-turn Claude Code pane accepts a paste into its own input
 // queue and echoes nothing — the payload is absent from Snapshot and from
 // CaptureHistory, the composer row is empty, and the pane is not drawing.

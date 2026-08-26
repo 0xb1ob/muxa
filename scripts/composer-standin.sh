@@ -23,10 +23,12 @@ bot=$'\033[38;2;38;38;38m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀�
 frame() {
   local row log out
   case "$1" in
-  busy)  row=$'\033[48;2;38;38;38m \033[2m→ Add a follow-up   ctrl+c to stop\033[0m' ;;
+  busy)  row=$'\033[48;2;38;38;38m \033[2m→ \033[0;7mA\033[0;2mdd a follow-up   ctrl+c to stop\033[0m' ;;
   typed) row=$'\033[48;2;38;38;38m HUMANTYPING\033[0m' ;;
   cursor-typed) row=$'\033[48;2;38;38;38m \033[2m→ Plan, search, build anything\033[0mHUMANTYPING\033[0m' ;;
-  *)     row=$'\033[48;2;38;38;38m \033[2m→ Plan, search, build anything\033[0m' ;;
+  # Cursor parks a reverse-video caret on the first placeholder character, and
+  # SGR 7 arrives with a reset that clears faint (muxa#141).
+  *)     row=$'\033[48;2;38;38;38m \033[2m→ \033[0;7mP\033[0;2mlan, search, build anything\033[0m' ;;
   esac
   log="$(cat "$COMPOSER_LOG" 2>/dev/null || true)"
   out=$'\033[H\033[2J'
