@@ -230,25 +230,49 @@ is how long a *dead* pane is retried before the message is failed; a live
 busy pane keeps its mail in `pending/` past that deadline. The broker MUST
 NOT timeout-fallback paste: two fallbacks into one busy composer overwrite
 each other, both get filed as `done/`, and the agent never sees the first.
-After a paste, confirmation has two snapshot outcomes. **delivered**
-(filed `done/`, never retried): the pane reacted — cursor row no longer
-empty/prompt, control-mode drawing, or an agent turn started (e.g. `ctrl+c
-to stop`). Collapsed `[Pasted text …]` with no turn start is
-**inconclusive** — wait one beat and re-check before filing. **inconclusive**: the pane stayed
-free (cursor row still empty/prompt, not drawing). A first brief
-(`Kind=dispatch`) whose `Inject` returned nil MUST NOT be retried when
-confirm is inconclusive — Cursor Agent parks the hardware cursor on a blank
-footer row, so "still free" is a false negative and a later Tick would
-re-run the job. File that brief `done/` (no third queue directory). Mail
-the parent only when confirm is **unsubmitted** — collapsed `[Pasted text …]`
-still visible and no agent turn started after one beat; that is positive
-evidence the brief did not submit. Generic inconclusive confirm MUST NOT
-mail the parent: it is anti-correlated with real failure (muxa#110).
-Later mail (`muxa send`) that stayed free remains
-**pending-safe-retry**. A pane that reacted MUST NOT be retried for dispatch;
-for mail, a reaction without the `[muxa] from=` envelope in the pane capture
-or history is **not delivered** — the message stays in `pending/` and may retry
-(muxa#116). The broker does not match dispatch payloads against pane captures.
+
+**At-most-once (muxa#129).** A successful `Inject` — `load-buffer`,
+`paste-buffer -p -d` and `send-keys Enter` all exiting 0 — is the delivery
+boundary. Past it the broker MUST file the message `done/` and MUST NOT
+paste that payload into that pane again, for **every** `@muxa_kind` and for
+both mail (`muxa send`) and first briefs (`Kind=dispatch`). No post-paste
+observation may cause a second paste.
+
+The one retryable failure is `Inject` itself returning an error: a tmux
+command exited non-zero, nothing was pasted, and there is nothing to
+duplicate. That path MUST be bounded — at most 3 attempts, backing off from
+500 ms and doubling — after which the message is filed `failed/`, and a
+dispatch additionally gets its parent a `[muxa] from=broker` failure turn.
+
+Why that direction. Whether a CLI *displays* pasted text is a rendering
+question, not a delivery question, and the broker can only infer it by
+scraping chrome it neither controls nor versions. The two error directions
+are not symmetric. **Loss is visible**: the reply never arrives, the parent
+notices, and it can resend deliberately. **Duplication is invisible** until
+someone notices doubled work, because a receiving agent cannot tell a
+duplicate envelope from a genuine repeat instruction — it does the job
+twice. muxa therefore resolves every inconclusive scrape to "delivered,
+unverified", never to "not delivered, try again". Genuine at-least-once
+would need a real acknowledgement channel — the receiving agent replying —
+not a screen scrape; that is the caller's concern, not the transport's.
+
+Post-paste confirmation survives as **logging confidence** only. The broker
+MUST still compute and record it, so an operator can tell these apart:
+
+| Confidence | What the broker saw after a successful `Inject` |
+| ---------- | ----------------------------------------------- |
+| **confirmed** | the pane reacted — cursor row no longer empty/prompt, control-mode drawing, or an agent turn started (e.g. `ctrl+c to stop`) — and, for mail, the `[muxa] from=` envelope is in the capture or history (muxa#116) |
+| **unverified** | anything else: the pane stayed free, the payload never appeared, `@muxa_kind` consumes paste without echoing it (muxa#127), or a collapsed `[Pasted text …]` was still visible with no turn started |
+
+The broker does not match dispatch payloads against pane captures; both
+outcomes file `done/` either way.
+
+The parent is mailed only when a **dispatch** confirm is **unsubmitted** —
+collapsed `[Pasted text …]` still visible and no agent turn started after
+one beat. That is positive evidence the brief did not submit. Generic
+inconclusive confirm MUST NOT mail the parent: it is anti-correlated with
+real failure (muxa#110). Mail has no parent pane to warn and enqueues
+nothing.
 
 Mail delivery matches only the `[muxa] from=` envelope marker. `delivered` is
 never recorded for an overwritten timeout paste. When the broker is down
@@ -256,17 +280,12 @@ or the binary is missing, `muxa send` exits non-zero and pastes nothing.
 
 **Consuming CLIs (muxa#127).** A `kind=claude` pane mid-turn takes a paste
 into its own input queue and echoes nothing: the payload is absent from the
-capture *and* from the history on a **successful** paste. For such a pane
-the absence of the payload — and the absence of the `[muxa] from=` envelope
-— is not evidence the paste missed, so after an `Inject` that returned nil
-the broker MUST file the message `done/` (**consumed**) rather than leave it
-queued. Retrying there double-delivers the envelope, and a receiving agent
-cannot tell a duplicate from a genuine repeat instruction. This deliberately
-trades rare silent loss for at-most-once delivery: when a paste into a
-`claude` pane genuinely fails after `paste-buffer` and `Enter` both returned
-0, the message is filed `done/` and is not resent. Kinds whose paste is
-visible keep pending-safe-retry. The rule is keyed on `@muxa_kind`, a roster
-fact; it does not model pane chrome.
+capture *and* from the history on a **successful** paste. muxa#128 made that
+one kind at-most-once. muxa#129 generalises it, because the broker cannot
+know which CLI, UI restyle or theme reproduces the same shape next. The kind
+is still read from `@muxa_kind`, a roster fact — it now names *why* a
+payload is invisible in the log instead of deciding whether to retry. It
+does not model pane chrome.
 
 An implementation MUST NOT paste into a pane that is dead or that is in
 copy-mode (`#{pane_in_mode}`). Copy-mode is a silent-loss mode:

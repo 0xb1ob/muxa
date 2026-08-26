@@ -320,7 +320,7 @@ case "$cap_sw_child" in
   *"$tok_sw"*) bad "swallowed-paste child never echoes the brief" "cap: $cap_sw_child" ;;
   *) ok "swallowed-paste child never echoes the brief" ;;
 esac
-n_sw_log="$(grep -c "payload not visible; will not retry" "$MUXA_BROKER_DIR/broker.log" 2>/dev/null || true)"
+n_sw_log="$(grep -cE "dspswallow.*unverified: payload not visible" "$MUXA_BROKER_DIR/broker.log" 2>/dev/null || true)"
 [ "${n_sw_log:-0}" -eq 1 ] && ok "swallowed-paste dispatch is not retried (one inject, filed done/)" \
   || bad "swallowed-paste dispatch is not retried (one inject, filed done/)" \
          "count=$n_sw_log log: $(tail -20 "$MUXA_BROKER_DIR/broker.log" 2>/dev/null)"
