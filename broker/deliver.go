@@ -513,14 +513,11 @@ func (d *Deliverer) confirm(pane string, m *Msg) confirmResult {
 	if err != nil {
 		return confirmMissed
 	}
-	if d.drawing(pane) {
-		return confirmPasted
-	}
 	if unsubmittedPasteVisible(snap.Capture) && !agentTurnStarted(snap.Capture) {
-		time.Sleep(d.T.Delay)
-		if d.drawing(pane) {
-			return confirmPasted
-		}
+		// muxa#126: mid-confirm keystrokes emit %output and change the
+		// capture; neither is proof the brief submitted. Wait for
+		// quiescence, then re-check the collapsed placeholder.
+		d.waitConfirmSettle(pane)
 		snap2, err2 := d.T.Snapshot(pane)
 		if err2 == nil {
 			snap = snap2
@@ -532,6 +529,9 @@ func (d *Deliverer) confirm(pane string, m *Msg) confirmResult {
 			return confirmUnsubmitted
 		}
 	}
+	if d.drawing(pane) {
+		return confirmPasted
+	}
 	if snap.Capture != "" && !emptyAtCursor(snap.Capture, snap.CursorY, snap.CursorX) {
 		return confirmPasted
 	}
@@ -539,6 +539,35 @@ func (d *Deliverer) confirm(pane string, m *Msg) confirmResult {
 		return confirmConsumed
 	}
 	return confirmMissed
+}
+
+// waitConfirmSettle sleeps one broker beat, then waits out any control-mode
+// drawing on the pane so a mid-confirm keystroke (muxa#126) does not get
+// mistaken for submission.
+func (d *Deliverer) waitConfirmSettle(pane string) {
+	delay := d.T.Delay
+	if delay <= 0 {
+		delay = time.Millisecond
+	}
+	time.Sleep(delay)
+	if d.Ctrl == nil || !d.Ctrl.Live() {
+		return
+	}
+	quiet := d.Ctrl.Quiet
+	if quiet <= 0 {
+		quiet = 250 * time.Millisecond
+	}
+	deadline := time.Now().Add(quiet + delay)
+	step := quiet / 4
+	if step <= 0 {
+		step = time.Millisecond
+	}
+	for time.Now().Before(deadline) {
+		if !d.drawing(pane) {
+			return
+		}
+		time.Sleep(step)
+	}
 }
 
 // paneConsumesPaste reports whether the target CLI takes pasted input into
