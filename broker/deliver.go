@@ -137,21 +137,17 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		}
 		return
 	}
-	free, gate, err := d.canPaste(m.Pane)
+	free, err := d.canPaste(m.Pane)
 	if err != nil {
 		d.noteDeliverErr(m, "free "+m.Pane, err)
 		free = false
-		gate = "not-free"
 	}
 	if m.isDispatch() && !d.sawDraw(m.Pane) {
 		// Cold CLI: empty capture is vacuously box-free, but nothing has painted yet.
 		free = false
-		if gate == "" {
-			gate = "not-free"
-		}
 	}
 	if !free {
-		d.holdOrFail(m, now, gate)
+		d.holdOrFail(m, now)
 		return
 	}
 	pre, err := d.T.Snapshot(m.Pane)
@@ -161,7 +157,7 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		// state. Treat it as "not free" so the deadline still applies and
 		// the error cannot log once per tick forever (muxa#124).
 		d.noteDeliverErr(m, "snapshot "+m.Pane, err)
-		d.holdOrFail(m, now, "not-free")
+		d.holdOrFail(m, now)
 		return
 	}
 	if composerInputForeign(pre.Capture) {
@@ -172,7 +168,7 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 				// not something to re-examine every tick (muxa#124).
 				d.failDispatchComposerForeign(m)
 			} else {
-				d.noteHeld(m, "composer-foreign", now)
+				d.noteHeld(m, now)
 			}
 		}
 		return
@@ -339,12 +335,12 @@ func (d *Deliverer) forget(id string) {
 // worker was never briefed. Every non-progress return in deliverOne routes
 // here or files the message, so no path loops without the deadline being
 // consulted (muxa#124).
-func (d *Deliverer) holdOrFail(m *Msg, now int64, gate string) {
+func (d *Deliverer) holdOrFail(m *Msg, now int64) {
 	if now < m.DeadlineUnix {
 		return
 	}
 	if !m.isDispatch() {
-		d.noteHeld(m, gate, now)
+		d.noteHeld(m, now)
 		return
 	}
 	if d.composerBlocked(m.Pane) {
@@ -408,10 +404,7 @@ func (d *Deliverer) notePaste(m *Msg) {
 	d.mu.Unlock()
 }
 
-func (d *Deliverer) noteHeld(m *Msg, gate string, now int64) {
-	if gate == "" {
-		gate = "not-free"
-	}
+func (d *Deliverer) noteHeld(m *Msg, now int64) {
 	d.mu.Lock()
 	if d.held[m.ID] {
 		d.mu.Unlock()
@@ -428,7 +421,7 @@ func (d *Deliverer) noteHeld(m *Msg, gate string, now int64) {
 			pane:     m.Pane,
 			ageSec:   age,
 			attempts: m.Attempts,
-			gate:     gate,
+			gate:     "not-free",
 		})
 	}
 	d.mu.Unlock()
@@ -595,40 +588,38 @@ func (d *Deliverer) sawDraw(pane string) bool {
 
 // canPaste is the single paste gate for both the poll loop and control-mode
 // silence. Free-detection is the broker's: drawing (%output inside the
-// quiet window) waits, and so does a pane two-signal rejects. When not free,
-// gate names the coarsest honest refusal reason available today; muxa#133
-// will replace the generic "not-free" with a named canPaste reason.
-func (d *Deliverer) canPaste(pane string) (bool, string, error) {
+// quiet window) waits, and so does a pane two-signal rejects.
+func (d *Deliverer) canPaste(pane string) (bool, error) {
 	if d.T.PaneDead(pane) {
-		return false, "dead", nil
+		return false, nil
 	}
 	if d.T.InMode(pane) {
-		return false, "in-mode", nil
+		return false, nil
 	}
 	if d.drawing(pane) {
-		return false, "drawing", nil
+		return false, nil
 	}
 	two, empty, first, err := d.observe(pane)
 	if err != nil {
-		return false, "not-free", err
+		return false, err
 	}
 	if first {
 		// No frame pair yet. Control-mode silence already passed (not
 		// drawing); empty-at-cursor is the remaining two-signal half.
 		// Without it a first tick would paste over shell typing.
 		if !empty {
-			return false, "not-free", nil
+			return false, nil
 		}
 	} else if !two {
-		return false, "not-free", nil
+		return false, nil
 	}
 	d.mu.Lock()
 	cur := d.prev[pane]
 	d.mu.Unlock()
 	if composerInputForeign(cur) {
-		return false, "composer-foreign", nil
+		return false, nil
 	}
-	return true, "", nil
+	return true, nil
 }
 
 func (d *Deliverer) drawing(pane string) bool {

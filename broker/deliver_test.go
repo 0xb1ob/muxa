@@ -289,8 +289,8 @@ func TestHeldPastDeadlineNotifiesSender(t *testing.T) {
 	if !strings.Contains(alert.Text, "attempts=0") {
 		t.Fatalf("alert missing attempts: %s", alert.Text)
 	}
-	if !strings.Contains(alert.Text, "gate=") {
-		t.Fatalf("alert missing gate: %s", alert.Text)
+	if !strings.Contains(alert.Text, "gate=not-free") {
+		t.Fatalf("alert gate should be not-free: %s", alert.Text)
 	}
 
 	f.mu.Lock()
