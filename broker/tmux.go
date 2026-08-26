@@ -169,6 +169,18 @@ func (t *TMUX) SetPaneOpt(pane, key, val string) error {
 	return err
 }
 
+// RegisterMuxaPane sets all spawn/register pane options in one tmux
+// invocation so list-panes never sees a live child with an empty @muxa_name.
+func (t *TMUX) RegisterMuxaPane(pane, name, id, parent, kind string) error {
+	_, err := t.Run([]string{
+		"set-option", "-p", "-t", pane, "@muxa_name", name, ";",
+		"set-option", "-p", "-t", pane, "@muxa_id", id, ";",
+		"set-option", "-p", "-t", pane, "@muxa_parent", parent, ";",
+		"set-option", "-p", "-t", pane, "@muxa_kind", kind,
+	}, nil)
+	return err
+}
+
 func (t *TMUX) UnsetPaneOpt(pane, key string) {
 	_, _ = t.Run([]string{"set-option", "-p", "-t", pane, "-u", key}, nil)
 }

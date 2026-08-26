@@ -71,11 +71,12 @@ func TestParseRosterLines(t *testing.T) {
 		"%1||bob||abc||||generic||muxa:0.0||/tmp||sleep",
 		"%2||alice||def||bob||generic||muxa:0.1||/tmp/acme-\"quote\"\\slash||cat",
 		"%3||||||||",
+		"%4|| ||liveid||parent||generic||muxa:0.2||/work||sleep",
 		"",
 	}, "\n")
 	rows := parseRosterLines(out)
-	if len(rows) != 2 {
-		t.Fatalf("len=%d want 2", len(rows))
+	if len(rows) != 3 {
+		t.Fatalf("len=%d want 3", len(rows))
 	}
 	if rows[0].Name != "bob" || rows[0].Parent != "" || rows[0].Kind != "generic" {
 		t.Fatalf("bob: %+v", rows[0])
@@ -83,9 +84,41 @@ func TestParseRosterLines(t *testing.T) {
 	if rows[1].Name != "alice" || rows[1].Parent != "bob" || rows[1].Cwd != `/tmp/acme-"quote"\slash` {
 		t.Fatalf("alice: %+v", rows[1])
 	}
+	if rows[2].Name != "pending-liveid" || rows[2].Parent != "parent" || rows[2].Cwd != "/work" {
+		t.Fatalf("pending worker: %+v", rows[2])
+	}
 	if _, ok := findPaneByName(rows, "bob"); !ok {
 		t.Fatal("bob missing from roster")
 	}
+	if _, ok := findPaneByName(rows, "pending-liveid"); !ok {
+		t.Fatal("pending worker missing from roster")
+	}
+}
+
+func TestLiveWorkersOnCwd(t *testing.T) {
+	dir := t.TempDir()
+	rows := []rosterEntry{
+		{Name: "alice", Parent: "bob", Kind: "generic", Cwd: dir, Cmd: "sleep", Pane: "%1"},
+		{Name: "pending-deadbeef", Parent: "bob", Kind: "generic", Cwd: dir, Cmd: "sleep", Pane: "%2", ID: "deadbeef"},
+		{Name: "ghost", Parent: "bob", Kind: "cursor", Cwd: dir, Cmd: "zsh", Pane: "%3"},
+	}
+	want := mustAbsDir(t, dir)
+	names := liveWorkersOnCwd(rows, want)
+	if len(names) != 2 {
+		t.Fatalf("got %v want 2 live workers", names)
+	}
+	if names[0] != "alice" || names[1] != "pending-deadbeef" {
+		t.Fatalf("got %v", names)
+	}
+}
+
+func mustAbsDir(t *testing.T, p string) string {
+	t.Helper()
+	abs, err := absDir(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return abs
 }
 
 func TestCanSend(t *testing.T) {

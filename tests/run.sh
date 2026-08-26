@@ -529,6 +529,25 @@ case "$occ_err" in
   *) ok "sibling worktree does not warn" ;;
 esac
 
+# --- muxa#121: who lists a worker before @muxa_name is set ---
+pending_dir="$tmpdir/pending-name"
+mkdir -p "$pending_dir"
+tmux -L "$SOCK" new-window -d -t muxa -n pendingname -c "$pending_dir" "exec sleep 3600"
+sleep 0.2
+pending_pane="$(tmux -L "$SOCK" list-panes -t muxa:pendingname -F '#{pane_id}' | head -1)"
+tmux -L "$SOCK" set-option -p -t "$pending_pane" @muxa_id pending121abc
+tmux -L "$SOCK" set-option -p -t "$pending_pane" @muxa_parent bob
+tmux -L "$SOCK" set-option -p -t "$pending_pane" @muxa_kind generic
+whoj_pending="$(muxa_as "$bob_pane" who --json)"
+if who_json_get "$whoj_pending" pending-pending121abc cwd >/dev/null 2>&1; then
+  ok "who --json lists a worker with @muxa_id but no @muxa_name"
+else
+  bad "who --json lists a worker with @muxa_id but no @muxa_name" "json=$whoj_pending"
+fi
+occ_spawn "$tmpdir/pending-warn.err" --cwd "$pending_dir" --name pending-after -- sleep 3600
+assert_contains "$occ_err" "already has live worker pending-pending121abc" \
+  "spawn cwd warning names pending roster entry"
+
 # --- kind detection: cursor-agent node vs claude SessionStart ---
 who_kind_for() {
   local who="$1" name="$2" k

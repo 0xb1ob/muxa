@@ -237,18 +237,21 @@ parsed:
 				child, _ = t.SplitWindow("-v", largest, cwd, envcmd)
 			}
 		}
-		t.SelectLayout(winid, "tiled")
 		if child == "" {
 			return zero, die("spawn: tmux did not return a pane id")
 		}
+		if err := registerSpawnedPane(t, child, name, id, parent, kind); err != nil {
+			return zero, die(err.Error())
+		}
+		t.SelectLayout(winid, "tiled")
 	}
 	childWin, _ := t.fmt(child, "#{session_name}:#{window_index}")
 	t.SetWindowOption(childWin, "remain-on-exit", "on")
-	_ = t.SetPaneOpt(child, "@muxa_name", name)
-	_ = t.SetPaneOpt(child, "@muxa_id", id)
-	_ = t.SetPaneOpt(child, "@muxa_parent", parent)
-	_ = t.SetPaneOpt(child, "@muxa_kind", kind)
-	t.SetTitle(child, name)
+	if newWindow {
+		if err := registerSpawnedPane(t, child, name, id, parent, kind); err != nil {
+			return zero, die(err.Error())
+		}
+	}
 	// split-window/new-window select the child; restore parent focus (muxa#111).
 	t.SelectPane(pane)
 	return spawnResult{Name: name, ID: id, Pane: child, Cwd: cwd, Kind: kind, Parent: parent}, nil
@@ -275,6 +278,14 @@ func resolveSpawnCwd(t *TMUX, explicit, pane string) (string, error) {
 	return p, nil
 }
 
+func registerSpawnedPane(t *TMUX, child, name, id, parent, kind string) error {
+	if err := t.RegisterMuxaPane(child, name, id, parent, kind); err != nil {
+		return err
+	}
+	t.SetTitle(child, name)
+	return nil
+}
+
 func warnOccupiedSpawnCwd(t *TMUX, want string) {
 	wantReal, err := absDir(want)
 	if err != nil {
@@ -284,22 +295,7 @@ func warnOccupiedSpawnCwd(t *TMUX, want string) {
 	if err != nil {
 		return
 	}
-	var names []string
-	for _, r := range rows {
-		if r.Parent == "" || r.Cwd == "" {
-			continue
-		}
-		if paneStatus(r.Kind, r.Cwd, r.Cmd) != "live" {
-			continue
-		}
-		other, err := absDir(r.Cwd)
-		if err != nil || other != wantReal {
-			continue
-		}
-		if r.Name != "" {
-			names = append(names, r.Name)
-		}
-	}
+	names := liveWorkersOnCwd(rows, wantReal)
 	if len(names) == 0 {
 		return
 	}
