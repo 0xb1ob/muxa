@@ -27,11 +27,12 @@ type Deliverer struct {
 
 // heldLine is one stuck message included in a coalesced parent alert (muxa#125).
 type heldLine struct {
-	toAlias string
-	pane    string
-	ageSec  int64
+	toAlias  string
+	pane     string
+	ageSec   int64
 	attempts int
-	gate    string
+	refusals int
+	gate     string
 }
 
 // errNote is the last per-message delivery error the log has seen, plus how
@@ -121,7 +122,14 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 	// A pane that is dead or gone will not come back for this message.
 	// PaneDead now recognises a pane id tmux has forgotten, so this branch
 	// is reached instead of the free-check below (muxa#124).
-	if d.T.PaneDead(m.Pane) {
+	dead, err := d.T.PaneDead(m.Pane)
+	if err != nil {
+		d.noteDeliverErr(m, "pane_dead "+m.Pane, err)
+		d.recordRefusal(m, gateTmuxError)
+		d.holdOrFail(m, now)
+		return
+	}
+	if dead {
 		if now >= m.DeadlineUnix {
 			log.Printf("drop %s: pane %s dead after deadline", m.ID, m.Pane)
 			d.forget(m.ID)
@@ -137,16 +145,21 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		}
 		return
 	}
-	free, err := d.canPaste(m.Pane)
+	free, reason, err := d.canPaste(m.Pane)
 	if err != nil {
 		d.noteDeliverErr(m, "free "+m.Pane, err)
 		free = false
+		if reason == "" {
+			reason = gateTmuxError
+		}
 	}
 	if m.isDispatch() && !d.sawDraw(m.Pane) {
 		// Cold CLI: empty capture is vacuously box-free, but nothing has painted yet.
 		free = false
+		reason = gateNoDraw
 	}
 	if !free {
+		d.recordRefusal(m, reason)
 		d.holdOrFail(m, now)
 		return
 	}
@@ -157,10 +170,12 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		// state. Treat it as "not free" so the deadline still applies and
 		// the error cannot log once per tick forever (muxa#124).
 		d.noteDeliverErr(m, "snapshot "+m.Pane, err)
+		d.recordRefusal(m, gateTmuxError)
 		d.holdOrFail(m, now)
 		return
 	}
 	if composerInputForeign(pre.Capture) {
+		d.recordRefusal(m, gateForeignComposer)
 		if now >= m.DeadlineUnix {
 			if m.isDispatch() {
 				// The muxa#116 re-check caught foreign input the
@@ -421,7 +436,8 @@ func (d *Deliverer) noteHeld(m *Msg, now int64) {
 			pane:     m.Pane,
 			ageSec:   age,
 			attempts: m.Attempts,
-			gate:     "not-free",
+			refusals: m.Refusals,
+			gate:     gateOr(m.LastGate, gateTmuxError),
 		})
 	}
 	d.mu.Unlock()
@@ -472,8 +488,8 @@ func heldAlertText(lines []heldLine) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[muxa] from=broker\n%d %s have not been delivered and are past deadline:\n", n, word)
 	for _, ln := range lines {
-		fmt.Fprintf(&b, "  %-14s pane=%s  age=%s  attempts=%d  gate=%s\n",
-			ln.toAlias, ln.pane, formatHeldAge(ln.ageSec), ln.attempts, ln.gate)
+		fmt.Fprintf(&b, "  %-14s pane=%s  age=%s  attempts=%d  refusals=%d  gate=%s\n",
+			ln.toAlias, ln.pane, formatHeldAge(ln.ageSec), ln.attempts, ln.refusals, ln.gate)
 	}
 	b.WriteString("Inspect: muxa tail <name>.  Queue: muxa broker status.\n")
 	return b.String()
@@ -589,37 +605,46 @@ func (d *Deliverer) sawDraw(pane string) bool {
 // canPaste is the single paste gate for both the poll loop and control-mode
 // silence. Free-detection is the broker's: drawing (%output inside the
 // quiet window) waits, and so does a pane two-signal rejects.
-func (d *Deliverer) canPaste(pane string) (bool, error) {
-	if d.T.PaneDead(pane) {
-		return false, nil
+// reason names which gate refused when free is false (muxa#133).
+func (d *Deliverer) canPaste(pane string) (free bool, reason string, err error) {
+	dead, err := d.T.PaneDead(pane)
+	if err != nil {
+		return false, gateTmuxError, err
 	}
-	if d.T.InMode(pane) {
-		return false, nil
+	if dead {
+		return false, gatePaneDead, nil
+	}
+	inMode, err := d.T.InMode(pane)
+	if err != nil {
+		return false, gateTmuxError, err
+	}
+	if inMode {
+		return false, gateInMode, nil
 	}
 	if d.drawing(pane) {
-		return false, nil
+		return false, gateDrawing, nil
 	}
 	two, empty, first, err := d.observe(pane)
 	if err != nil {
-		return false, err
+		return false, gateTmuxError, err
 	}
 	if first {
 		// No frame pair yet. Control-mode silence already passed (not
 		// drawing); empty-at-cursor is the remaining two-signal half.
 		// Without it a first tick would paste over shell typing.
 		if !empty {
-			return false, nil
+			return false, gateTwoSignal, nil
 		}
 	} else if !two {
-		return false, nil
+		return false, gateTwoSignal, nil
 	}
 	d.mu.Lock()
 	cur := d.prev[pane]
 	d.mu.Unlock()
 	if composerInputForeign(cur) {
-		return false, nil
+		return false, gateForeignComposer, nil
 	}
-	return true, nil
+	return true, "", nil
 }
 
 func (d *Deliverer) drawing(pane string) bool {
@@ -628,10 +653,18 @@ func (d *Deliverer) drawing(pane string) bool {
 
 // observe runs free-detection (two-signal).
 func (d *Deliverer) observe(pane string) (twoFree, empty, first bool, err error) {
-	if d.T.PaneDead(pane) {
+	dead, err := d.T.PaneDead(pane)
+	if err != nil {
+		return false, false, false, err
+	}
+	if dead {
 		return false, false, false, nil
 	}
-	if d.T.InMode(pane) {
+	inMode, err := d.T.InMode(pane)
+	if err != nil {
+		return false, false, false, err
+	}
+	if inMode {
 		return false, false, false, nil
 	}
 	snap, err := d.T.Snapshot(pane)
@@ -783,5 +816,47 @@ func (d *Deliverer) pasteIDs() []string {
 	defer d.mu.Unlock()
 	out := make([]string, len(d.pastes))
 	copy(out, d.pastes)
+	return out
+}
+
+// recordRefusal counts a gate check that refused to paste and persists the
+// named reason on the message (muxa#133). Distinct from Attempts, which
+// counts Inject calls only.
+func (d *Deliverer) recordRefusal(m *Msg, reason string) {
+	if reason == "" {
+		return
+	}
+	m.Refusals++
+	m.LastGate = reason
+	_ = d.Q.Save(m)
+}
+
+// HeldEntries lists pending messages the broker last refused to paste,
+// for muxa broker status (muxa#133).
+func (d *Deliverer) HeldEntries() []HeldEntry {
+	msgs, err := d.Q.Pending()
+	if err != nil {
+		return nil
+	}
+	now := d.now().Unix()
+	var out []HeldEntry
+	for _, m := range msgs {
+		if m.LastGate == "" {
+			continue
+		}
+		age := now - m.EnqueuedUnix
+		if age < 0 {
+			age = 0
+		}
+		out = append(out, HeldEntry{
+			ID:       m.ID,
+			To:       m.To,
+			Pane:     m.Pane,
+			AgeSec:   age,
+			Reason:   m.LastGate,
+			Refusals: m.Refusals,
+			Attempts: m.Attempts,
+		})
+	}
 	return out
 }

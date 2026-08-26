@@ -72,7 +72,11 @@ func TestPaneDeadClosedPaneID(t *testing.T) {
 	if closed == "" {
 		t.Fatal("no pane id from split-window")
 	}
-	if tm.PaneDead(closed) {
+	dead, err := tm.PaneDead(closed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dead {
 		t.Fatalf("live pane %s reported dead", closed)
 	}
 	if err := tm.KillPane(closed); err != nil {
@@ -88,11 +92,19 @@ func TestPaneDeadClosedPaneID(t *testing.T) {
 	if _, err := tm.Capture(closed); err == nil {
 		t.Fatalf("pane %s still capturable after kill-pane", closed)
 	}
-	if !tm.PaneDead(closed) {
+	dead, err = tm.PaneDead(closed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dead {
 		v, err := tm.fmt(closed, "#{pane_dead}")
 		t.Fatalf("closed pane %s not reported dead (pane_dead=%q err=%v)", closed, v, err)
 	}
-	if tm.PaneDead("%0") {
+	dead, err = tm.PaneDead("%0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dead {
 		t.Fatal("surviving pane %0 reported dead")
 	}
 }
@@ -101,10 +113,18 @@ func TestPaneDeadClosedPaneID(t *testing.T) {
 // gone, not a pane that is alive.
 func TestPaneDeadEmptyFormatIsGone(t *testing.T) {
 	f := &fakeTMUX{gone: true}
-	if !testTMUX(f).PaneDead("%1") {
+	dead, err := testTMUX(f).PaneDead("%1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dead {
 		t.Fatal("empty #{pane_dead} read as alive")
 	}
-	if testTMUX(&fakeTMUX{}).PaneDead("%1") {
+	dead, err = testTMUX(&fakeTMUX{}).PaneDead("%1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dead {
 		t.Fatal("live pane read as dead")
 	}
 }
