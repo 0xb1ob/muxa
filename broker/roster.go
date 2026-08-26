@@ -97,6 +97,31 @@ func loadRoster(t *TMUX) ([]rosterEntry, error) {
 	return parseRosterLines(out), nil
 }
 
+func isMuxaPane(name, id, parent, kind string) bool {
+	if name != "" {
+		return true
+	}
+	return id != "" || parent != "" || kind != ""
+}
+
+func rosterPendingName(pane, id string) string {
+	if id != "" {
+		return "pending-" + id
+	}
+	suffix := strings.TrimPrefix(pane, "%")
+	if suffix == "" {
+		suffix = pane
+	}
+	return "pending-" + suffix
+}
+
+func rosterDisplayName(r rosterEntry) string {
+	if r.Name != "" {
+		return r.Name
+	}
+	return rosterPendingName(r.Pane, r.ID)
+}
+
 func parseRosterLines(out string) []rosterEntry {
 	var rows []rosterEntry
 	for _, line := range strings.Split(out, "\n") {
@@ -107,15 +132,37 @@ func parseRosterLines(out string) []rosterEntry {
 		for len(p) < 8 {
 			p = append(p, "")
 		}
-		if p[1] == "" {
-			continue
+		name := strings.TrimSpace(p[1])
+		if name == "" {
+			if !isMuxaPane("", p[2], p[3], p[4]) {
+				continue
+			}
+			name = rosterPendingName(p[0], p[2])
 		}
 		rows = append(rows, rosterEntry{
-			Pane: p[0], Name: p[1], ID: p[2], Parent: p[3], Kind: p[4],
+			Pane: p[0], Name: name, ID: p[2], Parent: p[3], Kind: p[4],
 			Where: p[5], Cwd: p[6], Cmd: p[7],
 		})
 	}
 	return rows
+}
+
+func liveWorkersOnCwd(rows []rosterEntry, wantReal string) []string {
+	var names []string
+	for _, r := range rows {
+		if r.Parent == "" || r.Cwd == "" {
+			continue
+		}
+		if paneStatus(r.Kind, r.Cwd, r.Cmd) != "live" {
+			continue
+		}
+		other, err := absDir(r.Cwd)
+		if err != nil || other != wantReal {
+			continue
+		}
+		names = append(names, rosterDisplayName(r))
+	}
+	return names
 }
 
 func findPaneByName(rows []rosterEntry, name string) (string, bool) {

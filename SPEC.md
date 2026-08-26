@@ -52,9 +52,13 @@ ids are not tracked). Default `muxa who` has no DELIVER column.
 
 `who --json` reads tmux pane options and encodes JSON in-process. It does
 not talk to the broker daemon and does not need a second binary. Occupancy
-checks consume `cwd` and `state` from that JSON. `busy` still consults the
-daemon's drawing list when the socket is up, and treats a down broker as
-not-drawing (idle, unless ghost).
+checks consume `cwd` and `state` from that JSON, and spawn/dispatch cwd
+warnings use the same `loadRoster` path — they MUST agree on which live
+workers occupy a path. A pane with `@muxa_parent` or `@muxa_id` but no
+`@muxa_name` yet still appears as `pending-<id>` (muxa#121). Spawn sets all
+registration options in one tmux command before layout or focus changes.
+`busy` still consults the daemon's drawing list when the socket is up, and
+treats a down broker as not-drawing (idle, unless ghost).
 
 `muxa tail NAME [-n N]` is a one-shot pane read so a parent never has to
 call `tmux capture-pane`. With no `-n` it prints the visible grid; `-n N`
