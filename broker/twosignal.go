@@ -15,8 +15,11 @@ type Snapshot struct {
 // TwoSignalFree reports whether a pane looks free from what it *does*, not
 // what its chrome looks like:
 //
-//  1. Quiescence — this capture equals the previous poll. A busy agent
-//     animates (spinner, timer, token count); an idle one is static.
+//  1. Quiescence — this capture shows the same picture as the previous poll.
+//     A busy agent animates (spinner, timer, token count); an idle one is
+//     static. Caret blink is not animation: a one-cell reverse-video run is
+//     decoration, and comparing raw bytes made a blinking cursor-agent caret
+//     reset quiescence on nearly every poll (muxa#144).
 //  2. Empty at the hardware cursor — text left of cursor_x on cursor_y is
 //     empty or ends at a prompt marker. That is where a shell's typed input
 //     actually lands.
@@ -32,7 +35,7 @@ type Snapshot struct {
 // not "fix" the hole by re-entering chrome modelling here; agents must not
 // leave half-typed input in worker panes.
 func TwoSignalFree(prev, cur string, cursorY, cursorX int) bool {
-	if prev == "" || prev != cur {
+	if prev == "" || !sameFrame(prev, cur) {
 		return false
 	}
 	return emptyAtCursor(cur, cursorY, cursorX)
