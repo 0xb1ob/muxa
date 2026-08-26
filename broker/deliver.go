@@ -151,12 +151,22 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 	switch d.confirm(m.Pane, m) {
 	case confirmPasted:
 		if !m.isDispatch() && !d.mailLanded(m) {
+			// The envelope marker is the muxa#116 landing proof. A pane
+			// that consumes paste without echoing it cannot produce that
+			// proof mid-turn, and its absence must not mean retry
+			// (muxa#127).
+			if d.paneConsumesPaste(m.Pane) {
+				d.fileConsumed(m)
+				return
+			}
 			log.Printf("unconfirmed %s → %s id=%s (pane reacted but mail did not land; left queued)", m.From, m.To, m.ID)
 			return
 		}
 		d.notePaste(m)
 		log.Printf("delivered %s → %s id=%s", m.From, m.To, m.ID)
 		_ = d.Q.MarkDone(m)
+	case confirmConsumed:
+		d.fileConsumed(m)
 	case confirmUnsubmitted:
 		// Positive evidence: collapsed paste still visible and no agent turn
 		// started after one beat (muxa#111). File done/ (at-most-once) and
@@ -183,6 +193,18 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 		}
 		log.Printf("unconfirmed %s → %s id=%s (pane still free; left queued)", m.From, m.To, m.ID)
 	}
+}
+
+// fileConsumed files a paste into a consuming CLI as delivered (muxa#127).
+// Inject returned nil, so paste-buffer and Enter both reached the pane; the
+// payload is simply invisible because the CLI queued it. Filing done/ trades
+// rare silent loss for never double-delivering: a receiving agent cannot
+// tell a duplicate envelope from a genuine repeat instruction, and acting on
+// a worker report twice is worse than the parent noticing a missing reply.
+func (d *Deliverer) fileConsumed(m *Msg) {
+	d.notePaste(m)
+	log.Printf("consumed %s → %s id=%s (paste accepted by a pane that does not echo it; will not retry)", m.From, m.To, m.ID)
+	_ = d.Q.MarkDone(m)
 }
 
 func (d *Deliverer) notePaste(m *Msg) {
@@ -367,9 +389,10 @@ func visibleContent(capture string) bool {
 type confirmResult int
 
 const (
-	confirmMissed confirmResult = iota // inconclusive — still free; send may retry; dispatch files done/
-	confirmPasted                      // pane reacted; must not retry
-	confirmUnsubmitted                 // collapsed paste visible, no turn after wait
+	confirmMissed      confirmResult = iota // inconclusive — still free; send may retry; dispatch files done/
+	confirmPasted                           // pane reacted; must not retry
+	confirmUnsubmitted                      // collapsed paste visible, no turn after wait
+	confirmConsumed                         // paste accepted by a CLI that does not echo it; must not retry
 )
 
 // mailLanded reports whether a muxa send actually reached the target pane
@@ -426,7 +449,28 @@ func (d *Deliverer) confirm(pane string, m *Msg) confirmResult {
 	if snap.Capture != "" && !emptyAtCursor(snap.Capture, snap.CursorY, snap.CursorX) {
 		return confirmPasted
 	}
+	if d.paneConsumesPaste(pane) {
+		return confirmConsumed
+	}
 	return confirmMissed
+}
+
+// paneConsumesPaste reports whether the target CLI takes pasted input into
+// its own queue without echoing it. Claude Code does exactly that while a
+// turn is running: paste-buffer + Enter is accepted and queued, and nothing
+// about the payload reaches the capture until the turn ends. For such a
+// pane "payload not visible after a successful Inject" is not evidence the
+// paste missed, so no absence-of-evidence outcome may drive a retry — the
+// pane already has the message and a retry double-delivers it (muxa#127).
+//
+// This reads @muxa_kind, the roster fact `muxa who` prints. It is not
+// chrome modelling: nothing here inspects what the pane drew.
+func (d *Deliverer) paneConsumesPaste(pane string) bool {
+	k, err := d.T.fmt(pane, "#{@muxa_kind}")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(k) == "claude"
 }
 
 func (d *Deliverer) pasteIDs() []string {

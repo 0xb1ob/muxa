@@ -249,9 +249,24 @@ Later mail (`muxa send`) that stayed free remains
 for mail, a reaction without the `[muxa] from=` envelope in the pane capture
 or history is **not delivered** — the message stays in `pending/` and may retry
 (muxa#116). The broker does not match dispatch payloads against pane captures.
+
 Mail delivery matches only the `[muxa] from=` envelope marker. `delivered` is
 never recorded for an overwritten timeout paste. When the broker is down
 or the binary is missing, `muxa send` exits non-zero and pastes nothing.
+
+**Consuming CLIs (muxa#127).** A `kind=claude` pane mid-turn takes a paste
+into its own input queue and echoes nothing: the payload is absent from the
+capture *and* from the history on a **successful** paste. For such a pane
+the absence of the payload — and the absence of the `[muxa] from=` envelope
+— is not evidence the paste missed, so after an `Inject` that returned nil
+the broker MUST file the message `done/` (**consumed**) rather than leave it
+queued. Retrying there double-delivers the envelope, and a receiving agent
+cannot tell a duplicate from a genuine repeat instruction. This deliberately
+trades rare silent loss for at-most-once delivery: when a paste into a
+`claude` pane genuinely fails after `paste-buffer` and `Enter` both returned
+0, the message is filed `done/` and is not resent. Kinds whose paste is
+visible keep pending-safe-retry. The rule is keyed on `@muxa_kind`, a roster
+fact; it does not model pane chrome.
 
 An implementation MUST NOT paste into a pane that is dead or that is in
 copy-mode (`#{pane_in_mode}`). Copy-mode is a silent-loss mode:
