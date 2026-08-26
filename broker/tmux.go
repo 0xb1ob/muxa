@@ -73,14 +73,20 @@ func (t *TMUX) fmt(pane, format string) (string, error) {
 // free-check, where `capture-pane` failed on every poll tick: 22 MB of
 // `can't find pane` in eight hours and the message never expired
 // (muxa#124). tests/tmux-facts.sh pins the tmux behaviour.
-func (t *TMUX) PaneDead(pane string) bool {
+func (t *TMUX) PaneDead(pane string) (dead bool, err error) {
 	v, err := t.fmt(pane, "#{pane_dead}")
-	return err != nil || v == "" || v == "1"
+	if err != nil {
+		return false, err
+	}
+	return v == "" || v == "1", nil
 }
 
-func (t *TMUX) InMode(pane string) bool {
+func (t *TMUX) InMode(pane string) (inMode bool, err error) {
 	v, err := t.fmt(pane, "#{pane_in_mode}")
-	return err != nil || v == "1"
+	if err != nil {
+		return false, err
+	}
+	return v == "1", nil
 }
 
 // Capture reads the visible pane. -e keeps SGR attributes so empty-at-cursor
@@ -128,7 +134,7 @@ func (t *TMUX) SubmitEnter(pane string) error {
 	if _, err := t.Run([]string{"send-keys", "-t", pane, "Enter"}, nil); err != nil {
 		return fmt.Errorf("send-keys: %w", err)
 	}
-	if t.PaneDead(pane) {
+	if dead, _ := t.PaneDead(pane); dead {
 		return fmt.Errorf("pane %s died during enter", pane)
 	}
 	return nil

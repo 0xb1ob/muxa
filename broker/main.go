@@ -128,6 +128,7 @@ func runDaemon() {
 	s.Drawing = ctrl.DrawingPanes
 	d := NewDeliverer(q, t, poll)
 	d.Ctrl = ctrl
+	s.Held = d.HeldEntries
 	stop := make(chan struct{})
 	go d.Loop(stop)
 	go s.Serve()
@@ -230,11 +231,19 @@ func writePID(path string) error {
 
 func checkPaneVerdicts(pane string) error {
 	t := NewTMUX()
-	if t.PaneDead(pane) {
+	dead, err := t.PaneDead(pane)
+	if err != nil {
+		return fmt.Errorf("pane_dead: %w", err)
+	}
+	if dead {
 		fmt.Printf("pane=%s dead=1 two-signal=WAIT\n", pane)
 		return nil
 	}
-	if t.InMode(pane) {
+	inMode, err := t.InMode(pane)
+	if err != nil {
+		return fmt.Errorf("pane_in_mode: %w", err)
+	}
+	if inMode {
 		fmt.Printf("pane=%s in_mode=1 two-signal=WAIT\n", pane)
 		return nil
 	}

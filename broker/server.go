@@ -33,7 +33,8 @@ type Response struct {
 	Done    int      `json:"done,omitempty"`
 	Failed  int      `json:"failed,omitempty"`
 	Socket  string   `json:"socket,omitempty"`
-	Drawing []string `json:"drawing,omitempty"`
+	Drawing []string     `json:"drawing,omitempty"`
+	Held    []HeldEntry  `json:"held,omitempty"`
 }
 
 type Server struct {
@@ -41,6 +42,7 @@ type Server struct {
 	Q        *Queue
 	Deadline time.Duration
 	Drawing  func() []string
+	Held     func() []HeldEntry
 	ln       net.Listener
 }
 
@@ -121,6 +123,9 @@ func (s *Server) dispatch(req Request) Response {
 		resp := Response{OK: true, PID: os.Getpid(), Queued: p, Done: d, Failed: f, Socket: s.Sock}
 		if s.Drawing != nil {
 			resp.Drawing = s.Drawing()
+		}
+		if s.Held != nil {
+			resp.Held = s.Held()
 		}
 		return resp
 	case "enqueue":

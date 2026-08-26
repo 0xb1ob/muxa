@@ -16,6 +16,7 @@ type fakeTMUX struct {
 	mu              sync.Mutex
 	dead            bool
 	gone            bool     // pane id no longer exists (muxa#124)
+	fmtErr          pasteErr // if set, display-message keeps failing (muxa#133)
 	roster          []rosterEntry
 	capErr          pasteErr // if set, capture-pane keeps failing
 	mode            bool
@@ -53,6 +54,9 @@ func (f *fakeTMUX) runner(args []string, stdin []byte) (string, error) {
 		}
 		return strings.Join(lines, "\n"), nil
 	case "display-message":
+		if f.fmtErr != "" {
+			return "", f.fmtErr
+		}
 		if f.gone {
 			// Real tmux resolves display-message with no pane in scope,
 			// exits 0, and expands every pane format to empty (muxa#124).
@@ -289,8 +293,14 @@ func TestHeldPastDeadlineNotifiesSender(t *testing.T) {
 	if !strings.Contains(alert.Text, "attempts=0") {
 		t.Fatalf("alert missing attempts: %s", alert.Text)
 	}
-	if !strings.Contains(alert.Text, "gate=not-free") {
-		t.Fatalf("alert gate should be not-free: %s", alert.Text)
+	if !strings.Contains(alert.Text, "refusals=") {
+		t.Fatalf("alert missing refusals: %s", alert.Text)
+	}
+	if strings.Contains(alert.Text, "gate=not-free") {
+		t.Fatalf("alert still uses placeholder gate: %s", alert.Text)
+	}
+	if !strings.Contains(alert.Text, "gate=") {
+		t.Fatalf("alert missing named gate: %s", alert.Text)
 	}
 
 	f.mu.Lock()

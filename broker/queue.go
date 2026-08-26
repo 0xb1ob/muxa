@@ -20,6 +20,8 @@ type Msg struct {
 	EnqueuedUnix int64  `json:"enqueued_unix"`
 	DeadlineUnix int64  `json:"deadline_unix"`
 	Attempts     int    `json:"attempts"`
+	Refusals     int    `json:"refusals,omitempty"`
+	LastGate     string `json:"last_gate,omitempty"`
 	Kind         string `json:"kind,omitempty"`
 	ParentPane   string `json:"parent_pane,omitempty"`
 }
