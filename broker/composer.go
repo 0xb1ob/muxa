@@ -382,6 +382,26 @@ func isComposerBorderBottom(line string) bool {
 	return hasBot
 }
 
+// pasteInComposer reports a collapsed paste placeholder sitting in the
+// *composer box*. unsubmittedPasteVisible matches the whole capture, which is
+// right for the one-beat confirm but wrong for a watch that outlives the
+// turn start: a submitted brief keeps its "[Pasted text …]" line on screen as
+// the user turn in the transcript, and judging that as unsubmitted would
+// reintroduce muxa#142 from the other end. Panes with no box fall back to the
+// whole capture, which is what muxa#111 shipped.
+func pasteInComposer(capture string) bool {
+	rows, ok := composerBoxRows(capture)
+	if !ok {
+		return unsubmittedPasteVisible(capture)
+	}
+	for _, row := range rows {
+		if strings.Contains(stripANSI(row), "[Pasted text") {
+			return true
+		}
+	}
+	return false
+}
+
 func unsubmittedPasteVisible(capture string) bool {
 	return strings.Contains(stripANSI(capture), "[Pasted text")
 }
