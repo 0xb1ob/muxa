@@ -9,7 +9,16 @@ import (
 
 // composerInputForeign reports whether an agent-CLI composer holds text the
 // broker did not put there. Two-signal is blind to in-box typing (muxa#79);
-// this is the dispatch safety gate for defect 3 in muxa#111.
+// this is the safety gate for defect 3 in muxa#111, and since muxa#147 it is
+// the only thing standing between a half-typed operator draft and a paste on
+// a Claude Code pane.
+//
+// Two composer shapes are recognised, because the CLIs draw different boxes:
+// Cursor Agent's half-block box (▄ … ▀) and Claude Code's rule box (── … ──).
+// Until muxa#147 only the half-block shape was, so every Claude pane — the
+// operator's own root pane included — fell through to the "[Pasted text"
+// substring, which sees a collapsed paste placeholder and nothing else. A
+// draft typed by hand was invisible to this gate.
 func composerInputForeign(capture string) bool {
 	if rows, ok := composerBoxRows(capture); ok {
 		for _, row := range rows {
@@ -19,7 +28,110 @@ func composerInputForeign(capture string) bool {
 		}
 		return false
 	}
+	if rows, ok := ruleComposerRows(capture); ok {
+		// A collapsed paste placeholder is checked whole-capture as well:
+		// the rule box is bounded by what Claude drew this frame, and an
+		// unsubmitted brief that scrolled out of it is still unsubmitted.
+		if unsubmittedPasteVisible(capture) {
+			return true
+		}
+		for _, row := range rows {
+			if ruleComposerRowForeign(row) {
+				return true
+			}
+		}
+		return false
+	}
 	return strings.Contains(stripANSI(capture), "[Pasted text")
+}
+
+// ruleComposerPrompt is the marker Claude Code paints at the head of its
+// composer's first row. It is what separates the composer's rule pair from
+// any other pair of horizontal rules an agent may have printed.
+const ruleComposerPrompt = "\u276f"
+
+// ruleComposerMaxRows bounds how tall a rule box may be and still be read as
+// a composer. Claude grows the box with the draft, but a pair of rules with
+// a whole screen between them is page chrome, not an input field.
+const ruleComposerMaxRows = 16
+
+// ruleComposerMinWidth is the shortest run of ─ taken for a composer rule.
+// Claude draws the rule across the full pane; a short one is table art.
+const ruleComposerMinWidth = 8
+
+// ruleComposerRows returns the content rows of a Claude Code composer: the
+// lines between the last pair of full-width ─ rules, when the first of them
+// opens with the ❯ prompt marker.
+//
+// Searching from the bottom is deliberate. The composer is the last thing
+// Claude draws above its cwd/model footer, and agent output above it may
+// contain rules of its own; the footer rows contain none.
+func ruleComposerRows(capture string) ([]string, bool) {
+	lines := strings.Split(capture, "\n")
+	bot := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if isComposerRule(lines[i]) {
+			bot = i
+			break
+		}
+	}
+	if bot <= 0 {
+		return nil, false
+	}
+	top := -1
+	for i := bot - 1; i >= 0 && bot-i <= ruleComposerMaxRows+1; i-- {
+		if isComposerRule(lines[i]) {
+			top = i
+			break
+		}
+	}
+	if top < 0 || bot-top < 2 {
+		return nil, false
+	}
+	rows := lines[top+1 : bot]
+	if !strings.HasPrefix(strings.TrimSpace(stripANSI(rows[0])), ruleComposerPrompt) {
+		return nil, false
+	}
+	return rows, true
+}
+
+// isComposerRule reports whether a line is one of the horizontal rules that
+// bound Claude Code's composer: only ─ and padding, and long enough not to be
+// a fragment of table or markdown art.
+func isComposerRule(line string) bool {
+	vis := strings.TrimSpace(string(visibleRunes(line)))
+	n := 0
+	for _, r := range vis {
+		switch r {
+		case '\u2500':
+			n++
+		case ' ', '\t':
+		default:
+			return false
+		}
+	}
+	return n >= ruleComposerMinWidth
+}
+
+// ruleComposerRowForeign reports whether one row of a Claude Code composer
+// holds text the broker did not put there.
+//
+// The faint discriminator composerRowForeign uses is a Cursor fact and does
+// not transfer: Claude dims its empty prompt with a 256-colour code (38;5;246)
+// and draws typed text in the default foreground (39), so both rows are
+// "non-faint" and reading them that way would refuse every paste into every
+// Claude pane. What separates them is content: with the ❯ stripped, an empty
+// composer has none.
+func ruleComposerRowForeign(row string) bool {
+	plain := strings.TrimSpace(stripANSI(row))
+	plain = strings.TrimSpace(strings.TrimPrefix(plain, ruleComposerPrompt))
+	if plain == "" {
+		return false
+	}
+	if strings.Contains(plain, "[Pasted text") {
+		return true
+	}
+	return !composerIdlePlaceholder(plain)
 }
 
 func composerRowForeign(row string) bool {

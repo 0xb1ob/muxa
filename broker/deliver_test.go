@@ -1291,3 +1291,142 @@ func doneAttempts(t *testing.T, dir, id string) int {
 	}
 	return m.Attempts
 }
+
+// claudeDraftPane and claudeIdlePane are the two frames muxa#147 turns on:
+// a Claude Code composer holding an operator draft, and the same composer
+// empty. Both are quiescent, and in both the hardware cursor is parked at
+// the head of the composer row — where it lands when the operator arrows or
+// Ctrl-A back into what they are typing. emptyAtCursor calls that row empty
+// (it ends at the ❯ prompt marker), so two-signal says free either way and
+// the composer gate is the only thing that can tell them apart.
+const claudeDraftRow = "\x1b[39m❯ please review the auth module and tell me"
+const claudeIdleRow = "\x1b[39m❯ "
+const claudeRuleLine = "\x1b[38;5;244m────────────────────────────────────────"
+
+func claudeFrame(row string) string {
+	return "  prior turn output\n\n" +
+		claudeRuleLine + "\n" + row + "\n" + claudeRuleLine + "\n" +
+		"\x1b[39m  ~/w/muxa (main) | Opus 5 | Context: 4.0%\x1b[39m\n"
+}
+
+// claudeCursorHome is "#{cursor_y} #{cursor_x}" for the composer row of
+// claudeFrame: line 3, two cells in, just past "❯ ".
+const claudeCursorHome = "3 2"
+
+// muxa#147, muxa send path. The operator is composing in their root pane;
+// a worker mails a result in. The draft must survive and the mail must stay
+// queued.
+func TestSendHoldsForClaudeComposerDraft(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	draft := claudeFrame(claudeDraftRow)
+	f := &fakeTMUX{captures: []string{draft, draft, draft, draft}, cursor: claudeCursorHome, kind: "claude"}
+	// The repro only means anything if two-signal would have let this
+	// through; assert that before asserting the gate catches it.
+	if !TwoSignalFree(draft, draft, 3, 2) {
+		t.Fatal("fixture no longer reproduces: two-signal already refuses this frame")
+	}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	_ = q.Put(&Msg{ID: "cd1", Pane: "%1", From: "worker", To: "root", Text: "TOKEN-DRAFT", DeadlineUnix: 2000})
+
+	for i := 0; i < 4; i++ {
+		d.Tick()
+	}
+	if f.injectCount() != 0 {
+		t.Fatalf("pasted over a claude composer draft: %q", f.lastInject())
+	}
+	pending, _ := q.Pending()
+	if len(pending) != 1 {
+		t.Fatalf("mail must stay queued, not drop: pending=%d", len(pending))
+	}
+	if pending[0].LastGate != gateForeignComposer {
+		t.Fatalf("gate=%q want %q", pending[0].LastGate, gateForeignComposer)
+	}
+}
+
+// The other half of the contract: once the draft is gone the same mail must
+// land. A gate that never reopens is a silent drop with extra steps.
+func TestSendDeliversOnceClaudeComposerClears(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	draft := claudeFrame(claudeDraftRow)
+	idle := claudeFrame(claudeIdleRow)
+	f := &fakeTMUX{captures: []string{draft, draft, idle, idle, idle}, cursor: claudeCursorHome, kind: "claude"}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	_ = q.Put(&Msg{ID: "cd2", Pane: "%1", From: "worker", To: "root", Text: "TOKEN-CLEARED", DeadlineUnix: 2000})
+
+	for i := 0; i < 5 && f.injectCount() == 0; i++ {
+		d.Tick()
+	}
+	if f.injectCount() != 1 {
+		t.Fatalf("want 1 paste after the draft cleared, got %d", f.injectCount())
+	}
+	if f.lastInject() != "TOKEN-CLEARED" {
+		t.Fatalf("payload=%q", f.lastInject())
+	}
+	if pending, _ := q.Pending(); len(pending) != 0 {
+		t.Fatalf("still pending: %+v", pending)
+	}
+}
+
+// muxa#147, dispatch path. The same gate already guarded first briefs — for
+// Cursor panes only. A Claude pane with foreign input must reach the same
+// "dispatch refused" outcome rather than clobbering the draft.
+func TestDispatchRefusedForClaudeComposerDraft(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	draft := claudeFrame(claudeDraftRow)
+	f := &fakeTMUX{captures: []string{draft}, cursor: claudeCursorHome, kind: "claude"}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	now := int64(1000)
+	d.now = func() time.Time { return time.Unix(now, 0) }
+	d.drew["%1"] = true
+	_ = q.Put(&Msg{ID: "cd3", Pane: "%1", From: "root", To: "worker", Text: "BRIEF", Kind: kindDispatch,
+		ParentPane: "%2", DeadlineUnix: 1005, EnqueuedUnix: 900})
+
+	d.Tick()
+	now = 1005
+	d.Tick()
+	if f.injectCount() != 0 {
+		t.Fatalf("pasted a brief over a claude composer draft: %q", f.lastInject())
+	}
+	pending, _ := q.Pending()
+	var notice *Msg
+	for _, m := range pending {
+		if m.From == "broker" {
+			notice = m
+		}
+		if m.ID == "cd3" {
+			t.Fatal("refused dispatch must not stay pending")
+		}
+	}
+	if notice == nil {
+		t.Fatal("want a dispatch-refused notice to the parent")
+	}
+	if !strings.Contains(notice.Text, "composer holds foreign input") {
+		t.Fatalf("notice text: %s", notice.Text)
+	}
+}
+
+// Do not regress worker delivery: an idle Claude worker must take its first
+// brief on the first free frame pair, with no extra gate in the way.
+func TestDispatchDeliversToIdleClaudeComposer(t *testing.T) {
+	dir := t.TempDir()
+	q, _ := OpenQueue(dir)
+	idle := claudeFrame(claudeIdleRow)
+	f := &fakeTMUX{captures: []string{idle, idle, idle}, cursor: claudeCursorHome, kind: "claude"}
+	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	d.now = func() time.Time { return time.Unix(1000, 0) }
+	d.drew["%1"] = true
+	_ = q.Put(&Msg{ID: "cd4", Pane: "%1", From: "root", To: "worker", Text: "BRIEF-IDLE", Kind: kindDispatch,
+		ParentPane: "%2", DeadlineUnix: 2000})
+
+	for i := 0; i < 3 && f.injectCount() == 0; i++ {
+		d.Tick()
+	}
+	if f.injectCount() != 1 {
+		t.Fatalf("idle claude composer must take the brief, injects=%d", f.injectCount())
+	}
+}

@@ -234,7 +234,7 @@ user-configurable, so no fixed prompt/status model can be correct:
    is the remaining half.
 
 **Composer-box gate (muxa#111).** Agent CLIs that draw a half-block composer
-box (Cursor, Claude, pi) expose typed or collapsed-paste input on the row
+box (Cursor, pi) expose typed or collapsed-paste input on the row
 between the `▄`/`▀` borders. The broker MUST treat non-placeholder content
 there as not free — including `[Pasted text …]` sitting unsubmitted — and
 MUST NOT paste a first brief over it. Past deadline, `Kind=dispatch` is
@@ -283,6 +283,36 @@ animates a spinner, an elapsed timer, a token count or a colour still WAITs.
 A caret that *moves* with no other change reads as quiescent; cursor motion is
 not output, and the composer gate above is what stands between a paste and
 half-typed input.
+
+**Rule-composer gate (muxa#147).** Claude Code does not draw a half-block
+box. Its composer is a `❯` prompt row between two full-width `─` rules,
+with cwd/model chrome below and no rules of its own. The half-block reader
+found no box on a Claude pane and the gate fell through to a whole-capture
+`[Pasted text` substring — which matches a collapsed paste and nothing else,
+so a draft typed by hand was invisible to it. Two-signal did not cover the
+gap: `❯` is a prompt marker, so as soon as the operator arrows or Ctrl-A
+back into what they are typing, empty-at-cursor reports the row empty with
+the whole draft still on screen, and a paused typist is quiescent. Mail then
+landed in the middle of the draft — on the operator's own root pane.
+
+The broker therefore MUST also recognise the rule shape: the content rows
+between the last pair of `─` rules in the capture, when the first of them
+opens with `❯`. Searching from the bottom is required — agent output above
+may print rules of its own — and the prompt marker is what separates the
+composer from a table or a markdown divider. Non-placeholder content on any
+of those rows, with the `❯` stripped, is foreign input and refuses the
+paste, for `muxa send` mail and `Kind=dispatch` briefs alike.
+
+The faint rule from muxa#139 MUST NOT be applied to this shape. Claude dims
+its empty prompt with a 256-colour code (`38;5;246`) and draws typed text in
+the default foreground (`39`); both are non-faint, so reading them that way
+would refuse every paste into every Claude pane. Content, not weight, is the
+discriminator here.
+
+This gate reads only what the pane drew. It does not depend on
+`focus-events`: muxa has no focus-events code path, and the banner naming
+that option belongs to Claude Code's own status line, not to muxa. Delivery
+behaviour MUST be identical with the option on and off.
 
 **Known sharp edge (muxa#44).** Two-signal, control-mode silence, and
 hardware cursor position are still blind to half-typed input that never
