@@ -557,6 +557,83 @@ muxa_as "$composer_pane" register --name composer --kind generic --parent parent
 muxa_as "$child_pane" register --name child --kind generic --parent parent >/dev/null
 sleep 0.3
 
+# --- K-claude: mail must not land in a Claude Code composer holding a draft
+# (muxa#147). Claude draws a rule-bordered composer, not Cursor's half-block
+# box, so the composer gate found no box on a Claude pane and fell through to
+# a "[Pasted text" substring check that a typed draft never matches. The
+# stand-in also parks the hardware cursor at the head of the prompt row, which
+# is what the operator's cursor does when they arrow back into what they are
+# typing — and what makes two-signal call the pane free with the draft still
+# on screen.
+#
+# Run under focus-events off and on. muxa has no focus-events code path; the
+# banner that names the option is Claude Code's own status line. The point of
+# running both is to pin that: the delivery predicate must not vary with it.
+claude_log="$HOME_ISO/claude-composer.log"
+claude_state="$HOME_ISO/claude-composer.state"
+: >"$claude_log"
+printf 'idle\n' >"$claude_state"
+claude_script="$HOME_ISO/claude-composer-standin.sh"
+cp "$ROOT/scripts/claude-composer-standin.sh" "$claude_script"
+chmod +x "$claude_script"
+claude_run="COMPOSER_LOG='$claude_log' COMPOSER_STATE='$claude_state' bash '$claude_script'"
+tmux -L "$SOCK" new-window -d -t muxa -n claude "$claude_run"
+sleep 0.5
+claude_pane="$(tmux -L "$SOCK" list-panes -t muxa:claude -F '#{pane_id}' | head -1)"
+muxa_as "$claude_pane" register --name claudeparent --kind claude --parent parent >/dev/null
+cap_k0="$(tmux -L "$SOCK" capture-pane -p -t "$claude_pane")"
+case "$cap_k0" in
+  *"─────"*"❯"*) ok "K claude pane painted its rule composer" ;;
+  *) bad "K claude pane painted its rule composer" "cap: $cap_k0" ;;
+esac
+
+claude_draft_case() {
+  local focus="$1" tok="BRK146${2}_$$" cap pos
+  tmux -L "$SOCK" set-option -g focus-events "$focus"
+  settle "$claude_pane"
+  printf 'draft\n' >"$claude_state"
+  sleep 0.8
+  settle "$claude_pane"
+  cap="$(tmux -L "$SOCK" capture-pane -p -t "$claude_pane" 2>/dev/null || true)"
+  case "$cap" in
+    *HUMANDRAFTING*) ok "K[$focus] claude composer shows the operator draft" ;;
+    *) bad "K[$focus] claude composer shows the operator draft" "cap: $cap" ;;
+  esac
+  # Precondition for the repro: the cursor sits just past "❯ ", so the two
+  # signals (quiescent + empty at cursor) both say free. If this drifts the
+  # case below would pass on two-signal and prove nothing.
+  pos="$(tmux -L "$SOCK" display-message -t "$claude_pane" -p '#{cursor_x}')"
+  [ "$pos" = 2 ] && ok "K[$focus] cursor parked at the prompt (two-signal sees free)" \
+    || bad "K[$focus] cursor parked at the prompt (two-signal sees free)" "cursor_x=$pos"
+  muxa_as "$parent_pane" send claudeparent "$tok" >/dev/null
+  sleep 1.5
+  cap="$(tmux -L "$SOCK" capture-pane -p -t "$claude_pane" 2>/dev/null || true)"
+  case "$cap" in
+    *"$tok"*) bad "K[$focus] mail does not paste over the claude draft" "cap: $cap" ;;
+    *HUMANDRAFTING*) ok "K[$focus] mail waits and the draft survives" ;;
+    *) bad "K[$focus] mail waits and the draft survives" "cap: $cap" ;;
+  esac
+  if find "$MUXA_BROKER_DIR/pending" -name '*.json' -print0 2>/dev/null \
+    | xargs -0 grep -l "$tok" >/dev/null 2>&1; then
+    ok "K[$focus] mail stays queued, not dropped"
+  else
+    bad "K[$focus] mail stays queued, not dropped" \
+      "pending: $(ls "$MUXA_BROKER_DIR/pending" 2>/dev/null || true)"
+  fi
+  printf 'idle\n' >"$claude_state"
+  cap="$(wait_capture "$claude_pane" "$tok" 80 || true)"
+  case "$cap" in
+    *"$tok"*) ok "K[$focus] mail delivers once the draft is cleared" ;;
+    *) bad "K[$focus] mail delivers once the draft is cleared" "cap: $cap" ;;
+  esac
+}
+
+claude_focus_saved="$(tmux -L "$SOCK" show-options -gv focus-events 2>/dev/null || echo off)"
+claude_draft_case off OFF
+claude_draft_case on ON
+tmux -L "$SOCK" set-option -g focus-events "$claude_focus_saved"
+sleep 0.3
+
 # --- G: the daemon outlives its starter's process group ---
 # The incident: nohup + disown left the broker in the caller's process group,
 # so the teardown at the end of the calling tool call killed it before its

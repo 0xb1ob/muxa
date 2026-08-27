@@ -13,6 +13,7 @@ bad() { fail=$((fail + 1)); printf 'not ok %s %s\n' "$((pass + fail))" "$1"; pri
 # Shell sources that must stay bash-3.2-safe (macOS /bin/bash is 3.2.57).
 scan=(
   "$ROOT/scripts/composer-standin.sh"
+  "$ROOT/scripts/claude-composer-standin.sh"
   "$ROOT/scripts/muxa-hook.sh"
   "$ROOT/scripts/version-ldflags.sh"
   "$ROOT/install.sh"
@@ -48,6 +49,8 @@ done
 
 standin="$ROOT/scripts/composer-standin.sh"
 [ -x "$standin" ] || chmod +x "$standin"
+claude_standin="$ROOT/scripts/claude-composer-standin.sh"
+[ -x "$claude_standin" ] || chmod +x "$claude_standin"
 
 # Runtime probe under stock /bin/bash when the host provides bash 3.x.
 if [ -x /bin/bash ]; then
@@ -59,16 +62,20 @@ if [ -x /bin/bash ]; then
     state="$probe_dir/composer.state"
     printf 'idle\n' >"$state"
     : >"$log"
-    COMPOSER_LOG="$log" COMPOSER_STATE="$state" /bin/bash "$standin" 2>"$err" &
-    probe_pid=$!
-    sleep 0.6
-    kill "$probe_pid" 2>/dev/null || true
-    wait "$probe_pid" 2>/dev/null || true
-    if [ -s "$err" ] && grep -qi 'invalid timeout specification' "$err"; then
-      bad "composer-standin silent under /bin/bash $bash_major" "$(head -3 "$err")"
-    else
-      ok "composer-standin silent under /bin/bash $bash_major"
-    fi
+    for probe in "$standin" "$claude_standin"; do
+      : >"$err"
+      : >"$log"
+      COMPOSER_LOG="$log" COMPOSER_STATE="$state" /bin/bash "$probe" 2>"$err" &
+      probe_pid=$!
+      sleep 0.6
+      kill "$probe_pid" 2>/dev/null || true
+      wait "$probe_pid" 2>/dev/null || true
+      if [ -s "$err" ] && grep -qi 'invalid timeout specification' "$err"; then
+        bad "$(basename "$probe") silent under /bin/bash $bash_major" "$(head -3 "$err")"
+      else
+        ok "$(basename "$probe") silent under /bin/bash $bash_major"
+      fi
+    done
     rm -rf "$probe_dir"
   else
     ok "runtime /bin/bash probe skipped (major=${bash_major:-unknown}, need <4)"
