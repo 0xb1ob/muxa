@@ -341,12 +341,33 @@ MUST still compute and record it, so an operator can tell these apart:
 The broker does not match dispatch payloads against pane captures; both
 outcomes file `done/` either way.
 
-The parent is mailed only when a **dispatch** confirm is **unsubmitted** —
-collapsed `[Pasted text …]` still visible and no agent turn started after
-one beat. That is positive evidence the brief did not submit. Generic
-inconclusive confirm MUST NOT mail the parent: it is anti-correlated with
-real failure (muxa#110). Mail has no parent pane to warn and enqueues
-nothing.
+After a **dispatch** paste the broker watches the child pane over seconds —
+not one frame — and mails the parent only on positive evidence the brief did
+not start (muxa#142). One snapshot cannot split a dropped brief from a slow
+boot in either direction: a CLI that keeps the collapsed `[Pasted text …]` on
+screen while it consumes read as "never submitted", and a pane still on its
+splash screen with an empty composer read as a healthy consuming CLI and was
+never reported at all. **Stillness** is the discriminator. A booting or
+working CLI animates; caret blink is not animation (muxa#144). The watch
+samples until one of:
+
+| The pane | Parent gets |
+| -------- | ----------- |
+| shows an agent turn | nothing |
+| is still animating when the budget runs out | nothing |
+| goes still with a collapsed `[Pasted text …]` **in the composer box** | `dispatch unsubmitted` |
+| goes still showing the same picture as *before* the paste, empty at the cursor, on a kind that echoes pasted text when idle | `dispatch unsubmitted … left no trace` |
+
+The last row is the never-delivered case, and it is the only place a kind
+fact (`@muxa_kind`, muxa#127) gates a notice: an idle Claude composer echoes
+a pasted brief and a busy one is visibly busy, so "idle and not one cell
+different from before the paste" means the payload never reached the
+application. On a kind with no such contract — a shell reading stdin with
+echo off — invisibility still means nothing. Generic inconclusive confirm
+MUST NOT mail the parent: it is anti-correlated with real failure
+(muxa#110). The watch runs off the delivery loop and cannot cause a paste;
+the brief is filed `done/` before it starts. Mail has no parent pane to warn
+and enqueues nothing.
 
 Mail delivery matches only the `[muxa] from=` envelope marker. `delivered` is
 never recorded for an overwritten timeout paste. When the broker is down
@@ -421,8 +442,9 @@ once. A CLI that never becomes ready produces a `[muxa] from=broker` turn
 in the parent; the brief is not pasted into the child. If the pane became
 ready and Inject ran but confirm stayed inconclusive (paste accepted, pane
 still looked free), the brief is filed `done/` as usual — at-most-once,
-never retried — with no parent turn. If confirm is **unsubmitted** (paste
-collapse visible, no agent turn after one beat), the parent gets a
+never retried — with no parent turn. If the start watch finds positive
+evidence the brief never started (collapse parked in a composer that stopped
+moving, or a pane the paste left no trace on), the parent gets a
 `[muxa] from=broker` turn saying so; envelope facts only, never the brief
 body. Silence after a never-ready or refused turn is the bug; inconclusive
 confirm is not a failure report. Brief on stdin or `--brief-file`, never a

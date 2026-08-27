@@ -15,14 +15,21 @@ type Deliverer struct {
 	Poll     time.Duration
 	now      func() time.Time
 	mu       sync.Mutex
-	inflight map[string]bool    // pane currently being injected
-	pastes   []string           // test hook: pane ids pasted, in order
-	prev     map[string]string  // last capture-pane per pane, for two-signal
-	held     map[string]bool    // already logged "holding past deadline"
+	inflight map[string]bool       // pane currently being injected
+	pastes   []string              // test hook: pane ids pasted, in order
+	prev     map[string]string     // last capture-pane per pane, for two-signal
+	held     map[string]bool       // already logged "holding past deadline"
 	heldNote map[string][]heldLine // batched held alerts keyed by sender alias
-	drew     map[string]bool    // pane has shown visible content (dispatch ready)
-	retryAt  map[string]int64   // msg id -> unix nanos before which a failed Inject is not retried
-	errs     map[string]errNote // msg id -> last delivery error logged, for rate limiting
+	drew     map[string]bool       // pane has shown visible content (dispatch ready)
+	retryAt  map[string]int64      // msg id -> unix nanos before which a failed Inject is not retried
+	errs     map[string]errNote    // msg id -> last delivery error logged, for rate limiting
+	watching map[string]bool       // pane has a dispatch start watch running (muxa#142)
+	watchers sync.WaitGroup        // joins those watches; test hook
+
+	// Dispatch start-watch timings (muxa#142); zero means the default.
+	StartStep   time.Duration // sampling interval
+	StartWindow time.Duration // total budget before the watch gives up
+	StartStable int           // consecutive identical frames that mean "still"
 }
 
 // heldLine is one stuck message included in a coalesced parent alert (muxa#125).
@@ -59,6 +66,7 @@ func NewDeliverer(q *Queue, t *TMUX, poll time.Duration) *Deliverer {
 		drew:     map[string]bool{},
 		retryAt:  map[string]int64{},
 		errs:     map[string]errNote{},
+		watching: map[string]bool{},
 	}
 }
 
@@ -214,12 +222,12 @@ func (d *Deliverer) deliverOne(m *Msg, now int64) {
 	// times (muxa#127).
 	res := d.confirm(m.Pane, m)
 	d.fileDelivered(m, d.confidence(m, res))
-	if res == confirmUnsubmitted && m.isDispatch() {
-		// Positive evidence that the brief did not submit: collapsed paste
-		// still visible and no agent turn after one beat (muxa#111). Tell
-		// the parent — unlike generic inconclusive confirm, this signal is
-		// not anti-correlated with healthy workers (muxa#110).
-		d.notifyUnsubmitted(m)
+	if m.isDispatch() {
+		// One post-paste snapshot cannot split "brief sat in the composer"
+		// from "brief consumed, CLI still booting" (muxa#142). Watch the
+		// pane over time instead, off the delivery loop, and let the parent
+		// notice fall out of what the pane did — not out of one frame.
+		d.watchDispatchStart(m, pre.Capture)
 	}
 }
 
@@ -566,10 +574,10 @@ func (d *Deliverer) composerBlocked(pane string) bool {
 	return composerInputForeign(cur)
 }
 
-// notifyUnsubmitted mails the parent when a dispatch brief was pasted but
-// confirm saw collapsed paste with no agent turn after one beat (muxa#111).
-// Generic inconclusive confirm does not notify — that signal was
-// anti-correlated with real failure (muxa#110).
+// notifyUnsubmitted mails the parent when the start watch found the collapsed
+// paste parked in the composer of a pane that had stopped moving (muxa#111,
+// re-evidenced in muxa#142). Generic inconclusive confirm does not notify —
+// that signal was anti-correlated with real failure (muxa#110).
 func (d *Deliverer) notifyUnsubmitted(m *Msg) {
 	if m.ParentPane == "" {
 		return
@@ -584,6 +592,34 @@ func (d *Deliverer) notifyUnsubmitted(m *Msg) {
 	if err := d.Q.Put(note); err != nil {
 		log.Printf("dispatch unsubmitted notify %s: %v", m.ID, err)
 	}
+}
+
+// notifyNoTrace mails the parent when the start watch found the child pane
+// showing the same still picture it showed before the paste (muxa#142). The
+// #111 notice cannot see this case — there is no collapse to see — and it was
+// the one that went unreported in the field: a worker parked on its splash
+// screen while its parent believed the brief had landed.
+func (d *Deliverer) notifyNoTrace(m *Msg) {
+	if m.ParentPane == "" {
+		return
+	}
+	note := &Msg{
+		Pane:         m.ParentPane,
+		From:         "broker",
+		To:           m.From,
+		Text:         dispatchNoTraceText(m),
+		DeadlineUnix: d.now().Add(24 * time.Hour).Unix(),
+	}
+	if err := d.Q.Put(note); err != nil {
+		log.Printf("dispatch no-trace notify %s: %v", m.ID, err)
+	}
+}
+
+func dispatchNoTraceText(m *Msg) string {
+	return "[muxa] from=broker\n" +
+		"dispatch unsubmitted: " + m.To + " pane=" + m.Pane + " brief left no trace: pane unchanged since before the paste, no turn started\n" +
+		"id=" + m.ID + "\n" +
+		"Do not reply.\n"
 }
 
 func dispatchUnsubmittedText(m *Msg) string {
