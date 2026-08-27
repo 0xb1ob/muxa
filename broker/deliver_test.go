@@ -677,12 +677,16 @@ func TestUnsubmittedPasteDispatchNotifiesParent(t *testing.T) {
 	q, _ := OpenQueue(dir)
 	f := &fakeTMUX{captures: []string{"ready>", "ready>", "[Pasted text #1 +79 lines]", "[Pasted text #1 +79 lines]"}, hideEcho: true}
 	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	fastWatch(d)
 	d.now = func() time.Time { return time.Unix(1000, 0) }
 	_ = q.Put(&Msg{
 		ID: "up1", Pane: "%1", From: "parent", To: "kid", Text: "BRIEF-BODY",
 		DeadlineUnix: 2000, Kind: kindDispatch, ParentPane: "%2",
 	})
 	d.Tick()
+	// The notice is decided by the start watch, off the delivery loop
+	// (muxa#142).
+	d.waitWatchers()
 	if f.injectCount() != 1 {
 		t.Fatalf("want 1 inject, got %d", f.injectCount())
 	}
@@ -730,6 +734,8 @@ func TestDispatchUnsubmittedNotifiesDespiteMidConfirmActivity(t *testing.T) {
 		hideEcho: true,
 	}
 	d := NewDeliverer(q, testTMUX(f), time.Millisecond)
+	fastWatch(d)
+	d.StartWindow = 2 * time.Second
 	d.T.Delay = 5 * time.Millisecond
 	h := NewControlHub(nil, 10*time.Millisecond)
 	h.setLive(true)
@@ -741,6 +747,7 @@ func TestDispatchUnsubmittedNotifiesDespiteMidConfirmActivity(t *testing.T) {
 		DeadlineUnix: 2000, Kind: kindDispatch, ParentPane: "%2",
 	})
 	d.Tick()
+	d.waitWatchers()
 	if f.injectCount() != 1 {
 		t.Fatalf("want 1 inject, got %d", f.injectCount())
 	}
